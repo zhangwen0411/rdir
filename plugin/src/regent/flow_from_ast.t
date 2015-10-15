@@ -627,8 +627,9 @@ local function strip_indexing(cx, region_type)
   local path = std.newtuple(unpack(cx.tree:ancestors(region_type)))
   local last_index = 0
   for index = 1, #path do
-    if cx.tree:has_region_index(path[index]) and
-      not cx.tree:region_index(path[index]):is(ast.typed.ExprConstant)
+    if cx.tree:is_point(path[index]) or
+      (cx.tree:has_region_index(path[index]) and
+         not cx.tree:region_index(path[index]):is(ast.typed.ExprConstant))
     then
       last_index = index
     end

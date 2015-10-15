@@ -33,6 +33,7 @@
 
 local ast = require("regent/ast")
 local flow = require("regent/flow")
+local flow_region_tree = require("regent/flow_region_tree")
 local std = require("regent/std")
 
 local context = {}
@@ -40,6 +41,7 @@ context.__index = context
 
 function context:new_graph_scope(graph)
   local cx = {
+    tree = graph.region_tree,
     graph = graph,
     ast = setmetatable({}, {__index = function(t, k) error("no ast for nid " .. tostring(k), 2) end}),
     region_ast = {},
@@ -50,6 +52,49 @@ end
 function context.new_global_scope()
   local cx = {}
   return setmetatable(cx, context)
+end
+
+local function WAR_edges(cx, edges)
+  return function(from_node, from_port, from_label, to_node, to_port, to_label, label)
+    if label:is(flow.edge.Write) then
+      if to_label:is(flow.node.Scalar) and to_label.fresh then
+        return
+      end
+
+      local symbol
+      if to_label.value:is(ast.typed.ExprID) then
+        symbol = to_label.value.value
+      end
+
+      local region = cx.tree:ensure_variable(to_label.value.expr_type, symbol)
+      for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
+        local other_label = cx.graph:node_label(other)
+        if other_label:is(flow.node.Region) and
+          cx.tree:can_alias(std.as_read(other_label.value.expr_type), region)
+        then
+          for _, reader in ipairs(cx.graph:immediate_successors(other)) do
+            if reader ~= from_node and
+              not cx.graph:reachable(reader, from_node) and
+              not cx.graph:reachable(from_node, reader)
+            then
+              edges:insert({ from_node = reader, to_node = from_node })
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+local function augment_happens_before_graph(cx)
+  local edges = terralib.newlist()
+  cx.graph:map_edges(WAR_edges(cx, edges))
+  for _, edge in ipairs(edges) do
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {},
+      edge.from_node, cx.graph:node_sync_port(edge.from_node),
+      edge.to_node, cx.graph:node_sync_port(edge.to_node))
+  end
 end
 
 local flow_to_ast = {}
@@ -256,8 +301,25 @@ function flow_to_ast.node_task(cx, nid)
     local read_nids = cx.graph:outgoing_use_set(result_nid)
     if #read_nids > 0 then
       assert(result.fresh)
-      cx.ast[nid] = action
-      return terralib.newlist()
+      -- FIXME: This causes unintended reordering of task calls in
+      -- some cases (because the stored AST may be looked up at a
+      -- later point, violating the constraints in the graph).
+      if false then
+        cx.ast[nid] = action
+        return terralib.newlist()
+      else
+        cx.ast[nid] = result.value
+        return terralib.newlist({
+          ast.typed.StatVar {
+            symbols = terralib.newlist({ result.value.value }),
+            types = terralib.newlist({ result.value.expr_type }),
+            values = terralib.newlist({
+                action
+            }),
+            span = action.span,
+          }
+        })
+      end
     end
   end
 
@@ -447,9 +509,11 @@ end
 
 function flow_to_ast.graph(cx, graph)
   assert(flow.is_graph(graph))
-  local cx = cx:new_graph_scope(graph)
+  local cx = cx:new_graph_scope(graph:copy())
 
-  local nodes = graph:toposort()
+  augment_happens_before_graph(cx)
+
+  local nodes = cx.graph:toposort()
   local stats = terralib.newlist()
   for _, node in ipairs(nodes) do
     local actions = flow_to_ast.node(cx, node)
