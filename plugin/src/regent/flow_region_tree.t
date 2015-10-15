@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -58,11 +63,6 @@ function flow_region_tree.new_region_tree(constraints, region_universe)
       region_indices = {},
       region_is_point = {},
       region_point_partitions = {},
-
-      -- Query cache.
-      cache_ancestors = {},
-      cache_children = {},
-      cache_siblings = {},
   }, region_tree)
 end
 
@@ -153,6 +153,8 @@ function region_tree:intern_region_expr(expr_type, span)
     return self:region_symbol(region_type)
   end
 
+  self.region_universe[region_type] = true
+
   local symbol = terralib.newsymbol(region_type)
   self.region_symbols[region_type] = symbol
   self.region_var_types[region_type] = expr_type
@@ -171,6 +173,7 @@ function region_tree:intern_region_point_expr(parent, index, span)
   local partition = self:point_partition(parent)
   local subregion
   if index then
+    assert(false) -- FIXME: This is currently broken.
     assert(terralib.issymbol(index.value))
     subregion = partition:subregion_constant(index.value)
   else
@@ -180,6 +183,8 @@ function region_tree:intern_region_point_expr(parent, index, span)
   if self:has_region_symbol(subregion) then
     return subregion
   end
+
+  self.region_universe[subregion] = true
 
   local symbol = terralib.newsymbol(subregion)
   self.region_symbols[subregion] = symbol
@@ -249,15 +254,9 @@ end
 
 function region_tree:ancestors(region_type)
   assert(flow_region_tree.is_region(region_type))
-  if rawget(self.cache_ancestors, region_type) then
-    return self.cache_ancestors[region_type]:map(function(x) return x end)
-  end
-
-  local path = search_constraint_paths(
+  return search_constraint_paths(
     self.constraints, region_type, terralib.newlist(), {},
     function() return true end)
-  self.cache_ancestors[region_type] = path
-  return path
 end
 
 function region_tree:lowest_common_ancestor(region_type, other_region_type)
@@ -287,9 +286,6 @@ end
 
 function region_tree:children(region_type)
   assert(flow_region_tree.is_region(region_type))
-  if rawget(self.cache_children, region_type) then
-    return self.cache_children[region_type]:map(function(x) return x end)
-  end
 
   local result = terralib.newlist()
   if rawget(self.constraints, "<=") then
@@ -302,15 +298,11 @@ function region_tree:children(region_type)
       end
     end
   end
-  self.cache_children[region_type] = result
   return result
 end
 
 function region_tree:siblings(region_type)
   assert(flow_region_tree.is_region(region_type))
-  if rawget(self.cache_siblings, region_type) then
-    return self.cache_siblings[region_type]:map(function(x) return x end)
-  end
 
   local siblings = terralib.newlist()
   for other, _ in pairs(self.region_universe) do
@@ -324,7 +316,6 @@ function region_tree:siblings(region_type)
       siblings:insert(other)
     end
   end
-  self.cache_siblings[region_type] = siblings
   return siblings
 end
 

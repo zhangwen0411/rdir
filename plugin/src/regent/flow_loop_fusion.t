@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -52,6 +57,11 @@ local flow_loop_fusion = {}
 local function has_same_node_type(cx, nid1, nid2)
   return cx.graph:node_label(nid1).node_type ==
     cx.graph:node_label(nid2).node_type
+end
+
+local function has_demand_parallel(cx, nid)
+  local label = cx.graph:node_label(nid)
+  return label:is(flow.node.ForNum) and label.parallel == "demand"
 end
 
 local function has_compute_nodes_between(cx, nid1, nid2)
@@ -157,6 +167,10 @@ end
 
 local function can_fuse(cx, nid1, nid2)
   return has_same_node_type(cx, nid1, nid2) and
+    -- FIXME: Currently fused loops can confuse the loop optimizer, so
+    -- avoid fusing __demand(__parallel) loops.
+    not has_demand_parallel(cx, nid1) and
+    not has_demand_parallel(cx, nid2) and
     not has_compute_nodes_between(cx, nid1, nid2) and
     not has_opaque_nodes_inside(cx, nid1) and
     not has_opaque_nodes_inside(cx, nid2) and
@@ -165,12 +179,16 @@ local function can_fuse(cx, nid1, nid2)
     loop_bounds_match(cx, nid1, nid2)
 end
 
-local function map_region(cx, index1, index2, region_type)
-  local index = cx.tree:has_region_index(region_type)
+local function map_region(cx1, cx2, index1, index2, region_type)
+  local span = cx1.tree:region_span(region_type)
+  local index = cx1.tree:has_region_index(region_type)
   if index and index:is(ast.typed.ExprID) and index.value == index1 then
-    local parent = cx.tree:parent(region_type)
-    return parent:subregion_constant(index2)
+    local parent = cx1.tree:parent(region_type)
+    local child = parent:subregion_constant(index2)
+    cx2.tree:intern_region_expr(child, span)
+    return child
   else
+    cx2.tree:intern_region_expr(region_type, span)
     return region_type
   end
 end
@@ -203,7 +221,7 @@ local function fuse(cx, loop1, loop2)
         end
       end
       local region_type = map_region(
-        new_cx, loop2_label.symbol, loop1_label.symbol, std.as_read(label.value.expr_type))
+        cx, new_cx, loop2_label.symbol, loop1_label.symbol, std.as_read(label.value.expr_type))
       if not has_write then
         local new_nids = new_cx.graph:filter_nodes(
           function(nid1, label1)

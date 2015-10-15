@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -78,18 +83,37 @@ local function is_opaque(cx, nid)
   return cx.graph:node_label(nid).opaque
 end
 
-local function can_fuse(cx, task1, task2)
-  return not has_compute_nodes_between(cx, task1, task2) and
-    not is_opaque(cx, task1) and
-    not is_opaque(cx, task2)
-end
-
 local function get_task_fn(cx, inputs)
   assert(rawget(inputs, 1) and #inputs[1] == 1)
   local nid = inputs[1][1].from_node
   local label = cx.graph:node_label(nid)
   assert(label:is(flow.node.Function) and std.is_task(label.value.value))
   return label.value.value
+end
+
+local function is_already_fused(cx, nid1)
+  local inputs1 = cx.graph:incoming_edges_by_port(nid1)
+  local fn1 = get_task_fn(cx, inputs1)
+  assert(std.is_task(fn1))
+  return fn1:getname():find("__fused") == 1
+end
+
+local function returns_unit(cx, nid1)
+  local inputs1 = cx.graph:incoming_edges_by_port(nid1)
+  local fn1 = get_task_fn(cx, inputs1)
+  assert(std.is_task(fn1))
+  return fn1:gettype().returntype == terralib.types.unit
+end
+
+local function can_fuse(cx, task1, task2)
+  return not has_compute_nodes_between(cx, task1, task2) and
+    not is_opaque(cx, task1) and
+    not is_opaque(cx, task2) and
+    -- FIXME: At some point, fusing recursively should work, but for
+    -- now, just disable it...
+    not is_already_fused(cx, task1) and
+    not is_already_fused(cx, task2) and
+    returns_unit(cx, task1)
 end
 
 local function get_arg_type(cx, inputs, i)
@@ -129,7 +153,7 @@ local function fuse_params(cx, fn1, fn2, inputs1, inputs2)
   local param_symbols2 = fn2:get_param_symbols()
   for i, param_symbol in ipairs(param_symbols2) do
     local param_type = param_symbol.type
-    local arg_type = get_arg_type(cx, inputs1, i)
+    local arg_type = get_arg_type(cx, inputs2, i)
     if std.is_ispace(param_type) or std.is_region(param_type) or
       std.is_partition(param_type) or std.is_cross_product(param_type)
     then
@@ -172,6 +196,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
 
   local name = "__fused__" .. node1.name .. "__" .. node2.name
 
+  local type1_mapping = {}
   local symbol1_mapping = {}
   local symbol2_mapping = {}
   local params = terralib.newlist()
@@ -179,26 +204,32 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   -- understood symbols as params. (I.e. different symbols with the
   -- same displayname shouldn't cause any problems.)
   for _, param in ipairs(node1.params) do
+    local param_type = std.type_sub(param.param_type, mapping)
     local symbol = terralib.newsymbol(
-      std.type_sub(param.param_type, mapping),
+      param_type,
       param.symbol.displayname .. "_1"
       -- tostring(terralib.newsymbol())
     )
     symbol1_mapping[param.symbol] = symbol
-    params:insert(param { symbol = symbol })
+    if mapping[param.param_type] then
+      type1_mapping[param_type] = symbol
+    end
+    params:insert(param { symbol = symbol, param_type = param_type })
   end
   for _, param in ipairs(node2.params) do
+    local param_type = std.type_sub(param.param_type, mapping)
     if not mapping[param.param_type] then
       local symbol = terralib.newsymbol(
-        std.type_sub(param.param_type, mapping),
+        param_type,
         param.symbol.displayname .. "_2"
         -- tostring(terralib.newsymbol())
       )
       symbol2_mapping[param.symbol] = symbol
-      params:insert(param { symbol = symbol })
+      params:insert(param { symbol = symbol, param_type = param_type })
     else
-      assert(symbol1_mapping[param.symbol])
-      symbol2_mapping[param.symbol] = symbol1_mapping[param.symbol]
+      local symbol = type1_mapping[param_type]
+      assert(symbol)
+      symbol2_mapping[param.symbol] = symbol
     end
   end
 
@@ -297,7 +328,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
               function(param)
                 return ast.typed.ExprID {
                   value = symbol1_mapping[param.symbol],
-                  expr_type = symbol1_mapping[param.symbol].type,
+                  expr_type = std.rawref(&symbol1_mapping[param.symbol].type),
                   span = param.span,
                 }
             end),
@@ -318,7 +349,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
               function(param)
                 return ast.typed.ExprID {
                   value = symbol2_mapping[param.symbol],
-                  expr_type = symbol2_mapping[param.symbol].type,
+                  expr_type = std.rawref(&symbol2_mapping[param.symbol].type),
                   span = param.span,
                 }
             end),
@@ -438,20 +469,20 @@ local function fuse(cx, task1, task2)
   end
 
   local outputs_mapped = {}
-  for i, param in pairs(param1_mapping) do
-    if rawget(outputs1, i+1) then
-      assert(#outputs1[i+1] == 1)
-      local edge = outputs1[i+1][1]
+  for i, param in pairs(param2_mapping) do
+    if rawget(outputs2, i+1) then
+      assert(#outputs2[i+1] == 1)
+      local edge = outputs2[i+1][1]
       outputs_mapped[param] = true
       cx.graph:add_edge(
         edge.label, new_nid, param+1,
         edge.to_node, edge.to_port)
     end
   end
-  for i, param in pairs(param2_mapping) do
-    if rawget(outputs2, i+1) then
-      assert(#outputs2[i+1] == 1)
-      local edge = outputs2[i+1][1]
+  for i, param in pairs(param1_mapping) do
+    if rawget(outputs1, i+1) then
+      assert(#outputs1[i+1] == 1)
+      local edge = outputs1[i+1][1]
       if not outputs_mapped[param] then
         outputs_mapped[param] = true
         cx.graph:add_edge(
@@ -468,6 +499,40 @@ local function fuse(cx, task1, task2)
       edge.label,
       new_nid, cx.graph:node_result_port(new_nid),
       edge.to_node, edge.to_port)
+  end
+
+  if rawget(inputs1, cx.graph:node_sync_port(task1)) then
+    for _, edge in ipairs(inputs1[cx.graph:node_sync_port(task1)]) do
+      cx.graph:add_edge(
+        edge.label,
+        edge.from_node, edge.from_port,
+        new_nid, cx.graph:node_sync_port(new_nid))
+    end
+  end
+  if rawget(outputs1, cx.graph:node_sync_port(task1)) then
+    for _, edge in ipairs(outputs1[cx.graph:node_sync_port(task1)]) do
+      cx.graph:add_edge(
+        edge.label,
+        new_nid, cx.graph:node_sync_port(new_nid),
+        edge.to_node, edge.to_port)
+    end
+  end
+
+  if rawget(inputs2, cx.graph:node_sync_port(task2)) then
+    for _, edge in ipairs(inputs2[cx.graph:node_sync_port(task2)]) do
+      cx.graph:add_edge(
+        edge.label,
+        edge.from_node, edge.from_port,
+        new_nid, cx.graph:node_sync_port(new_nid))
+    end
+  end
+  if rawget(outputs2, cx.graph:node_sync_port(task2)) then
+    for _, edge in ipairs(outputs2[cx.graph:node_sync_port(task2)]) do
+      cx.graph:add_edge(
+        edge.label,
+        new_nid, cx.graph:node_sync_port(new_nid),
+        edge.to_node, edge.to_port)
+    end
   end
 
   return new_nid

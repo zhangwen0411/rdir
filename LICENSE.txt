@@ -1,0 +1,13 @@
+The initial versions of files recorded in this repository are licensed
+under the BSD license, copyright (c) 2015 NVIDIA Corporation.
+
+All contributions following the commit below are dual-licensed under
+the BSD and Apache version 2.0 licenses. Copyright holders are
+recorded in each file.
+
+commit 7871060eeba2726cd77605b39c2c6e18c582b092
+Author: sidelnik <sidelnik@gmail.com>
+Date:   Tue Oct 13 13:44:43 2015 -0700
+
+Copies of the licenses respective are available in LICENSE_BSD.txt and
+LICENSE_APACHE.txt.

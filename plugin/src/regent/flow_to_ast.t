@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -36,7 +41,7 @@ context.__index = context
 function context:new_graph_scope(graph)
   local cx = {
     graph = graph,
-    ast = {},
+    ast = setmetatable({}, {__index = function(t, k) error("no ast for nid " .. tostring(k), 2) end}),
     region_ast = {},
   }
   return setmetatable(cx, context)
@@ -100,14 +105,14 @@ function flow_to_ast.node_opaque(cx, nid)
     local read_nids = cx.graph:outgoing_use_set(result_nid)
     if #read_nids > 0 then
       cx.ast[nid] = label.action
-      return terralib.newlist(actions)
+      return actions
     else
-      return terralib.newlist({
-          ast.typed.StatExpr {
-            expr = label.action,
-            span = label.action.span,
-          },
+      actions:insert(
+        ast.typed.StatExpr {
+          expr = label.action,
+          span = label.action.span,
       })
+      return actions
     end
   end
 end
@@ -321,9 +326,12 @@ function flow_to_ast.node_region(cx, nid)
   for _, edges in pairs(inputs) do
     for _, edge in ipairs(edges) do
       if edge.label:is(flow.edge.Name) then
-        assert(not cx.region_ast[label.value.expr_type])
-        cx.ast[nid] = cx.ast[edge.from_node]
-        cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+        if not cx.region_ast[label.value.expr_type] then
+          cx.ast[nid] = cx.ast[edge.from_node]
+          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+        else
+          cx.ast[nid] = cx.region_ast[label.value.expr_type]
+        end
         return terralib.newlist({})
       end
     end
@@ -344,9 +352,12 @@ function flow_to_ast.node_partition(cx, nid)
   for _, edges in pairs(inputs) do
     for _, edge in ipairs(edges) do
       if edge.label:is(flow.edge.Name) then
-        assert(not cx.region_ast[label.value.expr_type])
-        cx.ast[nid] = cx.ast[edge.from_node]
-        cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+        if not cx.region_ast[label.value.expr_type] then
+          cx.ast[nid] = cx.ast[edge.from_node]
+          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+        else
+          cx.ast[nid] = cx.region_ast[label.value.expr_type]
+        end
         return terralib.newlist({})
       end
     end
@@ -362,12 +373,15 @@ end
 
 function flow_to_ast.node_scalar(cx, nid)
   local label = cx.graph:node_label(nid)
-  if label.fresh then
-    local inputs = cx.graph:incoming_edges_by_port(nid)
-    assert(rawget(inputs, 0) and #inputs[0] == 1)
-    cx.ast[nid] = cx.ast[inputs[0][1].from_node]
-  else
-    cx.ast[nid] = cx.graph:node_label(nid).value
+  local outputs = cx.graph:outgoing_edges_by_port(nid)
+  if rawget(outputs, cx.graph:node_result_port(nid)) then
+    if label.fresh then
+      local inputs = cx.graph:incoming_edges_by_port(nid)
+      assert(rawget(inputs, 0) and #inputs[0] == 1)
+      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+    else
+      cx.ast[nid] = cx.graph:node_label(nid).value
+    end
   end
   return terralib.newlist({})
 end

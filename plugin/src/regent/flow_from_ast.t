@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -265,7 +270,6 @@ end
 
 function region_tree_state:open_siblings(region_type)
   local result = terralib.newlist()
-  if not self.tree:aliased(region_type) then return result end
   for _, sibling in ipairs(self.tree:siblings(region_type)) do
     self:ensure(sibling)
     if self:mode(sibling) ~= modes.closed then
@@ -276,8 +280,6 @@ function region_tree_state:open_siblings(region_type)
 end
 
 function region_tree_state:dirty_siblings(region_type)
-  local result = terralib.newlist()
-  if not self.tree:aliased(region_type) then return result end
   local result = terralib.newlist()
   for _, sibling in ipairs(self.tree:siblings(region_type)) do
     self:ensure(sibling)
@@ -334,6 +336,15 @@ function analyze_regions.expr(cx)
       if node:is(ast.typed.ExprIndexAccess) then
         cx.tree:attach_region_index(expr_type, node.index)
       end
+    elseif std.is_bounded_type(expr_type) then
+      -- This may have been the result of an unpack, in which case the
+      -- regions in this bounded type may be fresh. Intern them just
+      -- in case.
+      for _, bound in ipairs(expr_type:bounds()) do
+        if flow_region_tree.is_region(bound) then
+          cx.tree:intern_region_expr(bound, node.span)
+        end
+      end
     elseif std.is_cross_product(expr_type) then
       -- FIXME: This is kind of a hack. Cross products aren't really
       -- first class, but this ought not be necessary.
@@ -349,11 +360,12 @@ function analyze_regions.expr(cx)
         local bounds = value_type:bounds()
         for _, parent in ipairs(bounds) do
           local index
-          if node.value:is(ast.typed.ExprID) and
-            not std.is_rawref(node.value.expr_type)
-          then
-            index = node.value
-          end
+          -- FIXME: This causes issues with some tests.
+          -- if node.value:is(ast.typed.ExprID) and
+          --   not std.is_rawref(node.value.expr_type)
+          -- then
+          --   index = node.value
+          -- end
           cx.tree:intern_region_point_expr(parent, index, node.span)
         end
       end
@@ -438,7 +450,9 @@ function transitions.close(cx, path, index)
     cx.state:ensure(child)
     if cx.state:mode(child) ~= modes.closed then
       local child_path = std.newtuple(child) .. path:slice(index, #path)
-      transitions.close(cx, child_path, 1, cx.graph:node_label(cx.state:current(child)).value)
+      local child_nid = cx.state:current(child)
+      assert(flow.is_valid_node(child_nid))
+      transitions.close(cx, child_path, 1, cx.graph:node_label(child_nid).value)
     end
   end
 
@@ -452,16 +466,12 @@ function transitions.close(cx, path, index)
       add_input_edge(cx, child_nid, close_nid, port, "reads")
       port = port + 1
     end
+    cx.state:clear(child)
   end
 
   -- Create and link the next node.
   local next_nid = cx.graph:add_node(get_region_label(cx, path[index]))
   add_output_edge(cx, close_nid, 1, next_nid, "reads_writes")
-
-  -- Clear child state.
-  for _, child in ipairs(cx.tree:children(path[index])) do
-    cx.state:clear(child)
-  end
 
   -- Set node state.
   cx.state:set_mode(path[index], modes.closed)
@@ -798,11 +808,12 @@ function analyze_privileges.expr_deref(cx, node, privilege)
     local bounds = value_type:bounds()
     for _, parent in ipairs(bounds) do
       local index
-      if node.value:is(ast.typed.ExprID) and
-        not std.is_rawref(node.value.expr_type)
-      then
-        index = node.value
-      end
+      -- FIXME: This causes issues with some tests.
+      -- if node.value:is(ast.typed.ExprID) and
+      --   not std.is_rawref(node.value.expr_type)
+      -- then
+      --   index = node.value
+      -- end
       local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, privilege))
     end
@@ -927,18 +938,22 @@ function analyze_privileges.stat_while(cx, node)
 end
 
 function analyze_privileges.stat_for_num(cx, node)
+  local block_privileges = analyze_privileges.block(cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, true)
   return
     std.reduce(
       privilege_meet,
       node.values:map(
         function(value) return analyze_privileges.expr(cx, value, "reads") end),
-      analyze_privileges.block(cx, node.block))
+      outer_privileges)
 end
 
 function analyze_privileges.stat_for_list(cx, node)
+  local block_privileges = analyze_privileges.block(cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
     analyze_privileges.expr(cx, node.value, "reads"),
-    analyze_privileges.block(cx, node.block))
+    outer_privileges)
 end
 
 function analyze_privileges.stat_repeat(cx, node)
@@ -1112,7 +1127,7 @@ local function as_reduce_stat(cx, op, args, span)
     end
   end
   sequence_depend(cx, compute_nid)
-  return compute_nid
+  return sequence_advance(cx, compute_nid)
 end
 
 local function as_opaque_expr(cx, node, input_nids)
@@ -1177,6 +1192,10 @@ local function as_deref_expr(cx, args, result_nid, expr_type, span)
 end
 
 function flow_from_ast.expr_id(cx, node, privilege)
+  -- FIXME: Why am I getting vars typed as unit?
+  if std.as_read(node.expr_type) == terralib.types.unit then
+    return flow.null()
+  end
   return open_region_tree(cx, node.expr_type, node.value, privilege)
 end
 
@@ -1390,11 +1409,12 @@ function flow_from_ast.expr_deref(cx, node, privilege)
     if #bounds == 1 and std.is_region(bounds[1]) then
       local parent = bounds[1]
       local index
-      if node.value:is(ast.typed.ExprID) and
-        not std.is_rawref(node.value.expr_type)
-      then
-        index = node.value
-      end
+      -- FIXME: This causes issues with some tests.
+      -- if node.value:is(ast.typed.ExprID) and
+      --   not std.is_rawref(node.value.expr_type)
+      -- then
+      --   index = node.value
+      -- end
       local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
 
       local inputs = terralib.newlist({
@@ -1612,10 +1632,12 @@ end
 
 function flow_from_ast.stat_expr(cx, node)
   local result_nid = flow_from_ast.expr(cx, node.expr, "reads")
-  if cx.graph:node_label(result_nid):is(flow.node.Scalar) then
-    return sequence_advance(cx, cx.graph:immediate_predecessor(result_nid))
-  else
-    return sequence_advance(cx, result_nid)
+  if not flow.is_null(result_nid) then
+    if cx.graph:node_label(result_nid):is(flow.node.Scalar) then
+      return sequence_advance(cx, cx.graph:immediate_predecessor(result_nid))
+    else
+      return sequence_advance(cx, result_nid)
+    end
   end
 end
 

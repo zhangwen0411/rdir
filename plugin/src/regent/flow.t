@@ -1,4 +1,9 @@
 -- Copyright (c) 2015, NVIDIA CORPORATION. All rights reserved.
+-- Copyright (c) 2015, Stanford University. All rights reserved.
+--
+-- This file was initially released under the BSD license, shown
+-- below. All subsequent contributions are dual-licensed under the BSD
+-- and Apache version 2.0 licenses.
 --
 -- Redistribution and use in source and binary forms, with or without
 -- modification, are permitted provided that the following conditions
@@ -445,7 +450,13 @@ function graph:printpretty()
       node:is(flow.node.Scalar) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
-      label = label .. " " .. tostring(node.value.value) .. " " .. tostring(node.value.expr_type)
+      local name = tostring(node.value.value)
+      if terralib.isfunction(node.value.value) then
+        name = tostring(node.value.value.name)
+      end
+      label = label .. " " .. tostring(name) .. " " .. tostring(node.value.expr_type)
+    elseif node:is(flow.node.Reduce) then
+      label = label .. " " .. tostring(node.op)
     end
     local shape
     if node:is(flow.node.Opaque) or node:is(flow.node.Deref) or
