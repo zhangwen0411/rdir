@@ -273,8 +273,7 @@ local function as_nid(cx, value)
     local privilege, input_nid, output_nid = unpack(values)
     if nid == nil then
       nid = input_nid or output_nid
-    else
-      assert(nid == (input_nid or output_nid))
+      break
     end
   end
   assert(nid)
@@ -758,12 +757,15 @@ local function select_transition(cx, path, index,
                                  desired_mode, desired_op, field_path)
   local current_mode = cx:state(field_path):mode(path[index])
   local current_op = cx:state(field_path):op(path[index])
+  local current_nid = cx:state(field_path):current(path[index])
   if index == 1 then -- Leaf
     if current_mode == modes.closed then
-      if not current_op or desired_op == current_op then
-        return modes.closed, desired_op, transitions.create
-      else
+      if current_op and
+        (desired_op ~= current_op or (desired_op and flow.is_valid_node(current_nid)))
+      then
         return modes.closed, desired_op, transitions.close
+      else
+        return modes.closed, desired_op, transitions.create
       end
     elseif current_mode == modes.read then
       if desired_mode == modes.read then
@@ -803,18 +805,16 @@ local function select_transition(cx, path, index,
     elseif current_mode == modes.write then
       -- FIXME: Does dirty include all open siblings?
       if #cx:state(field_path):dirty_siblings(path[child_index]) > 0 then
-        return modes.write, false, transitions.close_and_reopen
+        return desired_mode, desired_op, transitions.close_and_reopen
       else
         return modes.write, false, transitions.nothing
       end
     elseif current_mode == modes.reduce then
       if desired_mode == modes.reduce then
-        if desired_op == current_op or
-          #cx:state(field_path):dirty_siblings(path[child_index]) == 0
-        then
-          return modes.reduce, desired_op, transitions.nothing
+        if desired_op == current_op then
+          return desired_mode, desired_op, transitions.nothing
         else
-          return modes.reduce, desired_op, transitions.close_and_reopen
+          return desired_mode, desired_op, transitions.close_and_reopen
         end
       else
         return desired_mode, desired_op, transitions.close_and_reopen
@@ -1524,13 +1524,64 @@ local function as_reduce_stat(cx, op, args, span)
   return sequence_advance(cx, compute_nid)
 end
 
-local function as_opaque_expr(cx, node, args, privilege_map)
+local function as_raw_opaque_expr(cx, node, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
     cx, compute_nid, std.as_read(node.expr_type), node.span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, result_nid)
+end
+
+local function as_opaque_expr(cx, generator, args, privilege_map)
+  local arg_nids = args:map(function(arg) return as_nid(cx, arg) end)
+  local arg_expr_nids = arg_nids:map(
+    function(arg_nid)
+      local arg_label = cx.graph:node_label(arg_nid)
+      if arg_label:is(flow.node.Scalar) and arg_label.fresh then
+        local arg_expr_nid = cx.graph:immediate_predecessor(arg_nid)
+        if cx.graph:node_label(arg_expr_nid):is(flow.node.Opaque) then
+          return arg_expr_nid
+        end
+        return false
+      end
+    end)
+  local arg_asts = std.zip(arg_nids, arg_expr_nids):map(
+    function(nids)
+      local arg_nid, arg_expr_nid = unpack(nids)
+      if arg_expr_nid then
+        return cx.graph:node_label(arg_expr_nid).action
+      else
+        return cx.graph:node_label(arg_nid).value
+      end
+    end)
+
+  local node = generator(unpack(arg_asts))
+  local label = flow.node.Opaque { action = node }
+  local compute_nid = add_node(cx, label)
+  local result_nid = add_result(
+    cx, compute_nid, std.as_read(node.expr_type), node.span)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  local next_port = #args + 1
+  for i, arg_nid in ipairs(arg_nids) do
+    local arg_expr_nid = arg_expr_nids[i]
+    if arg_expr_nid then
+      local arg_expr_inputs = cx.graph:incoming_edges(arg_expr_nid)
+      for _, edge in ipairs(arg_expr_inputs) do
+        local port = edge.to_port
+        if port > 0 then
+          port = next_port
+          next_port = next_port + 1
+        end
+        cx.graph:add_edge(edge.label, edge.from_node, edge.from_port,
+                          compute_nid, port)
+      end
+      cx.graph:remove_node(arg_nid)
+      cx.graph:remove_node(arg_expr_nid)
+    end
+  end
   return attach_result(privilege_map, result_nid)
 end
 
@@ -1547,16 +1598,19 @@ local function as_call_expr(cx, args, opaque, expr_type, span, privilege_map)
   return attach_result(privilege_map, result_nid)
 end
 
-local function as_index_expr(cx, args, result_nid, expr_type, span, privilege_map)
+local function as_index_expr(cx, args, result, expr_type, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  add_name_edge(cx, compute_nid, result_nid)
+  for _, value in result:items() do
+    local _, input_nid, output_nid = unpack(value)
+    add_name_edge(cx, compute_nid, input_nid or output_nid)
+  end
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
-  return attach_result(privilege_map, result_nid)
+  return result
 end
 
 local function as_deref_expr(cx, args, result_nid, expr_type, span, privilege_map)
@@ -1616,7 +1670,7 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
   end
   return as_opaque_expr(
     cx,
-    node { value = as_ast(cx, value) },
+    function(v1) return node { value = v1 } end,
     terralib.newlist({value}),
     field_privilege_map)
 end
@@ -1633,17 +1687,13 @@ function flow_from_ast.expr_index_access(cx, node, privilege_map)
   if flow_region_tree.is_region(expr_type) then
     local inputs = terralib.newlist({value, index})
     local region = open_region_tree(cx, node.expr_type, nil, privilege_map)
-    as_index_expr(
-      cx, inputs, as_nid(cx, region), expr_type, node.span, privilege_map)
-    return region
+    return as_index_expr(
+      cx, inputs, region, expr_type, node.span)
   end
 
   return as_opaque_expr(
     cx,
-    node {
-      value = as_ast(cx, value),
-      index = as_ast(cx, index),
-    },
+    function(v1, v2) return node { value = v1, index = v2 } end,
     terralib.newlist({value, index}),
     privilege_map)
 end
@@ -1653,7 +1703,7 @@ function flow_from_ast.expr_method_call(cx, node, privilege_map)
   local args = node.args:map(function(arg) return flow_from_ast.expr(cx, arg, reads) end)
   local inputs = terralib.newlist({value})
   inputs:insertall(args)
-  return as_opaque_expr(
+  return as_raw_opaque_expr(
     cx,
     node {
       value = as_ast(cx, value),
@@ -1687,10 +1737,7 @@ function flow_from_ast.expr_cast(cx, node, privilege_map)
   local arg = flow_from_ast.expr(cx, node.arg, reads)
   return as_opaque_expr(
     cx,
-    node {
-      fn = as_ast(cx, fn),
-      arg = as_ast(cx, arg),
-    },
+    function(v1, v2) return node { fn = v1, arg = v2 } end,
     terralib.newlist({fn, arg}),
     privilege_map)
 end
@@ -1703,21 +1750,25 @@ function flow_from_ast.expr_ctor(cx, node, privilege_map)
       local field, value = unpack(pair)
       return field { value = as_ast(cx, value) }
     end)
-  return as_opaque_expr(
+  return as_raw_opaque_expr(
     cx,
     node { fields = fields },
     values, privilege_map)
 end
 
 function flow_from_ast.expr_raw_context(cx, node, privilege_map)
-  return as_opaque_expr(cx, node, terralib.newlist(), privilege_map)
+  return as_opaque_expr(
+    cx,
+    function() return node end,
+    terralib.newlist(),
+    privilege_map)
 end
 
 function flow_from_ast.expr_raw_fields(cx, node, privilege_map)
   local region = flow_from_ast.expr(cx, node.region, reads)
   return as_opaque_expr(
     cx,
-    node { region = as_ast(cx, region) },
+    function(v1) return node { region = v1 } end,
     terralib.newlist({region}),
     privilege_map)
 end
@@ -1726,20 +1777,24 @@ function flow_from_ast.expr_raw_physical(cx, node, privilege_map)
   local region = flow_from_ast.expr(cx, node.region, reads)
   return as_opaque_expr(
     cx,
-    node { region = as_ast(cx, region) },
+    function(v1) return node { region = v1 } end,
     terralib.newlist({region}),
     privilege_map)
 end
 
 function flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
-  return as_opaque_expr(cx, node, terralib.newlist(), privilege_map)
+  return as_opaque_expr(
+    cx,
+    function() return node end,
+    terralib.newlist(),
+    privilege_map)
 end
 
 function flow_from_ast.expr_raw_value(cx, node, privilege_map)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
-    node { value = as_ast(cx, value) },
+    function(v1) return node { value = v1 } end,
     terralib.newlist({value}),
     privilege_map)
 end
@@ -1748,7 +1803,7 @@ function flow_from_ast.expr_isnull(cx, node, privilege_map)
   local pointer = flow_from_ast.expr(cx, node.pointer, reads)
   return as_opaque_expr(
     cx,
-    node { pointer = as_ast(cx, pointer) },
+    function(v1) return node { pointer = v1 } end,
     terralib.newlist({pointer}),
     privilege_map)
 end
@@ -1757,7 +1812,7 @@ function flow_from_ast.expr_new(cx, node, privilege_map)
   local region = flow_from_ast.expr(cx, node.region, none)
   return as_opaque_expr(
     cx,
-    node { region = as_ast(cx, region) },
+    function(v1) return node { region = v1 } end,
     terralib.newlist({region}),
     privilege_map)
 end
@@ -1766,7 +1821,7 @@ function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
-    node { value = as_ast(cx, value) },
+    function(v1) return node { value = v1 } end,
     terralib.newlist({value}),
     privilege_map)
 end
@@ -1775,7 +1830,7 @@ function flow_from_ast.expr_static_cast(cx, node, privilege_map)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
-    node { value = as_ast(cx, value) },
+    function(v1) return node { value = v1 } end,
     terralib.newlist({value}),
     privilege_map)
 end
@@ -1784,7 +1839,7 @@ function flow_from_ast.expr_unary(cx, node, privilege_map)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
     cx,
-    node { rhs = as_ast(cx, rhs) },
+    function(v1) return node { rhs = v1 } end,
     terralib.newlist({rhs}),
     privilege_map)
 end
@@ -1794,10 +1849,7 @@ function flow_from_ast.expr_binary(cx, node, privilege_map)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
     cx,
-    node {
-      lhs = as_ast(cx, lhs),
-      rhs = as_ast(cx, rhs),
-    },
+    function(v1, v2) return node { lhs = v1, rhs = v2 } end,
     terralib.newlist({lhs, rhs}),
     privilege_map)
 end
@@ -1829,7 +1881,7 @@ function flow_from_ast.expr_deref(cx, node, privilege_map)
 
   return as_opaque_expr(
     cx,
-    node { value = as_ast(cx, value) },
+    function(v1) return node { value = v1 } end,
     terralib.newlist({value}),
     privilege_map)
 end

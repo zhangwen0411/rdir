@@ -116,6 +116,7 @@ local function get_WAR_edges(cx, edges)
       for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
         local other_label = cx.graph:node_label(other)
         if other_label:is(flow.node.Region) and
+          to_label.field_path == other_label.field_path and
           cx.tree:can_alias(std.as_read(other_label.value.expr_type), region)
         then
           for _, reader in ipairs(cx.graph:immediate_successors(other)) do
