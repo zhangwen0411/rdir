@@ -282,7 +282,7 @@ function flow_to_ast.node_task(cx, nid)
 
   local args = terralib.newlist()
   for i = 2, maxport do
-    assert(rawget(inputs, i) and #inputs[i] == 1)
+    assert(rawget(inputs, i) and #inputs[i] >= 1)
     args:insert(cx.ast[inputs[i][1].from_node])
   end
 

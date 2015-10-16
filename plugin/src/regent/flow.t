@@ -454,7 +454,12 @@ function graph:printpretty()
       if terralib.isfunction(node.value.value) then
         name = tostring(node.value.value.name)
       end
-      label = label .. " " .. tostring(name) .. " " .. tostring(node.value.expr_type)
+      label = label .. " " .. tostring(name)
+      if node:is(flow.node.Region) or node:is(flow.node.Partition) or
+        node:is(flow.node.Scalar)
+      then
+        label = label .. " " .. tostring(node.field_path)
+      end
     elseif node:is(flow.node.Reduce) then
       label = label .. " " .. tostring(node.op)
     end
@@ -511,9 +516,9 @@ flow.node("ForNum", {"symbol", "block", "parallel", "span"})
 flow.node("ForList", {"symbol", "block", "vectorize", "span"})
 
 -- Data
-flow.node("Region", {"value"})
-flow.node("Partition", {"value"})
-flow.node("Scalar", {"value", "fresh"})
+flow.node("Region", {"value", "region_type", "field_path"})
+flow.node("Partition", {"value", "region_type", "field_path"})
+flow.node("Scalar", {"value", "region_type", "field_path", "fresh"})
 flow.node("Constant", {"value"})
 flow.node("Function", {"value"})
 

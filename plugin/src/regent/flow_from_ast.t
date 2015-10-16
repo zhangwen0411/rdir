@@ -36,12 +36,191 @@ local flow = require("regent/flow")
 local flow_region_tree = require("regent/flow_region_tree")
 local std = require("regent/std")
 
+-- Field Sets
+
+local _field_set = {}
+setmetatable(_field_set, { __index = terralib.list })
+_field_set.__index = _field_set
+
+function is_field_set(x)
+  return getmetatable(x) == _field_set
+end
+
+function new_field_set(...)
+  local result = setmetatable({}, _field_set)
+  local args = {...}
+  if #args == 0 then
+    result:insert(std.newtuple())
+    return result
+  end
+  for _, x in ipairs({...}) do
+    if is_field_set(x) then
+      result:insertall(x)
+    elseif not std.is_tuple(x) then
+      result:insert(std.newtuple(x))
+    else
+      result:insert(x)
+    end
+  end
+  return result
+end
+
+function _field_set:insert(x)
+  assert(std.is_tuple(x))
+  self[x:hash()] = x
+end
+
+function _field_set:insertall(x)
+  assert(is_field_set(x))
+  for _, y in pairs(x) do
+    self[y:hash()] = y
+  end
+end
+
+function _field_set:map(f)
+  local result = terralib.newlist()
+  for _, x in pairs(self) do
+    result:insert(f(x))
+  end
+  return result
+end
+
+function _field_set.__concat(a, b)
+  assert(is_field_set(a) and (not b or std.is_tuple(b)))
+
+  local result = new_field_set()
+  if not b then
+    result:insertall(a)
+    return result
+  end
+
+  for x in ipairs(a) do
+    result:insert(a .. b)
+  end
+  return result
+end
+
+function _field_set:__tostring()
+  return "{" .. self:hash() .. "}"
+end
+
+function _field_set:mkstring(sep)
+  return self:map(tostring):mkstring(",")
+end
+
+function _field_set:hash()
+  return self:mkstring(",")
+end
+
+-- Field Maps
+
+local _field_map = {}
+_field_map.__index = _field_map
+
+function is_field_map(x)
+  return getmetatable(x) == _field_map
+end
+
+function new_field_map()
+  return setmetatable({ keys = {}, values = {} }, _field_map)
+end
+
+local function _field_map_next_key(t, i)
+  local ih
+  if i ~= nil then
+    ih = i:hash()
+  end
+  local kh, k = next(t.keys, ih)
+  return k, k and t.values[kh]
+end
+
+function _field_map:items()
+  return _field_map_next_key, self, nil
+end
+
+function _field_map:map(f)
+  local result = new_field_map()
+  for k, v in self:items() do
+    result:insert(k, f(k, v))
+  end
+  return result
+end
+
+function _field_map:maplist(f)
+  local result = terralib.newlist()
+  for k, v in self:items() do
+    result:insert(f(k, v))
+  end
+  return result
+end
+
+function _field_map:prepend(p)
+  if type(p) == "string" then
+    p = std.newtuple(p)
+  end
+  assert(std.is_tuple(p))
+  local result = new_field_map()
+  for k, v in self:items() do
+    result:insert(p .. k, v)
+  end
+  return result
+end
+
+function _field_map:contains(k)
+  return self.values[k:hash()]
+end
+
+function _field_map:is_empty()
+  for k, v in self:items() do
+    return false
+  end
+  return true
+end
+
+function _field_map:lookup(k)
+  local v = self.values[k:hash()]
+  if v == nil then
+    error("field map has no such key " .. tostring(k))
+  end
+  return v
+end
+
+function _field_map:insert(k, v)
+  assert(std.is_tuple(k))
+  local kh = k:hash()
+  self.keys[kh] = k
+  self.values[kh] = v
+end
+
+function _field_map:insertall(t)
+  assert(is_field_map(t))
+  for k, v in t:items() do
+    self:insert(k, v)
+  end
+end
+
+function _field_map:__tostring()
+  return "{" .. self:hash() .. "}"
+end
+
+local function _field_map_tostring(k, v)
+  return tostring(k) .. " = " .. tostring(v)
+end
+
+function _field_map:mkstring(sep)
+  return self:maplist(_field_map_tostring):mkstring(", ")
+end
+
+function _field_map:hash()
+  return self:mkstring(",")
+end
+
+-- Context
+
 local context = setmetatable({}, { __index = function(t, k) error("context has no field " .. tostring(k), 2) end})
 context.__index = context
 
 local region_tree_state
-
--- Context
 
 function context:new_local_scope()
   local cx = {
@@ -51,7 +230,7 @@ function context:new_local_scope()
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
     tree = self.tree,
-    state = region_tree_state.new(self.tree),
+    state_by_field = new_field_map(),
   }
   return setmetatable(cx, context)
 end
@@ -65,7 +244,7 @@ function context:new_task_scope(constraints, region_universe)
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
     tree = tree,
-    state = region_tree_state.new(tree),
+    state_by_field = new_field_map(),
   }
   return setmetatable(cx, context)
 end
@@ -75,9 +254,35 @@ function context.new_global_scope()
   return setmetatable(cx, context)
 end
 
+function context:state(field_path)
+  assert(std.is_tuple(field_path))
+  if self.state_by_field:contains(field_path) then
+    return self.state_by_field:lookup(field_path)
+  end
+
+  local state = region_tree_state.new(self.tree)
+  self.state_by_field:insert(field_path, state)
+  return state
+end
+
 -- Graph Construction
 
-local function as_ast(cx, nid)
+local function as_nid(cx, value)
+  local nid
+  for field_path, values in value:items() do
+    local privilege, input_nid, output_nid = unpack(values)
+    if nid == nil then
+      nid = input_nid
+    else
+      assert(nid == input_nid)
+    end
+  end
+  assert(nid)
+  return nid
+end
+
+local function as_ast(cx, value)
+  local nid = as_nid(cx, value)
   return cx.graph:node_label(nid).value
 end
 
@@ -150,19 +355,36 @@ local function add_name_edge(cx, from_nid, to_nid)
     to_nid, 0)
 end
 
+local function add_args(cx, compute_nid, args)
+  for i, arg in pairs(args) do
+    assert(is_field_map(arg))
+    for field_path, values in arg:items() do
+      local privilege, input_nid, output_nid = unpack(values)
+      add_input_edge(cx, input_nid, compute_nid, i, privilege)
+      if output_nid then
+        add_output_edge(cx, compute_nid, i, output_nid, privilege)
+      end
+    end
+  end
+end
+
 local function add_result(cx, from_nid, expr_type, span)
   if expr_type == terralib.types.unit then
     return from_nid
   end
 
+  local symbol = terralib.newsymbol(expr_type)
+  local region_type = cx.tree:intern_variable(expr_type, symbol, span)
   local label = ast.typed.ExprID {
-    value = terralib.newsymbol(expr_type),
+    value = symbol,
     expr_type = expr_type,
     span = span,
   }
   local result_nid = cx.graph:add_node(
     flow.node.Scalar {
       value = label,
+      region_type = region_type,
+      field_path = std.newtuple(),
       fresh = true,
   })
   local edge_label
@@ -390,7 +612,7 @@ local function privilege_mode(privilege)
   end
 end
 
-local function get_region_label(cx, region_type)
+local function get_region_label(cx, region_type, field_path)
   local symbol = cx.tree:region_symbol(region_type)
   local expr_type = cx.tree:region_var_type(region_type)
   local name = ast.typed.ExprID {
@@ -399,106 +621,123 @@ local function get_region_label(cx, region_type)
     span = cx.tree:region_span(region_type),
   }
   if std.is_region(std.as_read(expr_type)) then
-    return flow.node.Region { value = name }
+    return flow.node.Region {
+      value = name,
+      region_type = region_type,
+      field_path = field_path,
+    }
   elseif std.is_partition(std.as_read(expr_type)) then
-    return flow.node.Partition { value = name }
+    return flow.node.Partition {
+      value = name,
+      region_type = region_type,
+      field_path = field_path,
+    }
   else
-    return flow.node.Scalar { value = name, fresh = false }
+    return flow.node.Scalar {
+      value = name,
+      region_type = region_type,
+      field_path = field_path,
+      fresh = false,
+    }
   end
 end
 
 local transitions = setmetatable(
   {}, { __index = function(t, k) error("no such transition " .. tostring(k), 2) end})
 
-function transitions.nothing(cx, path, index)
-  return cx.state:current(path[index]), false
+function transitions.nothing(cx, path, index, field_path)
+  return cx:state(field_path):current(path[index]), false
 end
 
-function transitions.create(cx, path, index)
-  local current_nid = cx.state:current(path[index])
+function transitions.create(cx, path, index, field_path)
+  local current_nid = cx:state(field_path):current(path[index])
   if not flow.is_null(current_nid) then
     return current_nid, false
   end
 
-  local next_nid = cx.graph:add_node(get_region_label(cx, path[index]))
+  local next_nid = cx.graph:add_node(get_region_label(cx, path[index], field_path))
   local parent_index = index + 1
   if parent_index <= #path then
-    local open_nid = cx.state:open(path[parent_index])
+    local open_nid = cx:state(field_path):open(path[parent_index])
     if flow.is_valid_node(open_nid) then
       add_output_edge(cx, open_nid, 1, next_nid, "reads_writes")
     end
   end
-  cx.state:set_current(path[index], next_nid)
+  cx:state(field_path):set_current(path[index], next_nid)
   return next_nid, true
 end
 
-function transitions.open(cx, path, index)
-  local current_nid, fresh = transitions.create(cx, path, index)
-  assert(flow.is_null(cx.state:open(path[index])))
+function transitions.open(cx, path, index, field_path)
+  local current_nid, fresh = transitions.create(cx, path, index, field_path)
+  assert(flow.is_null(cx:state(field_path):open(path[index])))
   local open_nid = cx.graph:add_node(flow.node.Open {})
   add_input_edge(cx, current_nid, open_nid, 1, "reads")
-  cx.state:set_open(path[index], open_nid)
+  cx:state(field_path):set_open(path[index], open_nid)
 
   -- Add sequence dependencies here to avoid redundant edges already
   -- encoded by true data dependencies.
   if fresh then sequence_depend(cx, current_nid) end
 end
 
-function transitions.close(cx, path, index)
+function transitions.close(cx, path, index, field_path)
   -- Close all children.
   for _, child in ipairs(cx.tree:children(path[index])) do
-    cx.state:ensure(child)
-    if cx.state:mode(child) ~= modes.closed then
+    cx:state(field_path):ensure(child)
+    if cx:state(field_path):mode(child) ~= modes.closed then
       local child_path = std.newtuple(child) .. path:slice(index, #path)
-      local child_nid = cx.state:current(child)
+      local child_nid = cx:state(field_path):current(child)
       assert(flow.is_valid_node(child_nid))
-      transitions.close(cx, child_path, 1, cx.graph:node_label(child_nid).value)
+      transitions.close(cx, child_path, 1, field_path)
     end
   end
 
   -- Create and link the close node.
   local close_nid = cx.graph:add_node(flow.node.Close {})
-  add_input_edge(cx, cx.state:current(path[index]), close_nid, 1, "reads")
+  add_input_edge(cx, cx:state(field_path):current(path[index]), close_nid, 1, "reads")
   local port = 2
   for _, child in ipairs(cx.tree:children(path[index])) do
-    local child_nid = cx.state:current(child)
+    local child_nid = cx:state(field_path):current(child)
     if flow.is_valid_node(child_nid) then
       add_input_edge(cx, child_nid, close_nid, port, "reads")
       port = port + 1
     end
-    cx.state:clear(child)
+    cx:state(field_path):clear(child)
   end
 
   -- Create and link the next node.
-  local next_nid = cx.graph:add_node(get_region_label(cx, path[index]))
+  local next_nid = cx.graph:add_node(get_region_label(cx, path[index], field_path))
   add_output_edge(cx, close_nid, 1, next_nid, "reads_writes")
 
   -- Set node state.
-  cx.state:set_mode(path[index], modes.closed)
-  cx.state:set_current(path[index], next_nid)
-  cx.state:set_open(path[index], flow.null())
-  cx.state:set_dirty(path[index], true)
+  cx:state(field_path):set_mode(path[index], modes.closed)
+  cx:state(field_path):set_current(path[index], next_nid)
+  cx:state(field_path):set_open(path[index], flow.null())
+  cx:state(field_path):set_dirty(path[index], true)
 
   return next_nid, true
 end
 
-function transitions.close_conflicting_children(cx, path, index, _)
+function transitions.close_conflicting_children(cx, path, index, field_path)
+  assert(false) -- FIXME: This code doesn't work.
   for _, child in ipairs(cx.tree:children(path[index])) do
-    cx.state:ensure(child)
-    if cx.state:mode(child) ~= modes.closed then
+    cx:state(field_path):ensure(child)
+    if cx:state(field_path):mode(child) ~= modes.closed then
       local child_path = std.newtuple(child) .. path:slice(index, #path)
-      transitions.close(cx, child_path, 1, cx.graph:node_label(cx.state:current(child)).value)
+      transitions.close(
+        cx, child_path, 1,
+        cx.graph:node_label(cx:state(field_path):current(child)).value,
+        field_path)
     end
   end
 end
 
-function transitions.close_and_reopen(cx, path, index, _)
-  transitions.close(cx, path, index, nil)
-  transitions.open(cx, path, index, nil)
+function transitions.close_and_reopen(cx, path, index, field_path)
+  transitions.close(cx, path, index, field_path)
+  transitions.open(cx, path, index, field_path)
 end
 
-local function select_transition(cx, path, index, desired_mode)
-  local current_mode = cx.state:mode(path[index])
+local function select_transition(cx, path, index, desired_mode, field_path)
+  local current_mode = cx:state(field_path):mode(path[index])
   if index == 1 then -- Leaf
     if current_mode == modes.closed then
       return modes.closed, transitions.create
@@ -518,7 +757,7 @@ local function select_transition(cx, path, index, desired_mode)
     elseif current_mode == modes.read and desired_mode == modes.read then
       return modes.read, transitions.nothing
     elseif current_mode == modes.read and desired_mode == modes.write then
-      if #cx.state:open_siblings(path[child_index]) > 0 then
+      if #cx:state(field_path):open_siblings(path[child_index]) > 0 then
         -- FIXME: This doesn't actually work. When writing to an
         -- aliased partition that was previously read, we will miss a
         -- WAR dependence if we don't fully close the tree. For now,
@@ -529,7 +768,7 @@ local function select_transition(cx, path, index, desired_mode)
         return modes.write, transitions.nothing
       end
     elseif current_mode == modes.write then
-      if #cx.state:dirty_siblings(path[child_index]) > 0 then
+      if #cx:state(field_path):dirty_siblings(path[child_index]) > 0 then
         return modes.write, transitions.close_and_reopen
       else
         return modes.write, transitions.nothing
@@ -540,56 +779,77 @@ local function select_transition(cx, path, index, desired_mode)
   end
 end
 
-local function open_region_tree_node(cx, path, index, mode)
+local function open_region_tree_node(cx, path, index, mode, field_path)
   assert(index >= 1)
-  cx.state:ensure(path[index])
-  local next_mode, transition = select_transition(cx, path, index, mode)
-  local next_nid, fresh = transition(cx, path, index)
-  cx.state:set_mode(path[index], next_mode)
+  cx:state(field_path):ensure(path[index])
+  local next_mode, transition = select_transition(cx, path, index, mode, field_path)
+  local next_nid, fresh = transition(cx, path, index, field_path)
+  cx:state(field_path):set_mode(path[index], next_mode)
   if index >= 2 then
-    return open_region_tree_node(cx, path, index-1, mode)
+    return open_region_tree_node(cx, path, index-1, mode, field_path)
   end
   return next_nid, fresh
 end
 
-local function open_region_tree(cx, expr_type, symbol, privilege)
-  local region_type = cx.tree:ensure_variable(expr_type, symbol)
-  assert(flow_region_tree.is_region(region_type))
-
-  local path = std.newtuple(unpack(cx.tree:ancestors(region_type)))
+local function open_region_tree_top(cx, path, privilege, field_path)
   local desired_mode = privilege_mode(privilege)
   if not desired_mode then
     -- Special case for "none" privilege: just create the node and
     -- exit without linking it up to anything.
-    local next_nid = cx.graph:add_node(get_region_label(cx, region_type))
+    local next_nid = cx.graph:add_node(get_region_label(cx, path[1], field_path))
     sequence_depend(cx, next_nid)
-    return next_nid
+    return std.newtuple(privilege, next_nid)
   end
+
   local current_nid, fresh = open_region_tree_node(
-    cx, path, #path, desired_mode)
+    cx, path, #path, desired_mode, field_path)
   if fresh then sequence_depend(cx, current_nid) end
   local next_nid
   if desired_mode == modes.write then
     next_nid = add_node(cx, cx.graph:node_label(current_nid))
-    cx.state:ensure(region_type)
-    cx.state:set_current(region_type, next_nid)
-    cx.state:set_open(region_type, flow.null())
-    cx.state:set_dirty(region_type, true)
+    cx:state(field_path):ensure(path[1])
+    cx:state(field_path):set_current(path[1], next_nid)
+    cx:state(field_path):set_open(path[1], flow.null())
+    cx:state(field_path):set_dirty(path[1], true)
   end
   assert(flow.is_valid_node(current_nid))
   assert(next_nid == nil or flow.is_valid_node(next_nid))
-  return current_nid, next_nid
+  return std.newtuple(privilege, current_nid, next_nid)
 end
 
-local function preopen_region_tree(cx, region_type, privilege)
+local function open_region_tree(cx, expr_type, symbol, privilege_map)
+  local region_type = cx.tree:ensure_variable(expr_type, symbol)
   assert(flow_region_tree.is_region(region_type))
+  assert(is_field_map(privilege_map))
 
   local path = std.newtuple(unpack(cx.tree:ancestors(region_type)))
+  local result = new_field_map()
+  for field_path, privilege in privilege_map:items() do
+    result:insert(
+      field_path,
+      open_region_tree_top(cx, path, privilege, field_path))
+  end
+  return result
+end
+
+local function preopen_region_tree_top(cx, path, privilege, field_path)
   local desired_mode = privilege_mode(privilege)
-  assert(desired_mode)
+  if not desired_mode then
+    return
+  end
   for index = #path, 2, -1 do
-    cx.state:ensure(path[index])
-    cx.state:set_mode(path[index], desired_mode)
+    cx:state(field_path):ensure(path[index])
+    cx:state(field_path):set_mode(path[index], desired_mode)
+  end
+end
+
+local function preopen_region_tree(cx, region_type, privilege_map)
+  assert(flow_region_tree.is_region(region_type))
+  assert(is_field_map(privilege_map))
+
+  local path = std.newtuple(unpack(cx.tree:ancestors(region_type)))
+  for field_path, privilege in privilege_map:items() do
+    preopen_region_tree_top(cx, path, privilege, field_path)
   end
 end
 
@@ -607,11 +867,18 @@ function region_privileges:__tostring()
   return result
 end
 
-local function uses(cx, region_type, privilege)
+local function uses_region(cx, region_type, privilege)
   return setmetatable({ [region_type] = privilege }, region_privileges)
 end
 
-local function privilege_meet(...)
+local function uses(cx, region_type, privilege_map)
+  return privilege_map:map(
+    function(field_path, privilege)
+      return uses_region(cx, region_type, privilege)
+    end)
+end
+
+local function privilege_meet_region(...)
   local usage = {}
   for _, a in pairs({...}) do
     if a then
@@ -621,6 +888,19 @@ local function privilege_meet(...)
     end
   end
   return setmetatable(usage, region_privileges)
+end
+
+local function privilege_meet(...)
+  local usage = new_field_map()
+  for _, a in pairs({...}) do
+    assert(is_field_map(a))
+    for field_path, privileges in a:items() do
+      usage:insert(
+        field_path,
+        privilege_meet_region(usage:contains(field_path), privileges))
+    end
+  end
+  return usage
 end
 
 local function strip_indexing(cx, region_type)
@@ -638,7 +918,7 @@ local function strip_indexing(cx, region_type)
   return path[last_index + 1]
 end
 
-local function privilege_summary(cx, usage, strip)
+local function privilege_summary_region(cx, usage, strip)
   local summary = {}
   if not usage then return summary end
   for region_type, privilege in pairs(usage) do
@@ -672,137 +952,220 @@ local function privilege_summary(cx, usage, strip)
   return setmetatable(summary, region_privileges)
 end
 
--- FIXME: This is wrong. Need to pass privileges in, because
--- e.g. deref can't tell how it's used without the caller's
--- privileges.
+local function privilege_summary(cx, usage, strip)
+  local summary = new_field_map()
+  if not usage then return summary end
+  for field_path, privileges in usage:items() do
+    summary:insert(field_path, privilege_summary_region(cx, privileges, strip))
+  end
+  return summary
+end
+
+local function index_privileges_by_region(usage)
+  -- field -> region_privileges => region -> privilege_map
+  local result = {}
+  assert(is_field_map(usage))
+  for field_path, region_privileges in usage:items() do
+    for region_type, privilege in pairs(region_privileges) do
+      if not rawget(result, region_type) then
+        result[region_type] = new_field_map()
+      end
+      result[region_type]:insert(field_path, privilege)
+    end
+  end
+  return result
+end
+
+-- Privilege Maps
+
+local function get_trivial_field_map(value)
+  local result = new_field_map()
+  result:insert(std.newtuple(), value)
+  return result
+end
+
+local none = get_trivial_field_map("none")
+local reads = get_trivial_field_map("reads")
+local reads_writes = get_trivial_field_map("reads_writes")
+
+local function get_privilege_field_map(task, region_type)
+  local privileges, privilege_field_paths, _ =
+    std.find_task_privileges(region_type, task:getprivileges())
+  local result = new_field_map()
+  for i, privilege in ipairs(privileges) do
+    -- FIXME: Upgrade reductions to read-write for now.
+    if std.is_reduction_op(privilege) then
+      privilege = "reads_writes"
+    end
+
+    local field_paths = privilege_field_paths[i]
+    for _, field_path in ipairs(field_paths) do
+      result:insert(field_path, privilege)
+    end
+  end
+
+  if result:is_empty() then
+    return none
+  end
+
+  return result
+end
+
+local function attach_result(privilege_map, ...)
+  assert(is_field_map(privilege_map))
+  local result = new_field_map()
+  for k, v in privilege_map:items() do
+    result:insert(k, {v, ...})
+  end
+  return result
+end
+
+-- Privilege Analysis and Summarization
+
 local analyze_privileges = {}
 
-function analyze_privileges.expr_id(cx, node, privilege)
+function analyze_privileges.expr_id(cx, node, privilege_map)
   local expr_type = std.as_read(node.expr_type)
   if flow_region_tree.is_region(expr_type) then
-    return uses(cx, expr_type, privilege)
+    return uses(cx, expr_type, privilege_map)
   end
 end
 
-function analyze_privileges.expr_field_access(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.value, privilege)
+function analyze_privileges.expr_field_access(cx, node, privilege_map)
+  local value_type = std.as_read(node.value.expr_type)
+  local field_privilege_map = privilege_map:prepend(node.field_name)
+  if std.is_bounded_type(value_type) and value_type:is_ptr() then
+    local bounds = value_type:bounds()
+    local usage
+    for _, parent in ipairs(bounds) do
+      local index
+      -- FIXME: This causes issues with some tests.
+      -- if node.value:is(ast.typed.ExprID) and
+      --   not std.is_rawref(node.value.expr_type)
+      -- then
+      --   index = node.value
+      -- end
+      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+      usage = privilege_meet(usage, uses(cx, subregion, field_privilege_map))
+    end
+    return privilege_meet(
+      analyze_privileges.expr(cx, node.value, reads),
+      usage)
+  else
+    return analyze_privileges.expr(cx, node.value, field_privilege_map)
+  end
 end
 
-function analyze_privileges.expr_index_access(cx, node, privilege)
+function analyze_privileges.expr_index_access(cx, node, privilege_map)
   local expr_type = std.as_read(node.expr_type)
-  local value_privilege = "reads"
+  local value_privilege = reads
   local usage
   if flow_region_tree.is_region(expr_type) then
-    value_privilege = "none"
-    usage = uses(cx, expr_type, privilege)
+    value_privilege = none
+    usage = uses(cx, expr_type, privilege_map)
   end
   return privilege_meet(
     analyze_privileges.expr(cx, node.value, value_privilege),
-    analyze_privileges.expr(cx, node.index, "reads"),
+    analyze_privileges.expr(cx, node.index, reads),
     usage)
 end
 
-function analyze_privileges.expr_method_call(cx, node, privilege)
-  local usage = analyze_privileges.expr(cx, node.value, "reads")
+function analyze_privileges.expr_method_call(cx, node, privilege_map)
+  local usage = analyze_privileges.expr(cx, node.value, reads)
   for _, arg in ipairs(node.args) do
-    usage = privilege_meet(usage, analyze_privileges.expr(cx, arg, "reads"))
+    usage = privilege_meet(usage, analyze_privileges.expr(cx, arg, reads))
   end
   return usage
 end
 
-function analyze_privileges.expr_call(cx, node, privilege)
-  local usage = analyze_privileges.expr(cx, node.fn, "reads")
-  local is_task = std.is_task(node.fn.value)
+function analyze_privileges.expr_call(cx, node, privilege_map)
+  local usage = analyze_privileges.expr(cx, node.fn, reads)
   for i, arg in ipairs(node.args) do
-    local arg_type = std.as_read(arg.expr_type)
     local param_type = node.fn.expr_type.parameters[i]
-    if is_task and std.is_region(param_type) then
-      local privileges, privilege_field_paths, _ =
-        std.find_task_privileges(param_type, node.fn.value:getprivileges())
-      -- Field insensitive for now.
-      local privilege = std.reduce(std.meet_privilege, privileges, "none")
-      if std.is_reduction_op(privilege) then
-        privilege = "reads_writes"
-      end
-
-      usage = privilege_meet(
-        usage, analyze_privileges.expr(cx, arg, privilege))
+    local param_privilege_map
+    if std.is_task(node.fn.value) and std.is_region(param_type) then
+      param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
+    else
+      param_privilege_map = reads
     end
+
+    usage = privilege_meet(
+      usage, analyze_privileges.expr(cx, arg, param_privilege_map))
   end
   return usage
 end
 
-function analyze_privileges.expr_cast(cx, node, privilege)
-  return privilege_meet(analyze_privileges.expr(cx, node.fn, "reads"),
-                        analyze_privileges.expr(cx, node.arg, "reads"))
+function analyze_privileges.expr_cast(cx, node, privilege_map)
+  return privilege_meet(analyze_privileges.expr(cx, node.fn, reads),
+                        analyze_privileges.expr(cx, node.arg, reads))
 end
 
-function analyze_privileges.expr_ctor(cx, node, privilege)
+function analyze_privileges.expr_ctor(cx, node, privilege_map)
   local usage = nil
   for _, field in ipairs(node.fields) do
     usage = privilege_meet(
-      usage, analyze_privileges.expr(cx, field.value, "reads"))
+      usage, analyze_privileges.expr(cx, field.value, reads))
   end
   return usage
 end
 
-function analyze_privileges.expr_raw_physical(cx, node, privilege)
+function analyze_privileges.expr_raw_physical(cx, node, privilege_map)
   assert(false) -- This case needs special handling.
   return privilege_meet(
-    analyze_privileges.expr(cx, node.region, "reads_writes"))
+    analyze_privileges.expr(cx, node.region, reads_writes))
 end
 
-function analyze_privileges.expr_raw_fields(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.region, "none")
+function analyze_privileges.expr_raw_fields(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.region, none)
 end
 
-function analyze_privileges.expr_raw_value(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.value, "none")
+function analyze_privileges.expr_raw_value(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.value, none)
 end
 
-function analyze_privileges.expr_isnull(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.pointer, "reads")
+function analyze_privileges.expr_isnull(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.pointer, reads)
 end
 
-function analyze_privileges.expr_dynamic_cast(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.value, "reads")
+function analyze_privileges.expr_dynamic_cast(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.value, reads)
 end
 
-function analyze_privileges.expr_static_cast(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.value, "reads")
+function analyze_privileges.expr_static_cast(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.value, reads)
 end
 
-function analyze_privileges.expr_ispace(cx, node, privilege)
+function analyze_privileges.expr_ispace(cx, node, privilege_map)
   return privilege_meet(
-    analyze_privileges.expr(cx, node.extent, "reads"),
-    node.start and analyze_privileges.expr(cx, node.start, "reads"))
+    analyze_privileges.expr(cx, node.extent, reads),
+    node.start and analyze_privileges.expr(cx, node.start, reads))
 end
 
-function analyze_privileges.expr_region(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.ispace, "reads")
+function analyze_privileges.expr_region(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.ispace, reads)
 end
 
-function analyze_privileges.expr_partition(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.coloring, "reads")
+function analyze_privileges.expr_partition(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.coloring, reads)
 end
 
-function analyze_privileges.expr_cross_product(cx, node, privilege)
+function analyze_privileges.expr_cross_product(cx, node, privilege_map)
   return std.reduce(
     privilege_meet,
     node.args:map(
-      function(arg) return analyze_privileges.expr(cx, arg, "reads") end))
+      function(arg) return analyze_privileges.expr(cx, arg, reads) end))
 end
 
-function analyze_privileges.expr_unary(cx, node, privilege)
-  return analyze_privileges.expr(cx, node.rhs, "reads")
+function analyze_privileges.expr_unary(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.rhs, reads)
 end
 
-function analyze_privileges.expr_binary(cx, node, privilege)
-  return privilege_meet(analyze_privileges.expr(cx, node.lhs, "reads"),
-                        analyze_privileges.expr(cx, node.rhs, "reads"))
+function analyze_privileges.expr_binary(cx, node, privilege_map)
+  return privilege_meet(analyze_privileges.expr(cx, node.lhs, reads),
+                        analyze_privileges.expr(cx, node.rhs, reads))
 end
 
-function analyze_privileges.expr_deref(cx, node, privilege)
+function analyze_privileges.expr_deref(cx, node, privilege_map)
   local value_type = std.as_read(node.value.expr_type)
   local usage
   if std.is_bounded_type(value_type) then
@@ -816,17 +1179,17 @@ function analyze_privileges.expr_deref(cx, node, privilege)
       --   index = node.value
       -- end
       local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
-      usage = privilege_meet(usage, uses(cx, subregion, privilege))
+      usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
     end
   end
   return privilege_meet(
-    analyze_privileges.expr(cx, node.value, "reads"),
+    analyze_privileges.expr(cx, node.value, reads),
     usage)
 end
 
-function analyze_privileges.expr(cx, node, privilege)
+function analyze_privileges.expr(cx, node, privilege_map)
   if node:is(ast.typed.ExprID) then
-    return analyze_privileges.expr_id(cx, node, privilege)
+    return analyze_privileges.expr_id(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprConstant) then
     return nil
@@ -835,40 +1198,40 @@ function analyze_privileges.expr(cx, node, privilege)
     return nil
 
   elseif node:is(ast.typed.ExprFieldAccess) then
-    return analyze_privileges.expr_field_access(cx, node, privilege)
+    return analyze_privileges.expr_field_access(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIndexAccess) then
-    return analyze_privileges.expr_index_access(cx, node, privilege)
+    return analyze_privileges.expr_index_access(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprMethodCall) then
-    return analyze_privileges.expr_method_call(cx, node, privilege)
+    return analyze_privileges.expr_method_call(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCall) then
-    return analyze_privileges.expr_call(cx, node, privilege)
+    return analyze_privileges.expr_call(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCast) then
-    return analyze_privileges.expr_cast(cx, node, privilege)
+    return analyze_privileges.expr_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCtor) then
-    return analyze_privileges.expr_ctor(cx, node, privilege)
+    return analyze_privileges.expr_ctor(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawContext) then
     return nil
 
   elseif node:is(ast.typed.ExprRawFields) then
-    return analyze_privileges.expr_raw_fields(cx, node, privilege)
+    return analyze_privileges.expr_raw_fields(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawPhysical) then
-    return analyze_privileges.expr_raw_physical(cx, node, privilege)
+    return analyze_privileges.expr_raw_physical(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawRuntime) then
     return nil
 
   elseif node:is(ast.typed.ExprRawValue) then
-    return analyze_privileges.expr_raw_value(cx, node, privilege)
+    return analyze_privileges.expr_raw_value(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIsnull) then
-    return analyze_privileges.expr_isnull(cx, node, privilege)
+    return analyze_privileges.expr_isnull(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprNew) then
     return nil
@@ -877,31 +1240,31 @@ function analyze_privileges.expr(cx, node, privilege)
     return nil
 
   elseif node:is(ast.typed.ExprDynamicCast) then
-    return analyze_privileges.expr_dynamic_cast(cx, node, privilege)
+    return analyze_privileges.expr_dynamic_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprStaticCast) then
-    return analyze_privileges.expr_static_cast(cx, node, privilege)
+    return analyze_privileges.expr_static_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIspace) then
-    return analyze_privileges.expr_ispace(cx, node, privilege)
+    return analyze_privileges.expr_ispace(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRegion) then
-    return analyze_privileges.expr_region(cx, node, privilege)
+    return analyze_privileges.expr_region(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprPartition) then
-    return analyze_privileges.expr_partition(cx, node, privilege)
+    return analyze_privileges.expr_partition(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCrossProduct) then
-    return analyze_privileges.expr_cross_product(cx, node, privilege)
+    return analyze_privileges.expr_cross_product(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprUnary) then
-    return analyze_privileges.expr_unary(cx, node, privilege)
+    return analyze_privileges.expr_unary(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprBinary) then
-    return analyze_privileges.expr_binary(cx, node, privilege)
+    return analyze_privileges.expr_binary(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprDeref) then
-    return analyze_privileges.expr_deref(cx, node, privilege)
+    return analyze_privileges.expr_deref(cx, node, privilege_map)
 
   else
     assert(false, "unexpected node type " .. tostring(node.node_type))
@@ -917,7 +1280,7 @@ end
 function analyze_privileges.stat_if(cx, node)
   return
     privilege_meet(
-      analyze_privileges.expr(cx, node.cond, "reads"),
+      analyze_privileges.expr(cx, node.cond, reads),
       analyze_privileges.block(cx, node.then_block),
       std.reduce(
         privilege_meet,
@@ -928,13 +1291,13 @@ end
 
 function analyze_privileges.stat_elseif(cx, node)
   return privilege_meet(
-    analyze_privileges.expr(cx, node.cond, "reads"),
+    analyze_privileges.expr(cx, node.cond, reads),
     analyze_privileges.block(cx, node.block))
 end
 
 function analyze_privileges.stat_while(cx, node)
   return privilege_meet(
-    analyze_privileges.expr(cx, node.cond, "reads"),
+    analyze_privileges.expr(cx, node.cond, reads),
     analyze_privileges.block(cx, node.block))
 end
 
@@ -945,7 +1308,7 @@ function analyze_privileges.stat_for_num(cx, node)
     std.reduce(
       privilege_meet,
       node.values:map(
-        function(value) return analyze_privileges.expr(cx, value, "reads") end),
+        function(value) return analyze_privileges.expr(cx, value, reads) end),
       outer_privileges)
 end
 
@@ -953,14 +1316,14 @@ function analyze_privileges.stat_for_list(cx, node)
   local block_privileges = analyze_privileges.block(cx, node.block)
   local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
-    analyze_privileges.expr(cx, node.value, "reads"),
+    analyze_privileges.expr(cx, node.value, reads),
     outer_privileges)
 end
 
 function analyze_privileges.stat_repeat(cx, node)
   return privilege_meet(
     analyze_privileges.block(cx, node.block),
-    analyze_privileges.expr(cx, node.until_cond, "reads"))
+    analyze_privileges.expr(cx, node.until_cond, reads))
 end
 
 function analyze_privileges.stat_block(cx, node)
@@ -971,16 +1334,16 @@ function analyze_privileges.stat_var(cx, node)
   return std.reduce(
     privilege_meet,
     node.values:map(
-      function(value) return analyze_privileges.expr(cx, value, "reads") end))
+      function(value) return analyze_privileges.expr(cx, value, reads) end))
 end
 
 function analyze_privileges.stat_var_unpack(cx, node)
-  return analyze_privileges.expr(cx, node.value, "reads")
+  return analyze_privileges.expr(cx, node.value, reads)
 end
 
 function analyze_privileges.stat_return(cx, node) 
   if node.value then
-    return analyze_privileges.expr(cx, node.value, "reads")
+    return analyze_privileges.expr(cx, node.value, reads)
   else
     return nil
   end
@@ -992,12 +1355,12 @@ function analyze_privileges.stat_assignment(cx, node)
       privilege_meet,
       node.lhs:map(
         function(lh)
-          return analyze_privileges.expr(cx, lh, "reads_writes")
+          return analyze_privileges.expr(cx, lh, reads_writes)
       end),
       std.reduce(
         privilege_meet,
         node.rhs:map(
-          function(rh) return analyze_privileges.expr(cx, rh, "reads") end)))
+          function(rh) return analyze_privileges.expr(cx, rh, reads) end)))
 end
 
 function analyze_privileges.stat_reduce(cx, node)
@@ -1005,15 +1368,15 @@ function analyze_privileges.stat_reduce(cx, node)
     std.reduce(
       privilege_meet,
       node.lhs:map(
-        function(lh) return analyze_privileges.expr(cx, lh, "reads_writes") end),
+        function(lh) return analyze_privileges.expr(cx, lh, reads_writes) end),
       std.reduce(
         privilege_meet,
         node.rhs:map(
-          function(rh) return analyze_privileges.expr(cx, rh, "reads") end)))
+          function(rh) return analyze_privileges.expr(cx, rh, reads) end)))
 end
 
 function analyze_privileges.stat_expr(cx, node)
-  return analyze_privileges.expr(cx, node.expr, "reads")
+  return analyze_privileges.expr(cx, node.expr, reads)
 end
 
 function analyze_privileges.stat(cx, node)
@@ -1084,13 +1447,7 @@ local function as_fornum_stat(cx, symbol, block, parallel, args, span)
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  for i, arg in pairs(args) do
-    local privilege, input_nid, output_nid = unpack(arg)
-    add_input_edge(cx, input_nid, compute_nid, i, privilege)
-    if output_nid then
-      add_output_edge(cx, compute_nid, i, output_nid, privilege)
-    end
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return sequence_advance(cx, compute_nid)
 end
@@ -1103,13 +1460,7 @@ local function as_forlist_stat(cx, symbol, block, vectorize, args, span)
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  for i, arg in pairs(args) do
-    local privilege, input_nid, output_nid = unpack(arg)
-    add_input_edge(cx, input_nid, compute_nid, i, privilege)
-    if output_nid then
-      add_output_edge(cx, compute_nid, i, output_nid, privilege)
-    end
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return sequence_advance(cx, compute_nid)
 end
@@ -1120,30 +1471,22 @@ local function as_reduce_stat(cx, op, args, span)
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  for i, arg in pairs(args) do
-    local input_nid, output_nid = unpack(arg)
-    add_input_edge(cx, input_nid, compute_nid, i, "reads")
-    if output_nid then
-      add_output_edge(cx, compute_nid, i, output_nid, "reads_writes")
-    end
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return sequence_advance(cx, compute_nid)
 end
 
-local function as_opaque_expr(cx, node, input_nids)
+local function as_opaque_expr(cx, node, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
     cx, compute_nid, std.as_read(node.expr_type), node.span)
-  for i, input_nid in ipairs(input_nids) do
-    add_input_edge(cx, input_nid, compute_nid, i, "reads")
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
-  return result_nid
+  return attach_result(privilege_map, result_nid)
 end
 
-local function as_call_expr(cx, args, opaque, expr_type, span)
+local function as_call_expr(cx, args, opaque, expr_type, span, privilege_map)
   local label = flow.node.Task {
     opaque = opaque,
     expr_type = expr_type,
@@ -1151,106 +1494,115 @@ local function as_call_expr(cx, args, opaque, expr_type, span)
   }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(cx, compute_nid, expr_type, span)
-  for i, arg in ipairs(args) do
-    local privilege, input_nid, output_nid = unpack(arg)
-    add_input_edge(cx, input_nid, compute_nid, i, privilege)
-    if output_nid then
-      add_output_edge(cx, compute_nid, i, output_nid, privilege)
-    end
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
-  return result_nid
+  return attach_result(privilege_map, result_nid)
 end
 
-local function as_index_expr(cx, args, result_nid, expr_type, span)
+local function as_index_expr(cx, args, result_nid, expr_type, span, privilege_map)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
     span = span,
   }
   local compute_nid = add_node(cx, label)
   add_name_edge(cx, compute_nid, result_nid)
-  for i, input_pair in ipairs(args) do
-    local privilege, input_nid = unpack(input_pair)
-    add_input_edge(cx, input_nid, compute_nid, i, privilege)
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
-  return result_nid
+  return attach_result(privilege_map, result_nid)
 end
 
-local function as_deref_expr(cx, args, result_nid, expr_type, span)
+local function as_deref_expr(cx, args, result_nid, expr_type, span, privilege_map)
   local label = flow.node.Deref {
     expr_type = expr_type,
     span = span,
   }
   local compute_nid = add_node(cx, label)
   add_name_edge(cx, compute_nid, result_nid)
-  for i, input_pair in ipairs(args) do
-    local privilege, input_nid = unpack(input_pair)
-    add_input_edge(cx, input_nid, compute_nid, i, privilege)
-  end
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
-  return result_nid
+  return attach_result(privilege_map, result_nid)
 end
 
-function flow_from_ast.expr_id(cx, node, privilege)
+function flow_from_ast.expr_id(cx, node, privilege_map)
   -- FIXME: Why am I getting vars typed as unit?
   if std.as_read(node.expr_type) == terralib.types.unit then
-    return flow.null()
+    return new_field_map()
   end
-  return open_region_tree(cx, node.expr_type, node.value, privilege)
+  return open_region_tree(cx, node.expr_type, node.value, privilege_map)
 end
 
-function flow_from_ast.expr_constant(cx, node, privilege)
-  return cx.graph:add_node(flow.node.Constant { value = node })
+function flow_from_ast.expr_constant(cx, node, privilege_map)
+  return attach_result(
+    privilege_map,
+    cx.graph:add_node(flow.node.Constant { value = node }))
 end
 
-function flow_from_ast.expr_function(cx, node, privilege)
-  return cx.graph:add_node(flow.node.Function { value = node })
+function flow_from_ast.expr_function(cx, node, privilege_map)
+  return attach_result(
+    privilege_map,
+    cx.graph:add_node(flow.node.Function { value = node }))
 end
 
-function flow_from_ast.expr_field_access(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
+function flow_from_ast.expr_field_access(cx, node, privilege_map)
+  local value_type = std.as_read(node.value.expr_type)
+  local value
+  local field_privilege_map = privilege_map:prepend(node.field_name)
+  if std.is_bounded_type(value_type) and value_type:is_ptr() then
+    local bounds = value_type:bounds()
+    if #bounds == 1 and std.is_region(bounds[1]) then
+      local parent = bounds[1]
+      local index
+      -- FIXME: This causes issues with some tests.
+      -- if node.value:is(ast.typed.ExprID) and
+      --   not std.is_rawref(node.value.expr_type)
+      -- then
+      --   index = node.value
+      -- end
+      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+
+      open_region_tree(cx, subregion, nil, field_privilege_map)
+    end
+    value = flow_from_ast.expr(cx, node.value, reads)
+  else
+    value = flow_from_ast.expr(cx, node.value, field_privilege_map)
+  end
   return as_opaque_expr(
     cx,
     node { value = as_ast(cx, value) },
-    terralib.newlist({value}))
+    terralib.newlist({value}),
+    field_privilege_map)
 end
 
-function flow_from_ast.expr_index_access(cx, node, privilege)
+function flow_from_ast.expr_index_access(cx, node, privilege_map)
   local expr_type = std.as_read(node.expr_type)
-  local value_privilege = "reads"
+  local value_privilege = reads
   if flow_region_tree.is_region(expr_type) then
-    value_privilege = "none"
+    value_privilege = none
   end
   local value = flow_from_ast.expr(cx, node.value, value_privilege)
-
-  local index_privilege = "reads"
-  local index = flow_from_ast.expr(cx, node.index, index_privilege)
+  local index = flow_from_ast.expr(cx, node.index, reads)
 
   if flow_region_tree.is_region(expr_type) then
-    local inputs = terralib.newlist({
-        {value_privilege, value},
-        {index_privilege, index},
-    })
-    local input_nid, output_nid = open_region_tree(
-      cx, node.expr_type, nil, privilege)
+    local inputs = terralib.newlist({value, index})
+    local region = open_region_tree(cx, node.expr_type, nil, privilege_map)
     as_index_expr(
-      cx, inputs, input_nid, expr_type, node.span)
-    return input_nid, output_nid
-  else
-    return as_opaque_expr(
-      cx,
-      node {
-        value = as_ast(cx, value),
-        index = as_ast(cx, index),
-      },
-      terralib.newlist({value, index}))
+      cx, inputs, as_nid(cx, region), expr_type, node.span, privilege_map)
+    return region
   end
+
+  return as_opaque_expr(
+    cx,
+    node {
+      value = as_ast(cx, value),
+      index = as_ast(cx, index),
+    },
+    terralib.newlist({value, index}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_method_call(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
-  local args = node.args:map(function(arg) return flow_from_ast.expr(cx, arg, "reads") end)
+function flow_from_ast.expr_method_call(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
+  local args = node.args:map(function(arg) return flow_from_ast.expr(cx, arg, reads) end)
   local inputs = terralib.newlist({value})
   inputs:insertall(args)
   return as_opaque_expr(
@@ -1259,54 +1611,45 @@ function flow_from_ast.expr_method_call(cx, node, privilege)
       value = as_ast(cx, value),
       index = args:map(function(arg) return as_ast(cx, arg) end),
     },
-    inputs)
+    inputs, privilege_map)
 end
 
-function flow_from_ast.expr_call(cx, node, privilege)
-  local fn = flow_from_ast.expr(cx, node.fn, "reads")
-  local arg_privileges = terralib.newlist()
-  local args = terralib.newlist()
+function flow_from_ast.expr_call(cx, node, privilege_map)
+  local fn = flow_from_ast.expr(cx, node.fn, reads)
+  local inputs = terralib.newlist({fn})
   for i, arg in ipairs(node.args) do
     local param_type = node.fn.expr_type.parameters[i]
-    local privilege
+    local param_privilege_map
     if std.is_task(node.fn.value) and std.is_region(param_type) then
-      local privileges, privilege_field_paths, _ =
-        std.find_task_privileges(param_type, node.fn.value:getprivileges())
-      -- Field insensitive for now.
-      privilege = std.reduce(std.meet_privilege, privileges, "none")
-      if std.is_reduction_op(privilege) then
-        privilege = "reads_writes"
-      end
+      param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
     else
-      privilege = "reads"
+      param_privilege_map = reads
     end
-
-    arg_privileges:insert(privilege)
-    args:insert({privilege, flow_from_ast.expr(cx, arg, privilege)})
+    inputs:insert(flow_from_ast.expr(cx, arg, param_privilege_map))
   end
 
-  local inputs = terralib.newlist({{"reads", fn}})
-  inputs:insertall(args)
   return as_call_expr(
     cx, inputs,
-    not std.is_task(node.fn.value), std.as_read(node.expr_type), node.span)
+    not std.is_task(node.fn.value), std.as_read(node.expr_type), node.span,
+    privilege_map)
 end
 
-function flow_from_ast.expr_cast(cx, node, privilege)
-  local fn = flow_from_ast.expr(cx, node.fn, "reads")
-  local arg = flow_from_ast.expr(cx, node.arg, "reads")
+function flow_from_ast.expr_cast(cx, node, privilege_map)
+  local fn = flow_from_ast.expr(cx, node.fn, reads)
+  local arg = flow_from_ast.expr(cx, node.arg, reads)
   return as_opaque_expr(
     cx,
     node {
       fn = as_ast(cx, fn),
       arg = as_ast(cx, arg),
     },
-    terralib.newlist({fn, arg}))
+    terralib.newlist({fn, arg}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_ctor(cx, node, privilege)
+function flow_from_ast.expr_ctor(cx, node, privilege_map)
   local values = node.fields:map(
-    function(field) return flow_from_ast.expr(cx, field.value, "reads") end)
+    function(field) return flow_from_ast.expr(cx, field.value, reads) end)
   local fields = std.zip(node.fields, values):map(
     function(pair)
       local field, value = unpack(pair)
@@ -1315,95 +1658,104 @@ function flow_from_ast.expr_ctor(cx, node, privilege)
   return as_opaque_expr(
     cx,
     node { fields = fields },
-    values)
+    values, privilege_map)
 end
 
-function flow_from_ast.expr_raw_context(cx, node, privilege)
-  return as_opaque_expr(cx, node, terralib.newlist())
+function flow_from_ast.expr_raw_context(cx, node, privilege_map)
+  return as_opaque_expr(cx, node, terralib.newlist(), privilege_map)
 end
 
-function flow_from_ast.expr_raw_fields(cx, node, privilege)
-  local region = flow_from_ast.expr(cx, node.region, "reads")
+function flow_from_ast.expr_raw_fields(cx, node, privilege_map)
+  local region = flow_from_ast.expr(cx, node.region, reads)
   return as_opaque_expr(
     cx,
     node { region = as_ast(cx, region) },
-    terralib.newlist({region}))
+    terralib.newlist({region}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_raw_physical(cx, node, privilege)
-  local region = flow_from_ast.expr(cx, node.region, "reads")
+function flow_from_ast.expr_raw_physical(cx, node, privilege_map)
+  local region = flow_from_ast.expr(cx, node.region, reads)
   return as_opaque_expr(
     cx,
     node { region = as_ast(cx, region) },
-    terralib.newlist({region}))
+    terralib.newlist({region}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_raw_runtime(cx, node, privilege)
-  return as_opaque_expr(cx, node, terralib.newlist())
+function flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
+  return as_opaque_expr(cx, node, terralib.newlist(), privilege_map)
 end
 
-function flow_from_ast.expr_raw_value(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
+function flow_from_ast.expr_raw_value(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
     node { value = as_ast(cx, value) },
-    terralib.newlist({value}))
+    terralib.newlist({value}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_isnull(cx, node, privilege)
-  local pointer = flow_from_ast.expr(cx, node.pointer, "reads")
+function flow_from_ast.expr_isnull(cx, node, privilege_map)
+  local pointer = flow_from_ast.expr(cx, node.pointer, reads)
   return as_opaque_expr(
     cx,
     node { pointer = as_ast(cx, pointer) },
-    terralib.newlist({pointer}))
+    terralib.newlist({pointer}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_new(cx, node, privilege)
-  local region = flow_from_ast.expr(cx, node.region, "none")
+function flow_from_ast.expr_new(cx, node, privilege_map)
+  local region = flow_from_ast.expr(cx, node.region, none)
   return as_opaque_expr(
     cx,
     node { region = as_ast(cx, region) },
-    terralib.newlist({region}))
+    terralib.newlist({region}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_dynamic_cast(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
+function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
     node { value = as_ast(cx, value) },
-    terralib.newlist({value}))
+    terralib.newlist({value}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_static_cast(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
+function flow_from_ast.expr_static_cast(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
     node { value = as_ast(cx, value) },
-    terralib.newlist({value}))
+    terralib.newlist({value}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_unary(cx, node, privilege)
-  local rhs = flow_from_ast.expr(cx, node.rhs, "reads")
+function flow_from_ast.expr_unary(cx, node, privilege_map)
+  local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
     cx,
     node { rhs = as_ast(cx, rhs) },
-    terralib.newlist({rhs}))
+    terralib.newlist({rhs}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_binary(cx, node, privilege)
-  local lhs = flow_from_ast.expr(cx, node.lhs, "reads")
-  local rhs = flow_from_ast.expr(cx, node.rhs, "reads")
+function flow_from_ast.expr_binary(cx, node, privilege_map)
+  local lhs = flow_from_ast.expr(cx, node.lhs, reads)
+  local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
     cx,
     node {
       lhs = as_ast(cx, lhs),
       rhs = as_ast(cx, rhs),
     },
-    terralib.newlist({lhs, rhs}))
+    terralib.newlist({lhs, rhs}),
+    privilege_map)
 end
 
-function flow_from_ast.expr_deref(cx, node, privilege)
-  local value = flow_from_ast.expr(cx, node.value, "reads")
+function flow_from_ast.expr_deref(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
   local value_type = std.as_read(node.value.expr_type)
   if std.is_bounded_type(value_type) then
     local bounds = value_type:bounds()
@@ -1418,100 +1770,100 @@ function flow_from_ast.expr_deref(cx, node, privilege)
       -- end
       local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
 
-      local inputs = terralib.newlist({
-          {"reads", value},
-      })
-      local input_nid, output_nid = open_region_tree(cx, subregion, nil, privilege)
+      local inputs = terralib.newlist({value})
+      local region = open_region_tree(cx, subregion, nil, privilege_map)
       as_deref_expr(
-        cx, inputs, input_nid, node.expr_type, node.span)
-      return input_nid, output_nid
+        cx, inputs, as_nid(cx, region),
+        node.expr_type, node.span, privilege_map)
+      return region
     end
   end
 
   return as_opaque_expr(
     cx,
     node { value = as_ast(cx, value) },
-    terralib.newlist({value}))
+    terralib.newlist({value}),
+    privilege_map)
 end
 
-function flow_from_ast.expr(cx, node, privilege)
+function flow_from_ast.expr(cx, node, privilege_map)
   if node:is(ast.typed.ExprID) then
-    return flow_from_ast.expr_id(cx, node, privilege)
+    return flow_from_ast.expr_id(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprConstant) then
-    return flow_from_ast.expr_constant(cx, node, privilege)
+    return flow_from_ast.expr_constant(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprFunction) then
-    return flow_from_ast.expr_function(cx, node, privilege)
+    return flow_from_ast.expr_function(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprFieldAccess) then
-    return flow_from_ast.expr_field_access(cx, node, privilege)
+    return flow_from_ast.expr_field_access(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIndexAccess) then
-    return flow_from_ast.expr_index_access(cx, node, privilege)
+    return flow_from_ast.expr_index_access(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprMethodCall) then
-    return flow_from_ast.expr_method_call(cx, node, privilege)
+    return flow_from_ast.expr_method_call(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCall) then
-    return flow_from_ast.expr_call(cx, node, privilege)
+    return flow_from_ast.expr_call(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCast) then
-    return flow_from_ast.expr_cast(cx, node, privilege)
+    return flow_from_ast.expr_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCtor) then
-    return flow_from_ast.expr_ctor(cx, node, privilege)
+    return flow_from_ast.expr_ctor(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawContext) then
-    return flow_from_ast.expr_raw_context(cx, node, privilege)
+    return flow_from_ast.expr_raw_context(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawFields) then
-    return flow_from_ast.expr_raw_fields(cx, node, privilege)
+    return flow_from_ast.expr_raw_fields(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawPhysical) then
-    return flow_from_ast.expr_raw_physical(cx, node, privilege)
+    return flow_from_ast.expr_raw_physical(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawRuntime) then
-    return flow_from_ast.expr_raw_runtime(cx, node, privilege)
+    return flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRawValue) then
-    return flow_from_ast.expr_raw_value(cx, node, privilege)
+    return flow_from_ast.expr_raw_value(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIsnull) then
-    return flow_from_ast.expr_isnull(cx, node, privilege)
+    return flow_from_ast.expr_isnull(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprNew) then
-    return flow_from_ast.expr_new(cx, node, privilege)
+    return flow_from_ast.expr_new(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprNull) then
-    return flow_from_ast.expr_null(cx, node, privilege)
+    return flow_from_ast.expr_null(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprDynamicCast) then
-    return flow_from_ast.expr_dynamic_cast(cx, node, privilege)
+    return flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprStaticCast) then
-    return flow_from_ast.expr_static_cast(cx, node, privilege)
+    return flow_from_ast.expr_static_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprIspace) then
-    return flow_from_ast.expr_ispace(cx, node, privilege)
+    return flow_from_ast.expr_ispace(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprRegion) then
-    return flow_from_ast.expr_region(cx, node, privilege)
+    return flow_from_ast.expr_region(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprPartition) then
-    return flow_from_ast.expr_partition(cx, node, privilege)
+    return flow_from_ast.expr_partition(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprCrossProduct) then
-    return flow_from_ast.expr_cross_product(cx, node, privilege)
+    return flow_from_ast.expr_cross_product(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprUnary) then
-    return flow_from_ast.expr_unary(cx, node, privilege)
+    return flow_from_ast.expr_unary(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprBinary) then
-    return flow_from_ast.expr_binary(cx, node, privilege)
+    return flow_from_ast.expr_binary(cx, node, privilege_map)
 
   elseif node:is(ast.typed.ExprDeref) then
-    return flow_from_ast.expr_deref(cx, node, privilege)
+    return flow_from_ast.expr_deref(cx, node, privilege_map)
 
   else
     assert(false, "unexpected node type " .. tostring(node.node_type))
@@ -1519,42 +1871,38 @@ function flow_from_ast.expr(cx, node, privilege)
 end
 
 function flow_from_ast.block(cx, node)
-  return node.stats:map(
+  node.stats:map(
     function(stat) return flow_from_ast.stat(cx, stat) end)
 end
 
 function flow_from_ast.stat_if(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_while(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_for_num(cx, node)
-  local values = node.values:map(
-    function(value) return flow_from_ast.expr(cx, value, "reads") end)
+  local inputs = node.values:map(
+    function(value) return flow_from_ast.expr(cx, value, reads) end)
 
   local block_cx = cx:new_local_scope()
   local block_privileges = analyze_privileges.block(block_cx, node.block)
-  local inner_privileges = privilege_summary(block_cx, block_privileges, false)
-  local outer_privileges = privilege_summary(block_cx, block_privileges, true)
-  for region_type, privilege in pairs(inner_privileges) do
-    if privilege ~= "none" then
-      preopen_region_tree(block_cx, region_type, privilege)
-    end
+  local inner_privileges = index_privileges_by_region(
+    privilege_summary(block_cx, block_privileges, false))
+  local outer_privileges = index_privileges_by_region(
+    privilege_summary(block_cx, block_privileges, true))
+  for region_type, privilege_map in pairs(inner_privileges) do
+    preopen_region_tree(block_cx, region_type, privilege_map)
   end
   local block = flow_from_ast.block(block_cx, node.block)
 
-  local inputs = terralib.newlist()
-  for i, value in ipairs(values) do
-    inputs[i] = {"reads", value}
-  end
   do
-    assert(#values <= 3)
+    assert(#inputs <= 3)
     local i = 4
-    for region_type, privilege in pairs(outer_privileges) do
-      inputs[i] = {privilege, open_region_tree(cx, region_type, nil, privilege)}
+    for region_type, privilege_map in pairs(outer_privileges) do
+      inputs[i] = open_region_tree(cx, region_type, nil, privilege_map)
     end
   end
 
@@ -1562,31 +1910,33 @@ function flow_from_ast.stat_for_num(cx, node)
 end
 
 function flow_from_ast.stat_for_list(cx, node)
-  local value = flow_from_ast.expr(cx, node.value, "none")
+  local value = flow_from_ast.expr(cx, node.value, none)
 
   local block_cx = cx:new_local_scope()
   local block_privileges = analyze_privileges.block(block_cx, node.block)
-  local inner_privileges = privilege_summary(block_cx, block_privileges, false)
-  local outer_privileges = privilege_summary(block_cx, block_privileges, true)
-  for region_type, privilege in pairs(inner_privileges) do
-    preopen_region_tree(block_cx, region_type, privilege)
+  local inner_privileges = index_privileges_by_region(
+    privilege_summary(block_cx, block_privileges, false))
+  local outer_privileges = index_privileges_by_region(
+    privilege_summary(block_cx, block_privileges, true))
+  for region_type, privilege_map in pairs(inner_privileges) do
+    preopen_region_tree(block_cx, region_type, privilege_map)
   end
   local block = flow_from_ast.block(block_cx, node.block)
 
-  local inputs = terralib.newlist({{"none", value}})
-  for region_type, privilege in pairs(outer_privileges) do
-    inputs:insert({privilege, open_region_tree(cx, region_type, nil, privilege)})
+  local inputs = terralib.newlist({value})
+  for region_type, privilege_map in pairs(outer_privileges) do
+    inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
   end
 
   as_forlist_stat(cx, node.symbol, block_cx.graph, node.vectorize, inputs, node.span)
 end
 
 function flow_from_ast.stat_repeat(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_block(cx, node)
-  return flow_from_ast.block(cx, node.block)
+  flow_from_ast.block(cx, node.block)
 end
 
 function flow_from_ast.stat_var(cx, node)
@@ -1598,89 +1948,90 @@ function flow_from_ast.stat_var(cx, node)
     return
   end
 
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_var_unpack(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_return(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_break(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_assignment(cx, node)
-  return as_opaque_stat(cx, node)
+  as_opaque_stat(cx, node)
 end
 
 function flow_from_ast.stat_reduce(cx, node)
   local rhs = node.rhs:map(
-    function(rh) return {flow_from_ast.expr(cx, rh, "reads")} end)
+    function(rh) return flow_from_ast.expr(cx, rh, reads) end)
   local lhs = node.lhs:map(
-    function(lh) return {flow_from_ast.expr(cx, lh, "reads_writes")} end)
+    function(lh) return flow_from_ast.expr(cx, lh, reads_writes) end)
 
 
   local inputs = terralib.newlist()
   inputs:insertall(lhs)
   inputs:insertall(rhs)
 
-  return as_reduce_stat(cx, node.op, inputs, node.span)
+  as_reduce_stat(cx, node.op, inputs, node.span)
 end
 
 function flow_from_ast.stat_expr(cx, node)
-  local result_nid = flow_from_ast.expr(cx, node.expr, "reads")
-  if not flow.is_null(result_nid) then
+  local result = flow_from_ast.expr(cx, node.expr, reads)
+  for field_path, value in result:items() do
+    local privilege, result_nid = unpack(value)
     if cx.graph:node_label(result_nid):is(flow.node.Scalar) then
-      return sequence_advance(cx, cx.graph:immediate_predecessor(result_nid))
+      sequence_advance(cx, cx.graph:immediate_predecessor(result_nid))
     else
-      return sequence_advance(cx, result_nid)
+      sequence_advance(cx, result_nid)
     end
   end
 end
 
 function flow_from_ast.stat(cx, node)
   if node:is(ast.typed.StatIf) then
-    return flow_from_ast.stat_if(cx, node)
+    flow_from_ast.stat_if(cx, node)
 
   elseif node:is(ast.typed.StatWhile) then
-    return flow_from_ast.stat_while(cx, node)
+    flow_from_ast.stat_while(cx, node)
 
   elseif node:is(ast.typed.StatForNum) then
-    return flow_from_ast.stat_for_num(cx, node)
+    flow_from_ast.stat_for_num(cx, node)
 
   elseif node:is(ast.typed.StatForList) then
-    return flow_from_ast.stat_for_list(cx, node)
+    flow_from_ast.stat_for_list(cx, node)
 
   elseif node:is(ast.typed.StatRepeat) then
-    return flow_from_ast.stat_repeat(cx, node)
+    flow_from_ast.stat_repeat(cx, node)
 
   elseif node:is(ast.typed.StatBlock) then
-    return flow_from_ast.stat_block(cx, node)
+    flow_from_ast.stat_block(cx, node)
 
   elseif node:is(ast.typed.StatVar) then
-    return flow_from_ast.stat_var(cx, node)
+    flow_from_ast.stat_var(cx, node)
 
   elseif node:is(ast.typed.StatVarUnpack) then
-    return flow_from_ast.stat_var_unpack(cx, node)
+    flow_from_ast.stat_var_unpack(cx, node)
 
   elseif node:is(ast.typed.StatReturn) then
-    return flow_from_ast.stat_return(cx, node)
+    flow_from_ast.stat_return(cx, node)
 
   elseif node:is(ast.typed.StatBreak) then
-    return flow_from_ast.stat_break(cx, node)
+    flow_from_ast.stat_break(cx, node)
 
   elseif node:is(ast.typed.StatAssignment) then
-    return flow_from_ast.stat_assignment(cx, node)
+    flow_from_ast.stat_assignment(cx, node)
 
   elseif node:is(ast.typed.StatReduce) then
-    return flow_from_ast.stat_reduce(cx, node)
+    flow_from_ast.stat_reduce(cx, node)
 
   elseif node:is(ast.typed.StatExpr) then
-    return flow_from_ast.stat_expr(cx, node)
+    flow_from_ast.stat_expr(cx, node)
 
   else
     assert(false, "unexpected node type " .. tostring(node:type()))
