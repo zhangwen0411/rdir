@@ -272,9 +272,9 @@ local function as_nid(cx, value)
   for field_path, values in value:items() do
     local privilege, input_nid, output_nid = unpack(values)
     if nid == nil then
-      nid = input_nid
+      nid = input_nid or output_nid
     else
-      assert(nid == input_nid)
+      assert(nid == (input_nid or output_nid))
     end
   end
   assert(nid)
@@ -342,6 +342,8 @@ local function add_output_edge(cx, from_nid, from_port, to_nid, privilege)
   local label
   if privilege == "reads_writes" then
     label = flow.edge.Write {}
+  elseif std.is_reduction_op(privilege) then
+    label = flow.edge.Reduce { op = std.get_reduction_op(privilege) }
   else
     assert(false)
   end
@@ -360,7 +362,9 @@ local function add_args(cx, compute_nid, args)
     assert(is_field_map(arg))
     for field_path, values in arg:items() do
       local privilege, input_nid, output_nid = unpack(values)
-      add_input_edge(cx, input_nid, compute_nid, i, privilege)
+      if input_nid then
+        add_input_edge(cx, input_nid, compute_nid, i, privilege)
+      end
       if output_nid then
         add_output_edge(cx, compute_nid, i, output_nid, privilege)
       end
@@ -405,12 +409,11 @@ end
 local region_state = setmetatable({}, { __index = function(t, k) error("region state has no field " .. tostring(k), 2) end})
 region_state.__index = region_state
 
-local modes = setmetatable(
-  {
-    closed = "closed",
-    read = "read",
-    write = "write",
-  }, { __index = function(t, k) error("no such mode " .. tostring(k), 2) end})
+local modes = setmetatable({}, { __index = function(t, k) error("no such mode " .. tostring(k), 2) end})
+modes.closed = "closed"
+modes.read = "read"
+modes.write = "write"
+modes.reduce = "reduce"
 
 local function is_mode(x)
   return rawget(modes, x)
@@ -443,6 +446,16 @@ function region_tree_state:set_mode(region_type, mode)
   assert(rawget(self.region_tree_state, region_type))
   assert(is_mode(mode))
   self.region_tree_state[region_type].mode = mode
+end
+
+function region_tree_state:op(region_type)
+  assert(rawget(self.region_tree_state, region_type))
+  return self.region_tree_state[region_type].op
+end
+
+function region_tree_state:set_op(region_type, op)
+  assert(rawget(self.region_tree_state, region_type))
+  self.region_tree_state[region_type].op = op
 end
 
 function region_tree_state:current(region_type)
@@ -518,6 +531,7 @@ function region_state.new()
       current = flow.null(),
       open = flow.null(),
       dirty = false,
+      op = false,
   }, region_state)
 end
 
@@ -604,11 +618,15 @@ end
 
 local function privilege_mode(privilege)
   if privilege == "none" then
-    return false
+    return false, false
   elseif privilege == "reads" then
-    return modes.read
+    return modes.read, false
+  elseif privilege == "reads_writes" then
+    return modes.write, false
+  elseif std.is_reduction_op(privilege) then
+    return modes.reduce, std.get_reduction_op(privilege)
   else
-    return modes.write
+    assert(false)
   end
 end
 
@@ -736,42 +754,70 @@ function transitions.close_and_reopen(cx, path, index, field_path)
   transitions.open(cx, path, index, field_path)
 end
 
-local function select_transition(cx, path, index, desired_mode, field_path)
+local function select_transition(cx, path, index,
+                                 desired_mode, desired_op, field_path)
   local current_mode = cx:state(field_path):mode(path[index])
+  local current_op = cx:state(field_path):op(path[index])
   if index == 1 then -- Leaf
     if current_mode == modes.closed then
-      return modes.closed, transitions.create
-    elseif current_mode == modes.read and desired_mode == modes.read then
-      return modes.read, transitions.nothing
-    elseif current_mode == modes.read and desired_mode == modes.write then
-      return modes.write, transitions.close
+      if not current_op or desired_op == current_op then
+        return modes.closed, desired_op, transitions.create
+      else
+        return modes.closed, desired_op, transitions.close
+      end
+    elseif current_mode == modes.read then
+      if desired_mode == modes.read then
+        return modes.read, desired_op, transitions.nothing
+      else
+        return modes.closed, desired_op, transitions.close
+      end
     elseif current_mode == modes.write then
-      return modes.closed, transitions.close
+      return modes.closed, desired_op, transitions.close
+    elseif current_mode == modes.reduce then
+      if desired_mode == modes.reduce and desired_op == current_op then
+        return modes.reduce, desired_op, transitions.nothing
+      else
+        return modes.closed, desired_op, transitions.close
+      end
     else
       assert(false)
     end
   else -- Inner
     local child_index = index - 1
     if current_mode == modes.closed then
-      return desired_mode, transitions.open
-    elseif current_mode == modes.read and desired_mode == modes.read then
-      return modes.read, transitions.nothing
-    elseif current_mode == modes.read and desired_mode == modes.write then
-      if #cx:state(field_path):open_siblings(path[child_index]) > 0 then
-        -- FIXME: This doesn't actually work. When writing to an
-        -- aliased partition that was previously read, we will miss a
-        -- WAR dependence if we don't fully close the tree. For now,
-        -- be conservative and use close_and_reopen instead.
-        return modes.write, transitions.close_and_reopen
-        -- return modes.write, transitions.close_conflicting_children
+      return desired_mode, desired_op, transitions.open
+    elseif current_mode == modes.read then
+      if desired_mode == modes.read then
+        return modes.read, desired_op, transitions.nothing
       else
-        return modes.write, transitions.nothing
+        if desired_mode == modes.reduce or
+          -- FIXME: Is there a bug here? What about closed but
+          -- currently-being-read siblings?
+          #cx:state(field_path):open_siblings(path[child_index]) > 0
+        then
+          return desired_mode, desired_op, transitions.close_and_reopen
+        else
+          return desired_mode, desired_op, transitions.nothing
+        end
       end
     elseif current_mode == modes.write then
+      -- FIXME: Does dirty include all open siblings?
       if #cx:state(field_path):dirty_siblings(path[child_index]) > 0 then
-        return modes.write, transitions.close_and_reopen
+        return modes.write, false, transitions.close_and_reopen
       else
-        return modes.write, transitions.nothing
+        return modes.write, false, transitions.nothing
+      end
+    elseif current_mode == modes.reduce then
+      if desired_mode == modes.reduce then
+        if desired_op == current_op or
+          #cx:state(field_path):dirty_siblings(path[child_index]) == 0
+        then
+          return modes.reduce, desired_op, transitions.nothing
+        else
+          return modes.reduce, desired_op, transitions.close_and_reopen
+        end
+      else
+        return desired_mode, desired_op, transitions.close_and_reopen
       end
     else
       assert(false)
@@ -779,20 +825,22 @@ local function select_transition(cx, path, index, desired_mode, field_path)
   end
 end
 
-local function open_region_tree_node(cx, path, index, mode, field_path)
+local function open_region_tree_node(cx, path, index, desired_mode, desired_op, field_path)
   assert(index >= 1)
   cx:state(field_path):ensure(path[index])
-  local next_mode, transition = select_transition(cx, path, index, mode, field_path)
+  local next_mode, next_op, transition = select_transition(
+    cx, path, index, desired_mode, desired_op, field_path)
   local next_nid, fresh = transition(cx, path, index, field_path)
   cx:state(field_path):set_mode(path[index], next_mode)
+  cx:state(field_path):set_op(path[index], next_op)
   if index >= 2 then
-    return open_region_tree_node(cx, path, index-1, mode, field_path)
+    return open_region_tree_node(cx, path, index-1, desired_mode, desired_op, field_path)
   end
   return next_nid, fresh
 end
 
 local function open_region_tree_top(cx, path, privilege, field_path)
-  local desired_mode = privilege_mode(privilege)
+  local desired_mode, desired_op = privilege_mode(privilege)
   if not desired_mode then
     -- Special case for "none" privilege: just create the node and
     -- exit without linking it up to anything.
@@ -802,7 +850,7 @@ local function open_region_tree_top(cx, path, privilege, field_path)
   end
 
   local current_nid, fresh = open_region_tree_node(
-    cx, path, #path, desired_mode, field_path)
+    cx, path, #path, desired_mode, desired_op, field_path)
   if fresh then sequence_depend(cx, current_nid) end
   local next_nid
   if desired_mode == modes.write then
@@ -811,9 +859,13 @@ local function open_region_tree_top(cx, path, privilege, field_path)
     cx:state(field_path):set_current(path[1], next_nid)
     cx:state(field_path):set_open(path[1], flow.null())
     cx:state(field_path):set_dirty(path[1], true)
+  elseif desired_mode == modes.reduce then
+    next_nid = current_nid
+    current_nid = false
   end
-  assert(flow.is_valid_node(current_nid))
-  assert(next_nid == nil or flow.is_valid_node(next_nid))
+  assert(current_nid or next_nid)
+  assert(not current_nid or flow.is_valid_node(current_nid))
+  assert(not next_nid or flow.is_valid_node(next_nid))
   return std.newtuple(privilege, current_nid, next_nid)
 end
 
@@ -833,13 +885,14 @@ local function open_region_tree(cx, expr_type, symbol, privilege_map)
 end
 
 local function preopen_region_tree_top(cx, path, privilege, field_path)
-  local desired_mode = privilege_mode(privilege)
+  local desired_mode, desired_op = privilege_mode(privilege)
   if not desired_mode then
     return
   end
   for index = #path, 2, -1 do
     cx:state(field_path):ensure(path[index])
     cx:state(field_path):set_mode(path[index], desired_mode)
+    cx:state(field_path):set_op(path[index], desired_op)
   end
 end
 
@@ -993,11 +1046,6 @@ local function get_privilege_field_map(task, region_type)
     std.find_task_privileges(region_type, task:getprivileges())
   local result = new_field_map()
   for i, privilege in ipairs(privileges) do
-    -- FIXME: Upgrade reductions to read-write for now.
-    if std.is_reduction_op(privilege) then
-      privilege = "reads_writes"
-    end
-
     local field_paths = privilege_field_paths[i]
     for _, field_path in ipairs(field_paths) do
       result:insert(field_path, privilege)

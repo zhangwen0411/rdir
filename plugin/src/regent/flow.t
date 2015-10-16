@@ -206,6 +206,23 @@ function graph:map_edges(fn)
   end
 end
 
+function graph:incoming_edges(node)
+  local result = terralib.newlist()
+  for from_node, edges in pairs(self.backedges[node]) do
+    for _, edge in pairs(edges) do
+      result:insert(
+        {
+          from_node = from_node,
+          from_port = edge.from_port,
+          to_node = node,
+          to_port = edge.to_port,
+          label = edge.label,
+      })
+    end
+  end
+  return result
+end
+
 function graph:incoming_edges_by_port(node)
   local result = {}
   for from_node, edges in pairs(self.backedges[node]) do
@@ -218,6 +235,23 @@ function graph:incoming_edges_by_port(node)
           from_node = from_node,
           from_port = edge.from_port,
           to_node = node,
+          to_port = edge.to_port,
+          label = edge.label,
+      })
+    end
+  end
+  return result
+end
+
+function graph:outgoing_edges(node)
+  local result = terralib.newlist()
+  for to_node, edges in pairs(self.edges[node]) do
+    for _, edge in pairs(edges) do
+      result:insert(
+        {
+          from_node = node,
+          from_port = edge.from_port,
+          to_node = to_node,
           to_port = edge.to_port,
           label = edge.label,
       })
@@ -487,12 +521,15 @@ function graph:printpretty()
   self:map_edges(
     function(from, from_port, from_label, to, to_port, to_label, edge)
       local label = tostring(edge:type()):gsub("[^.]+[.]", ""):lower()
+      if edge:is(flow.edge.Reduce) then
+        label = label .. " " .. tostring(edge.op)
+      end
       local style = "solid"
       if edge:is(flow.edge.HappensBefore) then
         style = "dotted"
       end
       print(tostring(from) .. " -> " .. tostring(to) ..
-              " [ label = " .. label .. ", style = " .. style .. " ];")
+              " [ label = \"" .. label .. "\", style = \"" .. style .. "\" ];")
   end)
   print("}")
 end

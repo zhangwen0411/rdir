@@ -54,7 +54,53 @@ function context.new_global_scope()
   return setmetatable(cx, context)
 end
 
-local function WAR_edges(cx, edges)
+local function split_reduction_edges_at_node(cx, nid)
+  local inputs = cx.graph:incoming_edges(nid)
+  local reductions = std.filter(
+    function(edge) return edge.label:is(flow.edge.Reduce) end,
+    inputs)
+
+  if #reductions > 0 then
+    local nonreductions = std.filter(
+      function(edge) return not edge.label:is(flow.edge.Reduce) end,
+      inputs)
+    local outputs = cx.graph:outgoing_edges(nid)
+
+    local label = cx.graph:node_label(nid)
+    local nid_input = cx.graph:add_node(label)
+    local nid_output = cx.graph:add_node(label)
+
+    for _, edge in ipairs(reductions) do
+      cx.graph:add_edge(
+        flow.edge.None {}, nid_input, cx.graph:node_result_port(nid_input),
+        edge.from_node, edge.from_port)
+      cx.graph:add_edge(
+        edge.label, edge.from_node, edge.from_port, nid_output, edge.to_port)
+    end
+    for _, edge in ipairs(nonreductions) do
+      cx.graph:add_edge(
+        edge.label, edge.from_node, edge.from_port, nid_input, edge.to_port)
+    end
+    for _, edge in ipairs(outputs) do
+      cx.graph:add_edge(
+        edge.label, nid_output, edge.from_port, edge.to_node, edge.to_port)
+    end
+    cx.graph:remove_node(nid)
+  end
+end
+
+local function split_reduction_edges(cx)
+  local nids = cx.graph:filter_nodes(
+    function(nid, label)
+      return label:is(flow.node.Region) or label:is(flow.node.Partition) or
+        label:is(flow.node.Scalar)
+  end)
+  for _, nid in ipairs(nids) do
+    split_reduction_edges_at_node(cx, nid)
+  end
+end
+
+local function get_WAR_edges(cx, edges)
   return function(from_node, from_port, from_label, to_node, to_port, to_label, label)
     if label:is(flow.edge.Write) then
       if to_label:is(flow.node.Scalar) and to_label.fresh then
@@ -86,15 +132,20 @@ local function WAR_edges(cx, edges)
   end
 end
 
-local function augment_happens_before_graph(cx)
+local function add_WAR_edges(cx)
   local edges = terralib.newlist()
-  cx.graph:map_edges(WAR_edges(cx, edges))
+  cx.graph:map_edges(get_WAR_edges(cx, edges))
   for _, edge in ipairs(edges) do
     cx.graph:add_edge(
       flow.edge.HappensBefore {},
       edge.from_node, cx.graph:node_sync_port(edge.from_node),
       edge.to_node, cx.graph:node_sync_port(edge.to_node))
   end
+end
+
+local function augment_graph(cx)
+  split_reduction_edges(cx)
+  add_WAR_edges(cx)
 end
 
 local flow_to_ast = {}
@@ -263,18 +314,36 @@ function flow_to_ast.node_reduce(cx, nid)
   return terralib.newlist({action})
 end
 
+local function get_maxport(inputs, outputs)
+  local maxport = 0
+  for i, _ in pairs(inputs) do
+    maxport = std.max(maxport, i)
+  end
+  for i, _ in pairs(outputs) do
+    maxport = std.max(maxport, i)
+  end
+  return maxport
+end
+
+local function get_arg_edge(edges, allow_fields)
+  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
+  return edges[1]
+end
+
+local function get_arg_node(inputs, port, allow_fields)
+  local edges = inputs[port]
+  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
+  return edges[1].from_node
+end
+
 function flow_to_ast.node_task(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
   local outputs = cx.graph:outgoing_edges_by_port(nid)
 
-  local maxport = 0
-  for i, _ in pairs(inputs) do
-    maxport = std.max(maxport, i)
-  end
+  local maxport = get_maxport(inputs, outputs)
 
-  assert(rawget(inputs, 1) and #inputs[1] == 1)
-  local fn = cx.ast[inputs[1][1].from_node]
+  local fn = cx.ast[get_arg_node(inputs, 1, false)]
 
   if std.is_task(fn.value) then
     assert(maxport-1 == #fn.value:gettype().parameters)
@@ -282,8 +351,7 @@ function flow_to_ast.node_task(cx, nid)
 
   local args = terralib.newlist()
   for i = 2, maxport do
-    assert(rawget(inputs, i) and #inputs[i] >= 1)
-    args:insert(cx.ast[inputs[i][1].from_node])
+    args:insert(cx.ast[get_arg_node(inputs, i, true)])
   end
 
   local action = ast.typed.ExprCall {
@@ -511,8 +579,11 @@ function flow_to_ast.graph(cx, graph)
   assert(flow.is_graph(graph))
   local cx = cx:new_graph_scope(graph:copy())
 
-  augment_happens_before_graph(cx)
+  -- First, augment the graph in several ways to make it amenable to
+  -- be converted into an AST.
+  augment_graph(cx)
 
+  -- Next, generate AST nodes in topological order.
   local nodes = cx.graph:toposort()
   local stats = terralib.newlist()
   for _, node in ipairs(nodes) do
