@@ -17,6 +17,7 @@ sample optimizations which demonstrate how to use the plug-in.
  2. Download and install Regent:
 
         git clone -b rdir --recursive https://github.com/StanfordLegion/legion.git
+        cd legion/language
         ./install.py --debug
 
     Note: In some cases, Terra may fail to auto-detect CUDA. If so
