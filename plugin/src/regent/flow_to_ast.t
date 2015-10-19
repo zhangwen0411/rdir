@@ -400,6 +400,42 @@ function flow_to_ast.node_task(cx, nid)
   })
 end
 
+function flow_to_ast.node_while_loop(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local stats = flow_to_ast.graph(cx, label.block).stats
+  if #stats == 1 then
+    return stats
+  elseif #stats == 2 then
+    -- FIXME: This hack is necessary because certain node types
+    -- (e.g. task calls) do not coalesce into expressions properly.
+    if stats[1]:is(ast.typed.StatVar) and #(stats[1].symbols) == 1 and
+      stats[2]:is(ast.typed.StatWhile) and stats[2].cond:is(ast.typed.ExprID) and
+      stats[2].cond.value == stats[1].symbols[1]
+    then
+      return terralib.newlist({stats[2] { cond = stats[1].values[1] }})
+    end
+  end
+  assert(false)
+end
+
+function flow_to_ast.node_while_body(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+
+  assert(rawget(inputs, 1) and #inputs[1] == 1)
+  local cond = cx.ast[inputs[1][1].from_node]
+
+  local block = flow_to_ast.graph(cx, label.block)
+
+  return terralib.newlist({
+      ast.typed.StatWhile {
+        cond = cond,
+        block = block,
+        span = label.span,
+      },
+  })
+end
+
 function flow_to_ast.node_for_num(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -549,6 +585,12 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Close) then
     return
+
+  elseif label:is(flow.node.WhileLoop) then
+    return flow_to_ast.node_while_loop(cx, nid)
+
+  elseif label:is(flow.node.WhileBody) then
+    return flow_to_ast.node_while_body(cx, nid)
 
   elseif label:is(flow.node.ForNum) then
     return flow_to_ast.node_for_num(cx, nid)

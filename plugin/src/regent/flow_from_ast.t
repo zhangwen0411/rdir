@@ -1063,7 +1063,7 @@ local function attach_result(privilege_map, ...)
   assert(is_field_map(privilege_map))
   local result = new_field_map()
   for k, v in privilege_map:items() do
-    result:insert(k, {v, ...})
+    result:insert(k, std.newtuple(v, ...))
   end
   return result
 end
@@ -1344,9 +1344,11 @@ function analyze_privileges.stat_elseif(cx, node)
 end
 
 function analyze_privileges.stat_while(cx, node)
+  local block_privileges = analyze_privileges.block(cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
     analyze_privileges.expr(cx, node.cond, reads),
-    analyze_privileges.block(cx, node.block))
+    outer_privileges)
 end
 
 function analyze_privileges.stat_for_num(cx, node)
@@ -1476,52 +1478,54 @@ end
 
 local flow_from_ast = {}
 
-local function as_stat(cx, label)
+local function as_stat(cx, args, label)
   local compute_nid = add_node(cx, label)
+  add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return sequence_advance(cx, compute_nid)
 end
 
 local function as_opaque_stat(cx, node)
-  local label = flow.node.Opaque { action = node }
-  return as_stat(cx, label)
+  return as_stat(cx, terralib.newlist(), flow.node.Opaque { action = node })
+end
+
+local function as_while_body_stat(cx, block, args, span)
+  return as_stat(cx, args, flow.node.WhileBody {
+    block = block,
+    span = span,
+  })
+end
+
+local function as_while_loop_stat(cx, block, args, span)
+  return as_stat(cx, args, flow.node.WhileLoop {
+    block = block,
+    span = span,
+  })
 end
 
 local function as_fornum_stat(cx, symbol, block, parallel, args, span)
-  local label = flow.node.ForNum {
+  return as_stat(cx, args, flow.node.ForNum {
     symbol = symbol,
     block = block,
     parallel = parallel,
     span = span,
-  }
-  local compute_nid = add_node(cx, label)
-  add_args(cx, compute_nid, args)
-  sequence_depend(cx, compute_nid)
-  return sequence_advance(cx, compute_nid)
+  })
 end
 
 local function as_forlist_stat(cx, symbol, block, vectorize, args, span)
-  local label = flow.node.ForList {
+  return as_stat(cx, args, flow.node.ForList {
     symbol = symbol,
     block = block,
     vectorize = vectorize,
     span = span,
-  }
-  local compute_nid = add_node(cx, label)
-  add_args(cx, compute_nid, args)
-  sequence_depend(cx, compute_nid)
-  return sequence_advance(cx, compute_nid)
+  })
 end
 
 local function as_reduce_stat(cx, op, args, span)
-  local label = flow.node.Reduce {
+  return as_stat(cx, args, flow.node.Reduce {
     op = op,
     span = span,
-  }
-  local compute_nid = add_node(cx, label)
-  add_args(cx, compute_nid, args)
-  sequence_depend(cx, compute_nid)
-  return sequence_advance(cx, compute_nid)
+  })
 end
 
 local function as_raw_opaque_expr(cx, node, args, privilege_map)
@@ -1980,7 +1984,42 @@ function flow_from_ast.stat_if(cx, node)
 end
 
 function flow_from_ast.stat_while(cx, node)
-  as_opaque_stat(cx, node)
+  local loop_cx = cx:new_local_scope()
+  local body_cx = cx:new_local_scope()
+
+  local loop_block_privileges = analyze_privileges.stat(loop_cx, node)
+  local loop_inner_privileges = index_privileges_by_region(
+    privilege_summary(loop_cx, loop_block_privileges, false))
+  local loop_outer_privileges = index_privileges_by_region(
+    privilege_summary(loop_cx, loop_block_privileges, true))
+  for region_type, privilege_map in pairs(loop_inner_privileges) do
+    preopen_region_tree(loop_cx, region_type, privilege_map)
+  end
+  local cond = flow_from_ast.expr(loop_cx, node.cond, reads)
+
+  local body_block_privileges = analyze_privileges.block(body_cx, node.block)
+  local body_inner_privileges = index_privileges_by_region(
+    privilege_summary(body_cx, body_block_privileges, false))
+  local body_outer_privileges = index_privileges_by_region(
+    privilege_summary(body_cx, body_block_privileges, true))
+  for region_type, privilege_map in pairs(body_inner_privileges) do
+    preopen_region_tree(body_cx, region_type, privilege_map)
+  end
+  flow_from_ast.block(body_cx, node.block)
+
+  local body_inputs = terralib.newlist({cond})
+  for region_type, privilege_map in pairs(body_outer_privileges) do
+    body_inputs:insert(
+      open_region_tree(loop_cx, region_type, nil, privilege_map))
+  end
+  local body = as_while_body_stat(
+    loop_cx, body_cx.graph, body_inputs, node.span)
+
+  local loop_inputs = terralib.newlist()
+  for region_type, privilege_map in pairs(loop_outer_privileges) do
+    loop_inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
+  end
+  as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.span)
 end
 
 function flow_from_ast.stat_for_num(cx, node)
@@ -1996,7 +2035,7 @@ function flow_from_ast.stat_for_num(cx, node)
   for region_type, privilege_map in pairs(inner_privileges) do
     preopen_region_tree(block_cx, region_type, privilege_map)
   end
-  local block = flow_from_ast.block(block_cx, node.block)
+  flow_from_ast.block(block_cx, node.block)
 
   do
     assert(#inputs <= 3)
@@ -2021,7 +2060,7 @@ function flow_from_ast.stat_for_list(cx, node)
   for region_type, privilege_map in pairs(inner_privileges) do
     preopen_region_tree(block_cx, region_type, privilege_map)
   end
-  local block = flow_from_ast.block(block_cx, node.block)
+  flow_from_ast.block(block_cx, node.block)
 
   local inputs = terralib.newlist({value})
   for region_type, privilege_map in pairs(outer_privileges) do

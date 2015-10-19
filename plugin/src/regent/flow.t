@@ -501,6 +501,7 @@ function graph:printpretty()
     if node:is(flow.node.Opaque) or node:is(flow.node.Deref) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
       node:is(flow.node.IndexAccess) or
+      node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
       node:is(flow.node.ForNum) or node:is(flow.node.ForList)
     then
       shape = "rectangle"
@@ -549,6 +550,8 @@ flow.node("Open", {})
 flow.node("Close", {})
 
 -- Control
+flow.node("WhileLoop", {"block", "span"})
+flow.node("WhileBody", {"block", "span"})
 flow.node("ForNum", {"symbol", "block", "parallel", "span"})
 flow.node("ForList", {"symbol", "block", "vectorize", "span"})
 
