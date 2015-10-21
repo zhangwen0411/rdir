@@ -33,7 +33,7 @@
 
 local ast = require("regent/ast")
 
-local flow = {}
+local flow = ast.make_factory("flow")
 
 -- Dataflow Graph
 local graph = setmetatable({}, {
@@ -536,42 +536,42 @@ function graph:printpretty()
 end
 
 -- Dataflow Graph: Nodes
-flow.node = ast.factory("flow.node")
+flow:inner("node")
 
 -- Compute
-flow.node("Opaque", {"action"})
+flow.node:leaf("Opaque", {"action"})
 
-flow.node("IndexAccess", {"expr_type", "span"})
-flow.node("Deref", {"expr_type", "span"})
-flow.node("Reduce", {"op", "span"})
-flow.node("Task", {"opaque", "expr_type", "span"})
+flow.node:leaf("IndexAccess", {"expr_type", "span"})
+flow.node:leaf("Deref", {"expr_type", "span"})
+flow.node:leaf("Reduce", {"op", "span"})
+flow.node:leaf("Task", {"opaque", "expr_type", "span"})
 
-flow.node("Open", {})
-flow.node("Close", {})
+flow.node:leaf("Open", {})
+flow.node:leaf("Close", {})
 
 -- Control
-flow.node("WhileLoop", {"block", "span"})
-flow.node("WhileBody", {"block", "span"})
-flow.node("ForNum", {"symbol", "block", "parallel", "span"})
-flow.node("ForList", {"symbol", "block", "vectorize", "span"})
+flow.node:leaf("WhileLoop", {"block", "span"})
+flow.node:leaf("WhileBody", {"block", "span"})
+flow.node:leaf("ForNum", {"symbol", "block", "parallel", "span"})
+flow.node:leaf("ForList", {"symbol", "block", "vectorize", "span"})
 
 -- Data
-flow.node("Region", {"value", "region_type", "field_path"})
-flow.node("Partition", {"value", "region_type", "field_path"})
-flow.node("Scalar", {"value", "region_type", "field_path", "fresh"})
-flow.node("Constant", {"value"})
-flow.node("Function", {"value"})
+flow.node:leaf("Region", {"value", "region_type", "field_path"})
+flow.node:leaf("Partition", {"value", "region_type", "field_path"})
+flow.node:leaf("Scalar", {"value", "region_type", "field_path", "fresh"})
+flow.node:leaf("Constant", {"value"})
+flow.node:leaf("Function", {"value"})
 
 -- Dataflow Graph: Edges
-flow.edge = ast.factory("flow.edge")
+flow:inner("edge")
 
-flow.edge("HappensBefore", {})
-flow.edge("Name", {})
+flow.edge:leaf("HappensBefore", {})
+flow.edge:leaf("Name", {})
 
-flow.edge("None", {})
-flow.edge("Read", {})
-flow.edge("Discard", {})
-flow.edge("Write", {})
-flow.edge("Reduce", {"op"})
+flow.edge:leaf("None", {})
+flow.edge:leaf("Read", {})
+flow.edge:leaf("Discard", {})
+flow.edge:leaf("Write", {})
+flow.edge:leaf("Reduce", {"op"})
 
 return flow
