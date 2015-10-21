@@ -384,8 +384,7 @@ local function fuse_eligible_loop(cx, loops)
     for loop2, _ in pairs(loops) do
       if loop1 ~= loop2 then
         if cx.graph:reachable(loop1, loop2) then
-          local x = can_fuse(cx, loop1, loop2)
-          if x then
+          if can_fuse(cx, loop1, loop2) then
             local new_loop = fuse(cx, loop1, loop2)
             cx.graph:remove_node(loop1)
             cx.graph:remove_node(loop2)
