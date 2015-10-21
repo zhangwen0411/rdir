@@ -371,16 +371,17 @@ local function add_args(cx, compute_nid, args)
   end
 end
 
-local function add_result(cx, from_nid, expr_type, span)
+local function add_result(cx, from_nid, expr_type, options, span)
   if expr_type == terralib.types.unit then
     return from_nid
   end
 
   local symbol = terralib.newsymbol(expr_type)
-  local region_type = cx.tree:intern_variable(expr_type, symbol, span)
-  local label = ast.typed.ExprID {
+  local region_type = cx.tree:intern_variable(expr_type, symbol, options, span)
+  local label = ast.typed.expr.ID {
     value = symbol,
     expr_type = expr_type,
+    options = options,
     span = span,
   }
   local result_nid = cx.graph:add_node(
@@ -540,24 +541,25 @@ local analyze_regions = {}
 
 function analyze_regions.vars(cx)
   return function(node)
-    if node:is(ast.typed.StatVar) then
+    if node:is(ast.typed.stat.Var) then
       for i, var_symbol in ipairs(node.symbols) do
         local var_type = std.rawref(&node.types[i])
-        cx.tree:intern_variable(var_type, var_symbol, node.span)
+        cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
       end
-    elseif node:is(ast.typed.StatVarUnpack) then
+    elseif node:is(ast.typed.stat.VarUnpack) then
       for i, var_symbol in ipairs(node.symbols) do
         local var_type = std.rawref(&node.field_types[i])
-        cx.tree:intern_variable(var_type, var_symbol, node.span)
+        cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
       end
-    elseif node:is(ast.typed.StatForNum) or node:is(ast.typed.StatForList) then
+    elseif node:is(ast.typed.stat.ForNum) or node:is(ast.typed.stat.ForList) then
       local var_symbol = node.symbol
       local var_type = node.symbol.type
-      cx.tree:intern_variable(var_type, var_symbol, node.span)
-    elseif node:is(ast.typed.StatTask) then
+      cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+    elseif node:is(ast.typed.stat.Task) then
       for i, param in ipairs(node.params) do
         local param_type = std.rawref(&param.param_type)
-        cx.tree:intern_variable(param_type, param.symbol, param.span)
+        cx.tree:intern_variable(
+          param_type, param.symbol, param.options, param.span)
       end
     end
   end
@@ -567,8 +569,8 @@ function analyze_regions.expr(cx)
   return function(node)
     local expr_type = std.as_read(node.expr_type)
     if flow_region_tree.is_region(expr_type) then
-      cx.tree:intern_region_expr(node.expr_type, node.span)
-      if node:is(ast.typed.ExprIndexAccess) then
+      cx.tree:intern_region_expr(node.expr_type, node.options, node.span)
+      if node:is(ast.typed.expr.IndexAccess) then
         cx.tree:attach_region_index(expr_type, node.index)
       end
     elseif std.is_bounded_type(expr_type) then
@@ -577,31 +579,33 @@ function analyze_regions.expr(cx)
       -- in case.
       for _, bound in ipairs(expr_type:bounds()) do
         if flow_region_tree.is_region(bound) then
-          cx.tree:intern_region_expr(bound, node.span)
+          cx.tree:intern_region_expr(bound, node.options, node.span)
         end
       end
     elseif std.is_cross_product(expr_type) then
       -- FIXME: This is kind of a hack. Cross products aren't really
       -- first class, but this ought not be necessary.
-      cx.tree:intern_region_expr(expr_type:partition(), node.span)
-      if node:is(ast.typed.ExprIndexAccess) then
+      cx.tree:intern_region_expr(
+        expr_type:partition(), node.options, node.span)
+      if node:is(ast.typed.expr.IndexAccess) then
         cx.tree:attach_region_index(expr_type:partition(), node.index)
       end
     end
 
-    if node:is(ast.typed.ExprDeref) then
+    if node:is(ast.typed.expr.Deref) then
       local value_type = std.as_read(node.value.expr_type)
       if std.is_bounded_type(value_type) then
         local bounds = value_type:bounds()
         for _, parent in ipairs(bounds) do
           local index
           -- FIXME: This causes issues with some tests.
-          -- if node.value:is(ast.typed.ExprID) and
+          -- if node.value:is(ast.typed.expr.ID) and
           --   not std.is_rawref(node.value.expr_type)
           -- then
           --   index = node.value
           -- end
-          cx.tree:intern_region_point_expr(parent, index, node.span)
+          cx.tree:intern_region_point_expr(
+            parent, index, node.options, node.span)
         end
       end
     end
@@ -632,9 +636,10 @@ end
 local function get_region_label(cx, region_type, field_path)
   local symbol = cx.tree:region_symbol(region_type)
   local expr_type = cx.tree:region_var_type(region_type)
-  local name = ast.typed.ExprID {
+  local name = ast.typed.expr.ID {
     value = cx.tree:region_symbol(region_type),
     expr_type = expr_type,
+    options = cx.tree:region_options(region_type),
     span = cx.tree:region_span(region_type),
   }
   if std.is_region(std.as_read(expr_type)) then
@@ -962,7 +967,7 @@ local function strip_indexing(cx, region_type)
   for index = 1, #path do
     if cx.tree:is_point(path[index]) or
       (cx.tree:has_region_index(path[index]) and
-         not cx.tree:region_index(path[index]):is(ast.typed.ExprConstant))
+         not cx.tree:region_index(path[index]):is(ast.typed.expr.Constant))
     then
       last_index = index
     end
@@ -1088,12 +1093,13 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
     for _, parent in ipairs(bounds) do
       local index
       -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.ExprID) and
+      -- if node.value:is(ast.typed.expr.ID) and
       --   not std.is_rawref(node.value.expr_type)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+      local subregion = cx.tree:intern_region_point_expr(
+        parent, index, node.options, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, field_privilege_map))
     end
     return privilege_meet(
@@ -1221,12 +1227,13 @@ function analyze_privileges.expr_deref(cx, node, privilege_map)
     for _, parent in ipairs(bounds) do
       local index
       -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.ExprID) and
+      -- if node.value:is(ast.typed.expr.ID) and
       --   not std.is_rawref(node.value.expr_type)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+      local subregion = cx.tree:intern_region_point_expr(
+        parent, index, node.options, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
     end
   end
@@ -1236,82 +1243,82 @@ function analyze_privileges.expr_deref(cx, node, privilege_map)
 end
 
 function analyze_privileges.expr(cx, node, privilege_map)
-  if node:is(ast.typed.ExprID) then
+  if node:is(ast.typed.expr.ID) then
     return analyze_privileges.expr_id(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprConstant) then
+  elseif node:is(ast.typed.expr.Constant) then
     return nil
 
-  elseif node:is(ast.typed.ExprFunction) then
+  elseif node:is(ast.typed.expr.Function) then
     return nil
 
-  elseif node:is(ast.typed.ExprFieldAccess) then
+  elseif node:is(ast.typed.expr.FieldAccess) then
     return analyze_privileges.expr_field_access(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIndexAccess) then
+  elseif node:is(ast.typed.expr.IndexAccess) then
     return analyze_privileges.expr_index_access(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprMethodCall) then
+  elseif node:is(ast.typed.expr.MethodCall) then
     return analyze_privileges.expr_method_call(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCall) then
+  elseif node:is(ast.typed.expr.Call) then
     return analyze_privileges.expr_call(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCast) then
+  elseif node:is(ast.typed.expr.Cast) then
     return analyze_privileges.expr_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCtor) then
+  elseif node:is(ast.typed.expr.Ctor) then
     return analyze_privileges.expr_ctor(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawContext) then
+  elseif node:is(ast.typed.expr.RawContext) then
     return nil
 
-  elseif node:is(ast.typed.ExprRawFields) then
+  elseif node:is(ast.typed.expr.RawFields) then
     return analyze_privileges.expr_raw_fields(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawPhysical) then
+  elseif node:is(ast.typed.expr.RawPhysical) then
     return analyze_privileges.expr_raw_physical(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawRuntime) then
+  elseif node:is(ast.typed.expr.RawRuntime) then
     return nil
 
-  elseif node:is(ast.typed.ExprRawValue) then
+  elseif node:is(ast.typed.expr.RawValue) then
     return analyze_privileges.expr_raw_value(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIsnull) then
+  elseif node:is(ast.typed.expr.Isnull) then
     return analyze_privileges.expr_isnull(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprNew) then
+  elseif node:is(ast.typed.expr.New) then
     return nil
 
-  elseif node:is(ast.typed.ExprNull) then
+  elseif node:is(ast.typed.expr.Null) then
     return nil
 
-  elseif node:is(ast.typed.ExprDynamicCast) then
+  elseif node:is(ast.typed.expr.DynamicCast) then
     return analyze_privileges.expr_dynamic_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprStaticCast) then
+  elseif node:is(ast.typed.expr.StaticCast) then
     return analyze_privileges.expr_static_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIspace) then
+  elseif node:is(ast.typed.expr.Ispace) then
     return analyze_privileges.expr_ispace(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRegion) then
+  elseif node:is(ast.typed.expr.Region) then
     return analyze_privileges.expr_region(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprPartition) then
+  elseif node:is(ast.typed.expr.Partition) then
     return analyze_privileges.expr_partition(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCrossProduct) then
+  elseif node:is(ast.typed.expr.CrossProduct) then
     return analyze_privileges.expr_cross_product(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprUnary) then
+  elseif node:is(ast.typed.expr.Unary) then
     return analyze_privileges.expr_unary(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprBinary) then
+  elseif node:is(ast.typed.expr.Binary) then
     return analyze_privileges.expr_binary(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprDeref) then
+  elseif node:is(ast.typed.expr.Deref) then
     return analyze_privileges.expr_deref(cx, node, privilege_map)
 
   else
@@ -1430,43 +1437,43 @@ function analyze_privileges.stat_expr(cx, node)
 end
 
 function analyze_privileges.stat(cx, node)
-  if node:is(ast.typed.StatIf) then
+  if node:is(ast.typed.stat.If) then
     return analyze_privileges.stat_if(cx, node)
 
-  elseif node:is(ast.typed.StatWhile) then
+  elseif node:is(ast.typed.stat.While) then
     return analyze_privileges.stat_while(cx, node)
 
-  elseif node:is(ast.typed.StatForNum) then
+  elseif node:is(ast.typed.stat.ForNum) then
     return analyze_privileges.stat_for_num(cx, node)
 
-  elseif node:is(ast.typed.StatForList) then
+  elseif node:is(ast.typed.stat.ForList) then
     return analyze_privileges.stat_for_list(cx, node)
 
-  elseif node:is(ast.typed.StatRepeat) then
+  elseif node:is(ast.typed.stat.Repeat) then
     return analyze_privileges.stat_repeat(cx, node)
 
-  elseif node:is(ast.typed.StatBlock) then
+  elseif node:is(ast.typed.stat.Block) then
     return analyze_privileges.stat_block(cx, node)
 
-  elseif node:is(ast.typed.StatVar) then
+  elseif node:is(ast.typed.stat.Var) then
     return analyze_privileges.stat_var(cx, node)
 
-  elseif node:is(ast.typed.StatVarUnpack) then
+  elseif node:is(ast.typed.stat.VarUnpack) then
     return analyze_privileges.stat_var_unpack(cx, node)
 
-  elseif node:is(ast.typed.StatReturn) then
+  elseif node:is(ast.typed.stat.Return) then
     return analyze_privileges.stat_return(cx, node)
 
-  elseif node:is(ast.typed.StatBreak) then
+  elseif node:is(ast.typed.stat.Break) then
     return nil
 
-  elseif node:is(ast.typed.StatAssignment) then
+  elseif node:is(ast.typed.stat.Assignment) then
     return analyze_privileges.stat_assignment(cx, node)
 
-  elseif node:is(ast.typed.StatReduce) then
+  elseif node:is(ast.typed.stat.Reduce) then
     return analyze_privileges.stat_reduce(cx, node)
 
-  elseif node:is(ast.typed.StatExpr) then
+  elseif node:is(ast.typed.stat.Expr) then
     return analyze_privileges.stat_expr(cx, node)
 
   else
@@ -1489,41 +1496,44 @@ local function as_opaque_stat(cx, node)
   return as_stat(cx, terralib.newlist(), flow.node.Opaque { action = node })
 end
 
-local function as_while_body_stat(cx, block, args, span)
+local function as_while_body_stat(cx, block, args, options, span)
   return as_stat(cx, args, flow.node.WhileBody {
     block = block,
+    options = options,
     span = span,
   })
 end
 
-local function as_while_loop_stat(cx, block, args, span)
+local function as_while_loop_stat(cx, block, args, options, span)
   return as_stat(cx, args, flow.node.WhileLoop {
     block = block,
+    options = options,
     span = span,
   })
 end
 
-local function as_fornum_stat(cx, symbol, block, parallel, args, span)
+local function as_fornum_stat(cx, symbol, block, args, options, span)
   return as_stat(cx, args, flow.node.ForNum {
     symbol = symbol,
     block = block,
-    parallel = parallel,
+    options = options,
     span = span,
   })
 end
 
-local function as_forlist_stat(cx, symbol, block, vectorize, args, span)
+local function as_forlist_stat(cx, symbol, block, args, options, span)
   return as_stat(cx, args, flow.node.ForList {
     symbol = symbol,
     block = block,
-    vectorize = vectorize,
+    options = options,
     span = span,
   })
 end
 
-local function as_reduce_stat(cx, op, args, span)
+local function as_reduce_stat(cx, op, args, options, span)
   return as_stat(cx, args, flow.node.Reduce {
     op = op,
+    options = options,
     span = span,
   })
 end
@@ -1532,7 +1542,7 @@ local function as_raw_opaque_expr(cx, node, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
-    cx, compute_nid, std.as_read(node.expr_type), node.span)
+    cx, compute_nid, std.as_read(node.expr_type), node.options, node.span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return attach_result(privilege_map, result_nid)
@@ -1565,7 +1575,7 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
-    cx, compute_nid, std.as_read(node.expr_type), node.span)
+    cx, compute_nid, std.as_read(node.expr_type), node.options, node.span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   local next_port = #args + 1
@@ -1589,22 +1599,24 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
   return attach_result(privilege_map, result_nid)
 end
 
-local function as_call_expr(cx, args, opaque, expr_type, span, privilege_map)
+local function as_call_expr(cx, args, opaque, expr_type, options, span, privilege_map)
   local label = flow.node.Task {
     opaque = opaque,
     expr_type = expr_type,
+    options = options,
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  local result_nid = add_result(cx, compute_nid, expr_type, span)
+  local result_nid = add_result(cx, compute_nid, expr_type, options, span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return attach_result(privilege_map, result_nid)
 end
 
-local function as_index_expr(cx, args, result, expr_type, span)
+local function as_index_expr(cx, args, result, expr_type, options, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
+    options = options,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -1617,9 +1629,11 @@ local function as_index_expr(cx, args, result, expr_type, span)
   return result
 end
 
-local function as_deref_expr(cx, args, result_nid, expr_type, span, privilege_map)
+local function as_deref_expr(cx, args, result_nid, expr_type, options, span,
+                             privilege_map)
   local label = flow.node.Deref {
     expr_type = expr_type,
+    options = options,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -1659,12 +1673,13 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
       local parent = bounds[1]
       local index
       -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.ExprID) and
+      -- if node.value:is(ast.typed.expr.ID) and
       --   not std.is_rawref(node.value.expr_type)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+      local subregion = cx.tree:intern_region_point_expr(
+        parent, index, node.options, node.span)
 
       open_region_tree(cx, subregion, nil, field_privilege_map)
     end
@@ -1692,7 +1707,7 @@ function flow_from_ast.expr_index_access(cx, node, privilege_map)
     local inputs = terralib.newlist({value, index})
     local region = open_region_tree(cx, node.expr_type, nil, privilege_map)
     return as_index_expr(
-      cx, inputs, region, expr_type, node.span)
+      cx, inputs, region, expr_type, node.options, node.span)
   end
 
   return as_opaque_expr(
@@ -1732,7 +1747,8 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
 
   return as_call_expr(
     cx, inputs,
-    not std.is_task(node.fn.value), std.as_read(node.expr_type), node.span,
+    not std.is_task(node.fn.value), std.as_read(node.expr_type),
+    node.options, node.span,
     privilege_map)
 end
 
@@ -1867,18 +1883,19 @@ function flow_from_ast.expr_deref(cx, node, privilege_map)
       local parent = bounds[1]
       local index
       -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.ExprID) and
+      -- if node.value:is(ast.typed.expr.ID) and
       --   not std.is_rawref(node.value.expr_type)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(parent, index, node.span)
+      local subregion = cx.tree:intern_region_point_expr(
+        parent, index, node.options, node.span)
 
       local inputs = terralib.newlist({value})
       local region = open_region_tree(cx, subregion, nil, privilege_map)
       as_deref_expr(
         cx, inputs, as_nid(cx, region),
-        node.expr_type, node.span, privilege_map)
+        node.expr_type, node.options, node.span, privilege_map)
       return region
     end
   end
@@ -1891,82 +1908,82 @@ function flow_from_ast.expr_deref(cx, node, privilege_map)
 end
 
 function flow_from_ast.expr(cx, node, privilege_map)
-  if node:is(ast.typed.ExprID) then
+  if node:is(ast.typed.expr.ID) then
     return flow_from_ast.expr_id(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprConstant) then
+  elseif node:is(ast.typed.expr.Constant) then
     return flow_from_ast.expr_constant(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprFunction) then
+  elseif node:is(ast.typed.expr.Function) then
     return flow_from_ast.expr_function(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprFieldAccess) then
+  elseif node:is(ast.typed.expr.FieldAccess) then
     return flow_from_ast.expr_field_access(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIndexAccess) then
+  elseif node:is(ast.typed.expr.IndexAccess) then
     return flow_from_ast.expr_index_access(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprMethodCall) then
+  elseif node:is(ast.typed.expr.MethodCall) then
     return flow_from_ast.expr_method_call(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCall) then
+  elseif node:is(ast.typed.expr.Call) then
     return flow_from_ast.expr_call(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCast) then
+  elseif node:is(ast.typed.expr.Cast) then
     return flow_from_ast.expr_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCtor) then
+  elseif node:is(ast.typed.expr.Ctor) then
     return flow_from_ast.expr_ctor(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawContext) then
+  elseif node:is(ast.typed.expr.RawContext) then
     return flow_from_ast.expr_raw_context(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawFields) then
+  elseif node:is(ast.typed.expr.RawFields) then
     return flow_from_ast.expr_raw_fields(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawPhysical) then
+  elseif node:is(ast.typed.expr.RawPhysical) then
     return flow_from_ast.expr_raw_physical(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawRuntime) then
+  elseif node:is(ast.typed.expr.RawRuntime) then
     return flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRawValue) then
+  elseif node:is(ast.typed.expr.RawValue) then
     return flow_from_ast.expr_raw_value(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIsnull) then
+  elseif node:is(ast.typed.expr.Isnull) then
     return flow_from_ast.expr_isnull(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprNew) then
+  elseif node:is(ast.typed.expr.New) then
     return flow_from_ast.expr_new(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprNull) then
+  elseif node:is(ast.typed.expr.Null) then
     return flow_from_ast.expr_null(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprDynamicCast) then
+  elseif node:is(ast.typed.expr.DynamicCast) then
     return flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprStaticCast) then
+  elseif node:is(ast.typed.expr.StaticCast) then
     return flow_from_ast.expr_static_cast(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprIspace) then
+  elseif node:is(ast.typed.expr.Ispace) then
     return flow_from_ast.expr_ispace(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprRegion) then
+  elseif node:is(ast.typed.expr.Region) then
     return flow_from_ast.expr_region(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprPartition) then
+  elseif node:is(ast.typed.expr.Partition) then
     return flow_from_ast.expr_partition(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprCrossProduct) then
+  elseif node:is(ast.typed.expr.CrossProduct) then
     return flow_from_ast.expr_cross_product(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprUnary) then
+  elseif node:is(ast.typed.expr.Unary) then
     return flow_from_ast.expr_unary(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprBinary) then
+  elseif node:is(ast.typed.expr.Binary) then
     return flow_from_ast.expr_binary(cx, node, privilege_map)
 
-  elseif node:is(ast.typed.ExprDeref) then
+  elseif node:is(ast.typed.expr.Deref) then
     return flow_from_ast.expr_deref(cx, node, privilege_map)
 
   else
@@ -2013,13 +2030,13 @@ function flow_from_ast.stat_while(cx, node)
       open_region_tree(loop_cx, region_type, nil, privilege_map))
   end
   local body = as_while_body_stat(
-    loop_cx, body_cx.graph, body_inputs, node.span)
+    loop_cx, body_cx.graph, body_inputs, node.options, node.span)
 
   local loop_inputs = terralib.newlist()
   for region_type, privilege_map in pairs(loop_outer_privileges) do
     loop_inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
   end
-  as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.span)
+  as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.options, node.span)
 end
 
 function flow_from_ast.stat_for_num(cx, node)
@@ -2045,7 +2062,8 @@ function flow_from_ast.stat_for_num(cx, node)
     end
   end
 
-  as_fornum_stat(cx, node.symbol, block_cx.graph, node.parallel, inputs, node.span)
+  as_fornum_stat(
+    cx, node.symbol, block_cx.graph, inputs, node.options, node.span)
 end
 
 function flow_from_ast.stat_for_list(cx, node)
@@ -2067,7 +2085,8 @@ function flow_from_ast.stat_for_list(cx, node)
     inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
   end
 
-  as_forlist_stat(cx, node.symbol, block_cx.graph, node.vectorize, inputs, node.span)
+  as_forlist_stat(
+    cx, node.symbol, block_cx.graph, inputs, node.options, node.span)
 end
 
 function flow_from_ast.stat_repeat(cx, node)
@@ -2117,7 +2136,7 @@ function flow_from_ast.stat_reduce(cx, node)
   inputs:insertall(lhs)
   inputs:insertall(rhs)
 
-  as_reduce_stat(cx, node.op, inputs, node.span)
+  as_reduce_stat(cx, node.op, inputs, node.options, node.span)
 end
 
 function flow_from_ast.stat_expr(cx, node)
@@ -2133,43 +2152,43 @@ function flow_from_ast.stat_expr(cx, node)
 end
 
 function flow_from_ast.stat(cx, node)
-  if node:is(ast.typed.StatIf) then
+  if node:is(ast.typed.stat.If) then
     flow_from_ast.stat_if(cx, node)
 
-  elseif node:is(ast.typed.StatWhile) then
+  elseif node:is(ast.typed.stat.While) then
     flow_from_ast.stat_while(cx, node)
 
-  elseif node:is(ast.typed.StatForNum) then
+  elseif node:is(ast.typed.stat.ForNum) then
     flow_from_ast.stat_for_num(cx, node)
 
-  elseif node:is(ast.typed.StatForList) then
+  elseif node:is(ast.typed.stat.ForList) then
     flow_from_ast.stat_for_list(cx, node)
 
-  elseif node:is(ast.typed.StatRepeat) then
+  elseif node:is(ast.typed.stat.Repeat) then
     flow_from_ast.stat_repeat(cx, node)
 
-  elseif node:is(ast.typed.StatBlock) then
+  elseif node:is(ast.typed.stat.Block) then
     flow_from_ast.stat_block(cx, node)
 
-  elseif node:is(ast.typed.StatVar) then
+  elseif node:is(ast.typed.stat.Var) then
     flow_from_ast.stat_var(cx, node)
 
-  elseif node:is(ast.typed.StatVarUnpack) then
+  elseif node:is(ast.typed.stat.VarUnpack) then
     flow_from_ast.stat_var_unpack(cx, node)
 
-  elseif node:is(ast.typed.StatReturn) then
+  elseif node:is(ast.typed.stat.Return) then
     flow_from_ast.stat_return(cx, node)
 
-  elseif node:is(ast.typed.StatBreak) then
+  elseif node:is(ast.typed.stat.Break) then
     flow_from_ast.stat_break(cx, node)
 
-  elseif node:is(ast.typed.StatAssignment) then
+  elseif node:is(ast.typed.stat.Assignment) then
     flow_from_ast.stat_assignment(cx, node)
 
-  elseif node:is(ast.typed.StatReduce) then
+  elseif node:is(ast.typed.stat.Reduce) then
     flow_from_ast.stat_reduce(cx, node)
 
-  elseif node:is(ast.typed.StatExpr) then
+  elseif node:is(ast.typed.stat.Expr) then
     flow_from_ast.stat_expr(cx, node)
 
   else
@@ -2187,7 +2206,7 @@ function flow_from_ast.stat_task(cx, node)
 end
 
 function flow_from_ast.stat_top(cx, node)
-  if node:is(ast.typed.StatTask) then
+  if node:is(ast.typed.stat.Task) then
     return flow_from_ast.stat_task(cx, node)
 
   else

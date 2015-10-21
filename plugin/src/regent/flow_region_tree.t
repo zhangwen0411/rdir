@@ -59,6 +59,7 @@ function flow_region_tree.new_region_tree(constraints, region_universe)
       -- Region identity and indexing.
       region_symbols = {},
       region_var_types = {},
+      region_option_sets = {},
       region_spans = {},
       region_indices = {},
       region_is_point = {},
@@ -81,6 +82,12 @@ function region_tree:region_var_type(region_type)
   assert(flow_region_tree.is_region(region_type))
   assert(rawget(self.region_var_types, region_type))
   return self.region_var_types[region_type]
+end
+
+function region_tree:region_options(region_type)
+  assert(flow_region_tree.is_region(region_type))
+  assert(rawget(self.region_option_sets, region_type))
+  return self.region_option_sets[region_type]
 end
 
 function region_tree:region_span(region_type)
@@ -112,7 +119,7 @@ function region_tree:is_point(region_type)
   return self.region_is_point[region_type]
 end
 
-function region_tree:intern_variable(expr_type, symbol, span)
+function region_tree:intern_variable(expr_type, symbol, options, span)
   -- Assign a fresh region to non-region symbols.
   local value_type = std.as_read(expr_type)
   local region_type = value_type
@@ -134,19 +141,20 @@ function region_tree:intern_variable(expr_type, symbol, span)
     assert(not rawget(self.region_spans, region_type))
     self.region_symbols[region_type] = symbol
     self.region_var_types[region_type] = expr_type
+    self.region_option_sets[region_type] = options
     self.region_spans[region_type] = span
     self.region_is_point[region_type] = false
     if std.is_region(value_type) then
       local partition = std.partition(std.disjoint, symbol)
       self.region_point_partitions[region_type] = partition
       std.add_constraint(self, partition, region_type, "<=", false)
-      self:intern_region_expr(partition, span)
+      self:intern_region_expr(partition, options, span)
     end
   end
   return region_type
 end
 
-function region_tree:intern_region_expr(expr_type, span)
+function region_tree:intern_region_expr(expr_type, options, span)
   local region_type = std.as_read(expr_type)
   assert(flow_region_tree.is_region(region_type))
   if self:has_region_symbol(region_type) then
@@ -158,17 +166,18 @@ function region_tree:intern_region_expr(expr_type, span)
   local symbol = terralib.newsymbol(region_type)
   self.region_symbols[region_type] = symbol
   self.region_var_types[region_type] = expr_type
+  self.region_option_sets[region_type] = options
   self.region_spans[region_type] = span
   self.region_is_point[region_type] = false
   if std.is_region(region_type) then
     local partition = std.partition(std.disjoint, symbol)
     self.region_point_partitions[region_type] = partition
     std.add_constraint(self, partition, region_type, "<=", false)
-    self:intern_region_expr(partition, span)
+    self:intern_region_expr(partition, options, span)
   end
 end
 
-function region_tree:intern_region_point_expr(parent, index, span)
+function region_tree:intern_region_point_expr(parent, index, options, span)
   assert(std.is_region(parent) and not self:is_point(parent))
   local partition = self:point_partition(parent)
   local subregion
@@ -189,6 +198,7 @@ function region_tree:intern_region_point_expr(parent, index, span)
   local symbol = terralib.newsymbol(subregion)
   self.region_symbols[subregion] = symbol
   self.region_var_types[subregion] = subregion
+  self.region_option_sets[subregion] = options
   self.region_spans[subregion] = span
   self.region_is_point[subregion] = true
   std.add_constraint(self, subregion, partition, "<=", false)

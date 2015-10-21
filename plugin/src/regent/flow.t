@@ -541,19 +541,19 @@ flow:inner("node")
 -- Compute
 flow.node:leaf("Opaque", {"action"})
 
-flow.node:leaf("IndexAccess", {"expr_type", "span"})
-flow.node:leaf("Deref", {"expr_type", "span"})
-flow.node:leaf("Reduce", {"op", "span"})
-flow.node:leaf("Task", {"opaque", "expr_type", "span"})
+flow.node:leaf("IndexAccess", {"expr_type", "options", "span"})
+flow.node:leaf("Deref", {"expr_type", "options", "span"})
+flow.node:leaf("Reduce", {"op", "options", "span"})
+flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
 
 flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})
 
 -- Control
-flow.node:leaf("WhileLoop", {"block", "span"})
-flow.node:leaf("WhileBody", {"block", "span"})
-flow.node:leaf("ForNum", {"symbol", "block", "parallel", "span"})
-flow.node:leaf("ForList", {"symbol", "block", "vectorize", "span"})
+flow.node:leaf("WhileLoop", {"block", "options", "span"})
+flow.node:leaf("WhileBody", {"block", "options", "span"})
+flow.node:leaf("ForNum", {"symbol", "block", "options", "span"})
+flow.node:leaf("ForList", {"symbol", "block", "options", "span"})
 
 -- Data
 flow.node:leaf("Region", {"value", "region_type", "field_path"})

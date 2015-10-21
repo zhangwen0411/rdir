@@ -108,7 +108,7 @@ local function get_WAR_edges(cx, edges)
       end
 
       local symbol
-      if to_label.value:is(ast.typed.ExprID) then
+      if to_label.value:is(ast.typed.expr.ID) then
         symbol = to_label.value.value
       end
 
@@ -164,23 +164,25 @@ function flow_to_ast.node_opaque(cx, nid)
       local input_label = cx.graph:node_label(input_nid)
       if input_label:is(flow.node.Scalar) and input_label.fresh then
         actions:insert(
-          ast.typed.StatVar {
+          ast.typed.stat.Var {
             symbols = terralib.newlist({ input_label.value.value }),
             types = terralib.newlist({ input_label.value.expr_type }),
             values = terralib.newlist({
                 cx.ast[input_nid],
             }),
+            options = input_label.value.options,
             span = input_label.value.span,
         })
       elseif input_label:is(flow.node.Region) and
-        not cx.ast[input_nid]:is(ast.typed.ExprID)
+        not cx.ast[input_nid]:is(ast.typed.expr.ID)
       then
         local region_ast = cx.region_ast[input_label.value.expr_type]
         assert(region_ast)
-        local action = ast.typed.StatVar {
+        local action = ast.typed.stat.Var {
           symbols = terralib.newlist({ input_label.value.value }),
           types = terralib.newlist({ std.as_read(region_ast.expr_type) }),
           values = terralib.newlist({ region_ast }),
+          options = region_ast.options,
           span = region_ast.span,
         }
         actions:insert(action)
@@ -205,8 +207,9 @@ function flow_to_ast.node_opaque(cx, nid)
       return actions
     else
       actions:insert(
-        ast.typed.StatExpr {
+        ast.typed.stat.Expr {
           expr = label.action,
+          options = label.action.options,
           span = label.action.span,
       })
       return actions
@@ -224,10 +227,11 @@ function flow_to_ast.node_index_access(cx, nid)
   assert(rawget(inputs, 2) and #inputs[2] == 1)
   local index = cx.ast[inputs[2][1].from_node]
 
-  local action = ast.typed.ExprIndexAccess {
+  local action = ast.typed.expr.IndexAccess {
     value = value,
     index = index,
     expr_type = label.expr_type,
+    options = label.options,
     span = label.span,
   }
 
@@ -243,8 +247,9 @@ function flow_to_ast.node_index_access(cx, nid)
   end
 
   return terralib.newlist({
-      ast.typed.StatExpr {
+      ast.typed.stat.Expr {
         expr = action,
+        options = action.options,
         span = action.span,
       },
   })
@@ -258,9 +263,10 @@ function flow_to_ast.node_deref(cx, nid)
   assert(rawget(inputs, 1) and #inputs[1] == 1)
   local value = cx.ast[inputs[1][1].from_node]
 
-  local action = ast.typed.ExprDeref {
+  local action = ast.typed.expr.Deref {
     value = value,
     expr_type = label.expr_type,
+    options = label.options,
     span = label.span,
   }
 
@@ -276,8 +282,9 @@ function flow_to_ast.node_deref(cx, nid)
   end
 
   return terralib.newlist({
-      ast.typed.StatExpr {
+      ast.typed.stat.Expr {
         expr = action,
+        options = action.options,
         span = action.span,
       },
   })
@@ -306,10 +313,11 @@ function flow_to_ast.node_reduce(cx, nid)
     rhs:insert(cx.ast[inputs[i][1].from_node])
   end
 
-  local action = ast.typed.StatReduce {
+  local action = ast.typed.stat.Reduce {
     lhs = lhs,
     rhs = rhs,
     op = label.op,
+    options = label.options,
     span = label.span,
   }
   return terralib.newlist({action})
@@ -355,11 +363,12 @@ function flow_to_ast.node_task(cx, nid)
     args:insert(cx.ast[get_arg_node(inputs, i, true)])
   end
 
-  local action = ast.typed.ExprCall {
+  local action = ast.typed.expr.Call {
     fn = fn,
     args = args,
     inline = "allow",
     expr_type = label.expr_type,
+    options = label.options,
     span = label.span,
   }
 
@@ -379,12 +388,13 @@ function flow_to_ast.node_task(cx, nid)
       else
         cx.ast[nid] = result.value
         return terralib.newlist({
-          ast.typed.StatVar {
+          ast.typed.stat.Var {
             symbols = terralib.newlist({ result.value.value }),
             types = terralib.newlist({ result.value.expr_type }),
             values = terralib.newlist({
                 action
             }),
+            options = action.options,
             span = action.span,
           }
         })
@@ -393,8 +403,9 @@ function flow_to_ast.node_task(cx, nid)
   end
 
   return terralib.newlist({
-      ast.typed.StatExpr {
+      ast.typed.stat.Expr {
         expr = action,
+        options = action.options,
         span = action.span,
       },
   })
@@ -408,8 +419,8 @@ function flow_to_ast.node_while_loop(cx, nid)
   elseif #stats == 2 then
     -- FIXME: This hack is necessary because certain node types
     -- (e.g. task calls) do not coalesce into expressions properly.
-    if stats[1]:is(ast.typed.StatVar) and #(stats[1].symbols) == 1 and
-      stats[2]:is(ast.typed.StatWhile) and stats[2].cond:is(ast.typed.ExprID) and
+    if stats[1]:is(ast.typed.stat.Var) and #(stats[1].symbols) == 1 and
+      stats[2]:is(ast.typed.stat.While) and stats[2].cond:is(ast.typed.expr.ID) and
       stats[2].cond.value == stats[1].symbols[1]
     then
       return terralib.newlist({stats[2] { cond = stats[1].values[1] }})
@@ -428,9 +439,10 @@ function flow_to_ast.node_while_body(cx, nid)
   local block = flow_to_ast.graph(cx, label.block)
 
   return terralib.newlist({
-      ast.typed.StatWhile {
+      ast.typed.stat.While {
         cond = cond,
         block = block,
+        options = label.options,
         span = label.span,
       },
   })
@@ -456,11 +468,11 @@ function flow_to_ast.node_for_num(cx, nid)
   local block = flow_to_ast.graph(cx, label.block)
 
   return terralib.newlist({
-      ast.typed.StatForNum {
+      ast.typed.stat.ForNum {
         symbol = label.symbol,
         values = values,
         block = block,
-        parallel = label.parallel,
+        options = label.options,
         span = label.span,
       },
   })
@@ -476,11 +488,11 @@ function flow_to_ast.node_for_list(cx, nid)
   local block = flow_to_ast.graph(cx, label.block)
 
   return terralib.newlist({
-      ast.typed.StatForList {
+      ast.typed.stat.ForList {
         symbol = label.symbol,
         value = value,
         block = block,
-        vectorize = label.vectorize,
+        options = label.options,
         span = label.span,
       },
   })
@@ -644,7 +656,7 @@ function flow_to_ast.stat_task(cx, node)
 end
 
 function flow_to_ast.stat_top(cx, node)
-  if node:is(ast.typed.StatTask) then
+  if node:is(ast.typed.stat.Task) then
     return flow_to_ast.stat_task(cx, node)
 
   else
