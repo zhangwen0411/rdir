@@ -1383,6 +1383,10 @@ function analyze_privileges.stat_repeat(cx, node)
     analyze_privileges.expr(cx, node.until_cond, reads))
 end
 
+function analyze_privileges.stat_must_epoch(cx, node)
+  return analyze_privileges.block(cx, node.block)
+end
+
 function analyze_privileges.stat_block(cx, node)
   return analyze_privileges.block(cx, node.block)
 end
@@ -1451,6 +1455,9 @@ function analyze_privileges.stat(cx, node)
 
   elseif node:is(ast.typed.stat.Repeat) then
     return analyze_privileges.stat_repeat(cx, node)
+
+  elseif node:is(ast.typed.stat.MustEpoch) then
+    return analyze_privileges.stat_must_epoch(cx, node)
 
   elseif node:is(ast.typed.stat.Block) then
     return analyze_privileges.stat_block(cx, node)
@@ -2093,6 +2100,10 @@ function flow_from_ast.stat_repeat(cx, node)
   as_opaque_stat(cx, node)
 end
 
+function flow_from_ast.stat_must_epoch(cx, node)
+  as_opaque_stat(cx, node)
+end
+
 function flow_from_ast.stat_block(cx, node)
   flow_from_ast.block(cx, node.block)
 end
@@ -2166,6 +2177,9 @@ function flow_from_ast.stat(cx, node)
 
   elseif node:is(ast.typed.stat.Repeat) then
     flow_from_ast.stat_repeat(cx, node)
+
+  elseif node:is(ast.typed.stat.MustEpoch) then
+    flow_from_ast.stat_must_epoch(cx, node)
 
   elseif node:is(ast.typed.stat.Block) then
     flow_from_ast.stat_block(cx, node)

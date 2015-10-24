@@ -498,6 +498,19 @@ function flow_to_ast.node_for_list(cx, nid)
   })
 end
 
+function flow_to_ast.node_must_epoch(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local block = flow_to_ast.graph(cx, label.block)
+
+  return terralib.newlist({
+      ast.typed.stat.MustEpoch {
+        block = block,
+        options = label.options,
+        span = label.span,
+      },
+  })
+end
+
 function flow_to_ast.node_region(cx, nid)
   local label = cx.graph:node_label(nid)
 
@@ -609,6 +622,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.ForList) then
     return flow_to_ast.node_for_list(cx, nid)
+
+  elseif label:is(flow.node.MustEpoch) then
+    return flow_to_ast.node_must_epoch(cx, nid)
 
   elseif label:is(flow.node.Region) then
     return flow_to_ast.node_region(cx, nid)

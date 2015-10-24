@@ -502,7 +502,8 @@ function graph:printpretty()
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
       node:is(flow.node.IndexAccess) or
       node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
-      node:is(flow.node.ForNum) or node:is(flow.node.ForList)
+      node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
+      node:is(flow.node.MustEpoch)
     then
       shape = "rectangle"
     elseif node:is(flow.node.Open) or node:is(flow.node.Close) then
@@ -554,6 +555,7 @@ flow.node:leaf("WhileLoop", {"block", "options", "span"})
 flow.node:leaf("WhileBody", {"block", "options", "span"})
 flow.node:leaf("ForNum", {"symbol", "block", "options", "span"})
 flow.node:leaf("ForList", {"symbol", "block", "options", "span"})
+flow.node:leaf("MustEpoch", {"block", "options", "span"})
 
 -- Data
 flow.node:leaf("Region", {"value", "region_type", "field_path"})
