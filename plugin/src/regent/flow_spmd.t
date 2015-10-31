@@ -33,8 +33,9 @@ local ast = require("regent/ast")
 local data = require("regent/data")
 local codegen = require("regent/codegen")
 local flow = require("regent/flow")
-local flow_to_ast = require("regent/flow_to_ast")
 local flow_region_tree = require("regent/flow_region_tree")
+local flow_task_outline = require("regent/flow_task_outline")
+local flow_to_ast = require("regent/flow_to_ast")
 local std = require("regent/std")
 
 local context = {}
