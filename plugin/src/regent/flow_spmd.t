@@ -30,6 +30,7 @@
 -- Dataflow-based SPMD Optimization
 
 local ast = require("regent/ast")
+local data = require("regent/data")
 local codegen = require("regent/codegen")
 local flow = require("regent/flow")
 local flow_to_ast = require("regent/flow_to_ast")
@@ -65,7 +66,7 @@ local function filter_join(list1, list2, fn)
   for _, elt1 in ipairs(list1) do
     for _, elt2 in ipairs(list2) do
       if fn(elt1, elt2) then
-        result:insert(std.newtuple(elt1, elt2))
+        result:insert(data.newtuple(elt1, elt2))
       end
     end
   end
@@ -377,11 +378,13 @@ local function make_shard_task(cx, orig_loop_nid)
         {
           node_type = "privilege",
           region = region_type,
-          field_path = std.newtuple(), -- FIXME: Need field
+          field_path = data.newtuple(), -- FIXME: Need field
           privilege = privilege,
       })
     end
   end
+
+  local coherence_modes = data.newmap()
 
   -- FIXME: Need to regenerate constraints from the task tree
   -- constraints on the parameters the task is actually taking.
@@ -392,6 +395,7 @@ local function make_shard_task(cx, orig_loop_nid)
   prototype:settype(task_type)
   prototype:set_param_symbols(params:map(function(param) return param.symbol end))
   prototype:setprivileges(privileges)
+  prototype:set_coherence_modes(coherence_modes)
   prototype:set_param_constraints(constraints)
   prototype:set_constraints(task_cx.tree.constraints)
   prototype:set_region_universe(task_cx.tree.region_universe)
@@ -401,6 +405,7 @@ local function make_shard_task(cx, orig_loop_nid)
     params = params,
     return_type = return_type,
     privileges = privileges,
+    coherence_modes = coherence_modes,
     constraints = constraints,
     body = task_cx.graph,
     config_options = ast.TaskConfigOptions {

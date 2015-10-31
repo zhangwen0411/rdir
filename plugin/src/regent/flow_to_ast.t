@@ -32,6 +32,7 @@
 -- Conversion from Dataflow IR to AST
 
 local ast = require("regent/ast")
+local data = require("regent/data")
 local flow = require("regent/flow")
 local flow_region_tree = require("regent/flow_region_tree")
 local std = require("regent/std")
@@ -56,12 +57,12 @@ end
 
 local function split_reduction_edges_at_node(cx, nid)
   local inputs = cx.graph:incoming_edges(nid)
-  local reductions = std.filter(
+  local reductions = data.filter(
     function(edge) return edge.label:is(flow.edge.Reduce) end,
     inputs)
 
   if #reductions > 0 then
-    local nonreductions = std.filter(
+    local nonreductions = data.filter(
       function(edge) return not edge.label:is(flow.edge.Reduce) end,
       inputs)
     local outputs = cx.graph:outgoing_edges(nid)
@@ -195,9 +196,21 @@ function flow_to_ast.node_opaque(cx, nid)
   end
 
   if not rawget(outputs, cx.graph:node_result_port(nid)) then
-    actions:insert(label.action)
+    if label.action:is(ast.typed.expr) then
+      actions:insert(
+        ast.typed.stat.Expr {
+          expr = label.action,
+          options = label.action.options,
+          span = label.action.span,
+      })
+    elseif label.action:is(ast.typed.stat) then
+      actions:insert(label.action)
+    else
+      assert(false)
+    end
     return actions
   else
+    assert(label.action:is(ast.typed.expr))
     assert(#outputs[cx.graph:node_result_port(nid)] == 1)
     local result_nid = outputs[cx.graph:node_result_port(nid)][1].to_node
     local result = cx.graph:node_label(result_nid)
@@ -297,7 +310,7 @@ function flow_to_ast.node_reduce(cx, nid)
 
   local maxport = 0
   for i, _ in pairs(inputs) do
-    maxport = std.max(maxport, i)
+    maxport = data.max(maxport, i)
   end
   assert(maxport % 2 == 0)
 
@@ -326,10 +339,10 @@ end
 local function get_maxport(inputs, outputs)
   local maxport = 0
   for i, _ in pairs(inputs) do
-    maxport = std.max(maxport, i)
+    maxport = data.max(maxport, i)
   end
   for i, _ in pairs(outputs) do
-    maxport = std.max(maxport, i)
+    maxport = data.max(maxport, i)
   end
   return maxport
 end
@@ -455,7 +468,7 @@ function flow_to_ast.node_for_num(cx, nid)
   local maxport = 0
   for i, _ in pairs(inputs) do
     if i <= 3 then
-      maxport = std.max(maxport, i)
+      maxport = data.max(maxport, i)
     end
   end
 
