@@ -571,7 +571,9 @@ function analyze_regions.expr(cx)
     local expr_type = std.as_read(node.expr_type)
     if flow_region_tree.is_region(expr_type) then
       cx.tree:intern_region_expr(node.expr_type, node.options, node.span)
-      if node:is(ast.typed.expr.IndexAccess) then
+      if node:is(ast.typed.expr.IndexAccess) and
+        not std.is_list_of_regions(std.as_read(node.value.expr_type))
+      then
         cx.tree:attach_region_index(expr_type, node.index)
       end
     elseif std.is_bounded_type(expr_type) then
@@ -655,7 +657,14 @@ local function get_region_label(cx, region_type, field_path)
       region_type = region_type,
       field_path = field_path,
     }
+  elseif std.is_list_of_regions(std.as_read(expr_type)) then
+    return flow.node.List {
+      value = name,
+      region_type = region_type,
+      field_path = field_path,
+    }
   else
+    assert(not flow_region_tree.is_region(std.as_read(expr_type)))
     return flow.node.Scalar {
       value = name,
       region_type = region_type,
@@ -1152,7 +1161,7 @@ function analyze_privileges.expr_call(cx, node, privilege_map)
   for i, arg in ipairs(node.args) do
     local param_type = node.fn.expr_type.parameters[i]
     local param_privilege_map
-    if std.is_task(node.fn.value) and std.is_region(param_type) then
+    if std.is_task(node.fn.value) and std.type_supports_privileges(param_type) then
       param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
     else
       param_privilege_map = reads
@@ -1596,8 +1605,8 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
         if cx.graph:node_label(arg_expr_nid):is(flow.node.Opaque) then
           return arg_expr_nid
         end
-        return false
       end
+      return false
     end)
   local arg_asts = data.zip(arg_nids, arg_expr_nids):map(
     function(nids)
@@ -1687,12 +1696,7 @@ function flow_from_ast.expr_region_root(cx, node, privilege_map)
     field_privilege_map:insertall(privilege_map:prepend(field_path))
   end
 
-  local region = flow_from_ast.expr(cx, node.region, field_privilege_map)
-  return as_opaque_expr(
-    cx,
-    function(v1) return node { region = v1 } end,
-    terralib.newlist({region}),
-    field_privilege_map)
+  return flow_from_ast.expr(cx, node.region, field_privilege_map)
 end
 
 function flow_from_ast.expr_condition(cx, node, privilege_map)
@@ -1798,7 +1802,7 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
   for i, arg in ipairs(node.args) do
     local param_type = node.fn.expr_type.parameters[i]
     local param_privilege_map
-    if std.is_task(node.fn.value) and std.is_region(param_type) then
+    if std.is_task(node.fn.value) and std.type_supports_privileges(param_type) then
       param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
     else
       param_privilege_map = reads
@@ -1927,6 +1931,20 @@ function flow_from_ast.expr_copy(cx, node, privilege_map)
   return as_opaque_expr(
     cx,
     function(v1, v2, ...)
+      v1 = ast.typed.expr.RegionRoot {
+        region = v1,
+        fields = node.src.fields,
+        expr_type = v1.expr_type,
+        options = v1.options,
+        span = v1.span,
+      }
+      v2 = ast.typed.expr.RegionRoot {
+        region = v2,
+        fields = node.dst.fields,
+        expr_type = v2.expr_type,
+        options = v2.options,
+        span = v2.span,
+      }
       return node { src = v1, dst = v2, conditions = terralib.newlist{...} }
     end,
     terralib.newlist({src, dst, unpack(conditions)}),

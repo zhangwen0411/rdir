@@ -575,6 +575,32 @@ function flow_to_ast.node_partition(cx, nid)
   return terralib.newlist({})
 end
 
+function flow_to_ast.node_list(cx, nid)
+  local label = cx.graph:node_label(nid)
+
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  for _, edges in pairs(inputs) do
+    for _, edge in ipairs(edges) do
+      if edge.label:is(flow.edge.Name) then
+        if not cx.region_ast[label.value.expr_type] then
+          cx.ast[nid] = cx.ast[edge.from_node]
+          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+        else
+          cx.ast[nid] = cx.region_ast[label.value.expr_type]
+        end
+        return terralib.newlist({})
+      end
+    end
+  end
+
+  if cx.region_ast[label.value.expr_type] then
+    cx.ast[nid] = cx.region_ast[label.value.expr_type]
+  else
+    cx.ast[nid] = label.value
+  end
+  return terralib.newlist({})
+end
+
 function flow_to_ast.node_scalar(cx, nid)
   local label = cx.graph:node_label(nid)
   local outputs = cx.graph:outgoing_edges_by_port(nid)
@@ -643,6 +669,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Partition) then
     return flow_to_ast.node_partition(cx, nid)
+
+  elseif label:is(flow.node.List) then
+    return flow_to_ast.node_list(cx, nid)
 
   elseif label:is(flow.node.Scalar) then
     return flow_to_ast.node_scalar(cx, nid)

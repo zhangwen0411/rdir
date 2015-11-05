@@ -481,7 +481,7 @@ function graph:printpretty()
   self:map_nodes(function(i, node)
     local label = tostring(node:type()):gsub("[^.]+[.]", ""):lower()
     if node:is(flow.node.Region) or node:is(flow.node.Partition) or
-      node:is(flow.node.Scalar) or
+      node:is(flow.node.List) or node:is(flow.node.Scalar) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
       local name = tostring(node.value.value)
@@ -490,7 +490,7 @@ function graph:printpretty()
       end
       label = label .. " " .. tostring(name)
       if node:is(flow.node.Region) or node:is(flow.node.Partition) or
-        node:is(flow.node.Scalar)
+        node:is(flow.node.List) or node:is(flow.node.Scalar)
       then
         label = label .. " " .. tostring(node.field_path)
       end
@@ -512,7 +512,7 @@ function graph:printpretty()
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
       shape = "ellipse"
-    elseif node:is(flow.node.Partition) then
+    elseif node:is(flow.node.Partition) or node:is(flow.node.List) then
       shape = "octagon"
     else
       print(node)
@@ -560,6 +560,7 @@ flow.node:leaf("MustEpoch", {"block", "options", "span"})
 -- Data
 flow.node:leaf("Region", {"value", "region_type", "field_path"})
 flow.node:leaf("Partition", {"value", "region_type", "field_path"})
+flow.node:leaf("List", {"value", "region_type", "field_path"})
 flow.node:leaf("Scalar", {"value", "region_type", "field_path", "fresh"})
 flow.node:leaf("Constant", {"value"})
 flow.node:leaf("Function", {"value"})

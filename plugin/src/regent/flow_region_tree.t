@@ -33,10 +33,11 @@ local std = require("regent/std")
 
 local flow_region_tree = {}
 
--- For the purposes of analysis, consider partitions to be regions as
--- well.
+-- For the purposes of analysis, consider partitions and lists (of
+-- regions) to be regions as well.
 function flow_region_tree.is_region(region_type)
-  return std.is_region(region_type) or std.is_partition(region_type)
+  return std.is_region(region_type) or std.is_partition(region_type) or
+    std.is_list_of_regions(region_type)
 end
 
 -- Region Tree
