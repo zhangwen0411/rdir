@@ -386,6 +386,7 @@ local function make_shard_task(cx, orig_loop_nid)
   end
 
   local coherence_modes = data.newmap()
+  local flags = data.newmap()
 
   -- FIXME: Need to regenerate constraints from the task tree
   -- constraints on the parameters the task is actually taking.
@@ -407,6 +408,7 @@ local function make_shard_task(cx, orig_loop_nid)
     return_type = return_type,
     privileges = privileges,
     coherence_modes = coherence_modes,
+    flags = flags,
     constraints = constraints,
     body = task_cx.graph,
     config_options = ast.TaskConfigOptions {

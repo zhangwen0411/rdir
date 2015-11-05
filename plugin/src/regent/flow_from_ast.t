@@ -1048,9 +1048,10 @@ local reads = get_trivial_field_map("reads")
 local reads_writes = get_trivial_field_map("reads_writes")
 
 local function get_privilege_field_map(task, region_type)
-  local privileges, privilege_field_paths, _ =
+  local privileges, privilege_field_paths =
     std.find_task_privileges(
-      region_type, task:getprivileges(), task:get_coherence_modes())
+      region_type, task:getprivileges(),
+      task:get_coherence_modes(), task:get_flags())
   local result = new_field_map()
   for i, privilege in ipairs(privileges) do
     local field_paths = privilege_field_paths[i]

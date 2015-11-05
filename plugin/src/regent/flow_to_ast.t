@@ -379,7 +379,6 @@ function flow_to_ast.node_task(cx, nid)
   local action = ast.typed.expr.Call {
     fn = fn,
     args = args,
-    inline = "allow",
     expr_type = label.expr_type,
     options = label.options,
     span = label.span,
