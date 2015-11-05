@@ -2184,8 +2184,8 @@ end
 function flow_from_ast.stat_var(cx, node)
   -- FIXME: Workaround for bug in inline optimization.
   if data.all(
-    node.types:map(
-      function(type) return type == terralib.types.unit end))
+    unpack(node.types:map(
+      function(type) return type == terralib.types.unit end)))
   then
     return
   end
