@@ -775,9 +775,7 @@ local function select_transition(cx, path, index,
   local current_nid = cx:state(field_path):current(path[index])
   if index == 1 then -- Leaf
     if current_mode == modes.closed then
-      if current_op and
-        (desired_op ~= current_op or (desired_op and flow.is_valid_node(current_nid)))
-      then
+      if desired_op ~= current_op and flow.is_valid_node(current_nid) then
         return modes.closed, desired_op, transitions.close
       else
         return modes.closed, desired_op, transitions.create

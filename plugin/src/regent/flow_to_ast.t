@@ -113,12 +113,15 @@ local function get_WAR_edges(cx, edges)
         symbol = to_label.value.value
       end
 
-      local region = cx.tree:ensure_variable(to_label.value.expr_type, symbol)
+      local region = to_label.region_type
       for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
         local other_label = cx.graph:node_label(other)
-        if (other_label:is(flow.node.Region) or other_label:is(flow.node.List)) and
+        if (other_label:is(flow.node.Region) or
+              other_label:is(flow.node.Partition) or
+              other_label:is(flow.node.List) or
+              other_label:is(flow.node.Scalar)) and
           to_label.field_path == other_label.field_path and
-          cx.tree:can_alias(std.as_read(other_label.value.expr_type), region)
+          cx.tree:can_alias(other_label.region_type, region)
         then
           for _, reader in ipairs(cx.graph:immediate_successors(other)) do
             if reader ~= from_node and
