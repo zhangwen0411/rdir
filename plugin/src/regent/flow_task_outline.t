@@ -37,6 +37,7 @@ local ast = require("regent/ast")
 local codegen = require("regent/codegen")
 local data = require("regent/data")
 local flow = require("regent/flow")
+local flow_extract_subgraph = require("regent/flow_extract_subgraph")
 local flow_to_ast = require("regent/flow_to_ast")
 local std = require("regent/std")
 
@@ -177,35 +178,6 @@ local function summarize_privileges(cx, nid)
   return result
 end
 
-local function extract_task_body(cx, nid)
-  local task_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
-
-  local label = cx.graph:node_label(nid)
-  local compute_nid = task_cx.graph:add_node(label)
-
-  local inputs = cx.graph:incoming_edges(nid)
-  for _, edge in ipairs(inputs) do
-    if not edge.label:is(flow.edge.HappensBefore) then
-      local input_label = cx.graph:node_label(edge.from_node)
-      local input_nid = task_cx.graph:add_node(input_label)
-      task_cx.graph:add_edge(
-        edge.label, input_nid, edge.from_port, compute_nid, edge.to_port)
-    end
-  end
-
-  local outputs = cx.graph:outgoing_edges(nid)
-  for _, edge in ipairs(outputs) do
-    if not edge.label:is(flow.edge.HappensBefore) then
-      local output_label = cx.graph:node_label(edge.to_node)
-      local output_nid = task_cx.graph:add_node(output_label)
-      task_cx.graph:add_edge(
-        edge.label, compute_nid, edge.from_port, output_nid, edge.to_port)
-    end
-  end
-
-  return task_cx.graph
-end
-
 local function extract_task(cx, nid)
   local label = cx.graph:node_label(nid)
   local params = gather_params(cx, nid)
@@ -214,7 +186,7 @@ local function extract_task(cx, nid)
   local coherence_modes = data.newmap() -- FIXME: Need coherence.
   -- FIXME: Need to scope constraints to regions used by task body.
   local constraints = false -- summarize_constraints(cx, nid)
-  local body = extract_task_body(cx, nid)
+  local body = flow_extract_subgraph.entry(cx.graph, nid)
 
   local name = tostring(terralib.newsymbol())
   local prototype = std.newtask(name)
