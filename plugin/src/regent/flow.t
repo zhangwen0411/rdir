@@ -500,7 +500,7 @@ function graph:printpretty()
     local shape
     if node:is(flow.node.Opaque) or node:is(flow.node.Deref) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
-      node:is(flow.node.IndexAccess) or
+      node:is(flow.node.Copy) or node:is(flow.node.IndexAccess) or
       node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
       node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
       node:is(flow.node.MustEpoch)
@@ -515,8 +515,7 @@ function graph:printpretty()
     elseif node:is(flow.node.Partition) or node:is(flow.node.List) then
       shape = "octagon"
     else
-      print(node)
-      assert(false)
+      error("unexpected node type " .. tostring(node.node_type))
     end
     print(tostring(i) .. " [ label = \"" .. label .. "\", shape = " .. shape .. " ];")
   end)
@@ -546,6 +545,8 @@ flow.node:leaf("IndexAccess", {"expr_type", "options", "span"})
 flow.node:leaf("Deref", {"expr_type", "options", "span"})
 flow.node:leaf("Reduce", {"op", "options", "span"})
 flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
+flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",
+                        "op", "options", "span"})
 
 flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})

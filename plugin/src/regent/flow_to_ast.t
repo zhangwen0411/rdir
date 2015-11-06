@@ -94,7 +94,7 @@ local function split_reduction_edges(cx)
   local nids = cx.graph:filter_nodes(
     function(nid, label)
       return label:is(flow.node.Region) or label:is(flow.node.Partition) or
-        label:is(flow.node.Scalar)
+        label:is(flow.node.List) or label:is(flow.node.Scalar)
   end)
   for _, nid in ipairs(nids) do
     split_reduction_edges_at_node(cx, nid)
@@ -116,7 +116,7 @@ local function get_WAR_edges(cx, edges)
       local region = cx.tree:ensure_variable(to_label.value.expr_type, symbol)
       for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
         local other_label = cx.graph:node_label(other)
-        if other_label:is(flow.node.Region) and
+        if (other_label:is(flow.node.Region) or other_label:is(flow.node.List)) and
           to_label.field_path == other_label.field_path and
           cx.tree:can_alias(std.as_read(other_label.value.expr_type), region)
         then
@@ -423,6 +423,56 @@ function flow_to_ast.node_task(cx, nid)
   })
 end
 
+function flow_to_ast.node_copy(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  local outputs = cx.graph:outgoing_edges_by_port(nid)
+
+  local maxport = get_maxport(inputs, outputs)
+
+  local src = cx.ast[get_arg_node(inputs, 1, true)]
+  local dst = cx.ast[get_arg_node(inputs, 2, true)]
+
+  local conditions = terralib.newlist()
+  for i = 3, maxport do
+    conditions:insert(cx.ast[get_arg_node(inputs, i, false)])
+  end
+
+  src = ast.typed.expr.RegionRoot {
+    region = src,
+    fields = label.src_field_paths,
+    expr_type = src.expr_type,
+    options = src.options,
+    span = src.span,
+  }
+
+  dst = ast.typed.expr.RegionRoot {
+    region = dst,
+    fields = label.dst_field_paths,
+    expr_type = dst.expr_type,
+    options = dst.options,
+    span = dst.span,
+  }
+
+  local action = ast.typed.expr.Copy {
+    src = src,
+    dst = dst,
+    op = label.op,
+    conditions = conditions,
+    expr_type = terralib.types.unit,
+    options = label.options,
+    span = label.span,
+  }
+
+  return terralib.newlist({
+      ast.typed.stat.Expr {
+        expr = action,
+        options = action.options,
+        span = action.span,
+      },
+  })
+end
+
 function flow_to_ast.node_while_loop(cx, nid)
   local label = cx.graph:node_label(nid)
   local stats = flow_to_ast.graph(cx, label.block).stats
@@ -642,6 +692,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Task) then
     return flow_to_ast.node_task(cx, nid)
+
+  elseif label:is(flow.node.Copy) then
+    return flow_to_ast.node_copy(cx, nid)
 
   elseif label:is(flow.node.Open) then
     return

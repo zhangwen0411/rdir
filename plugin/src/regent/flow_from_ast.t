@@ -1090,8 +1090,19 @@ end
 local analyze_privileges = {}
 
 function analyze_privileges.expr_region_root(cx, node, privilege_map)
+  local region_fields = std.flatten_struct_fields(
+    std.as_read(node.region.expr_type):fspace())
+  local privilege_fields = terralib.newlist()
+  for _, region_field in ipairs(region_fields) do
+    for _, use_field in ipairs(node.fields) do
+      if region_field:starts_with(use_field) then
+        privilege_fields:insert(region_field)
+        break
+      end
+    end
+  end
   local field_privilege_map = new_field_map()
-  for _, field_path in ipairs(node.fields) do
+  for _, field_path in ipairs(privilege_fields) do
     field_privilege_map:insertall(privilege_map:prepend(field_path))
   end
   return analyze_privileges.expr(cx, node.region, field_privilege_map)
@@ -1235,10 +1246,13 @@ function analyze_privileges.expr_cross_product(cx, node, privilege_map)
 end
 
 function analyze_privileges.expr_copy(cx, node, privilege_map)
+  local dst_mode = reads_writes
+  if node.op then
+    dst_mode = get_trivial_field_map(std.reduces(node.op))
+  end
   return privilege_meet(
     analyze_privileges.expr_region_root(cx, node.src, reads),
-    -- FIXME: This over-approximates reductions.
-    analyze_privileges.expr_region_root(cx, node.dst, reads_writes),
+    analyze_privileges.expr_region_root(cx, node.dst, dst_mode),
     data.reduce(
       privilege_meet,
       node.conditions:map(
@@ -1660,6 +1674,21 @@ local function as_call_expr(cx, args, opaque, expr_type, options, span, privileg
   return attach_result(privilege_map, result_nid)
 end
 
+local function as_copy_expr(cx, args, src_field_paths, dst_field_paths,
+                            op, options, span, privilege_map)
+  local label = flow.node.Copy {
+    src_field_paths = src_field_paths,
+    dst_field_paths = dst_field_paths,
+    op = op,
+    options = options,
+    span = span,
+  }
+  local compute_nid = add_node(cx, label)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, compute_nid)
+end
+
 local function as_index_expr(cx, args, result, expr_type, options, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
@@ -1691,8 +1720,19 @@ local function as_deref_expr(cx, args, result_nid, expr_type, options, span,
 end
 
 function flow_from_ast.expr_region_root(cx, node, privilege_map)
+  local region_fields = std.flatten_struct_fields(
+    std.as_read(node.region.expr_type):fspace())
+  local privilege_fields = terralib.newlist()
+  for _, region_field in ipairs(region_fields) do
+    for _, use_field in ipairs(node.fields) do
+      if region_field:starts_with(use_field) then
+        privilege_fields:insert(region_field)
+        break
+      end
+    end
+  end
   local field_privilege_map = new_field_map()
-  for _, field_path in ipairs(node.fields) do
+  for _, field_path in ipairs(privilege_fields) do
     field_privilege_map:insertall(privilege_map:prepend(field_path))
   end
 
@@ -1921,34 +1961,22 @@ function flow_from_ast.expr_static_cast(cx, node, privilege_map)
 end
 
 function flow_from_ast.expr_copy(cx, node, privilege_map)
+  local dst_mode = reads_writes
+  if node.op then
+    dst_mode = get_trivial_field_map(std.reduces(node.op))
+  end
+
   local src = flow_from_ast.expr_region_root(cx, node.src, reads)
-  -- FIXME: Over-approximates reductions.
-  local dst = flow_from_ast.expr_region_root(cx, node.dst, reads_writes)
+  local dst = flow_from_ast.expr_region_root(cx, node.dst, dst_mode)
   local conditions = node.conditions:map(
     function(condition)
       return flow_from_ast.expr_condition(cx, condition, reads)
     end)
-  return as_opaque_expr(
-    cx,
-    function(v1, v2, ...)
-      v1 = ast.typed.expr.RegionRoot {
-        region = v1,
-        fields = node.src.fields,
-        expr_type = v1.expr_type,
-        options = v1.options,
-        span = v1.span,
-      }
-      v2 = ast.typed.expr.RegionRoot {
-        region = v2,
-        fields = node.dst.fields,
-        expr_type = v2.expr_type,
-        options = v2.options,
-        span = v2.span,
-      }
-      return node { src = v1, dst = v2, conditions = terralib.newlist{...} }
-    end,
-    terralib.newlist({src, dst, unpack(conditions)}),
-    privilege_map)
+
+  local inputs = terralib.newlist({src, dst, unpack(conditions)})
+  return as_copy_expr(
+    cx, inputs, node.src.fields, node.dst.fields, node.op,
+    node.options, node.span, privilege_map)
 end
 
 function flow_from_ast.expr_unary(cx, node, privilege_map)
