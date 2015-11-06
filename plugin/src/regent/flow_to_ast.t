@@ -339,13 +339,12 @@ function flow_to_ast.node_reduce(cx, nid)
   return terralib.newlist({action})
 end
 
-local function get_maxport(inputs, outputs)
+local function get_maxport(...)
   local maxport = 0
-  for i, _ in pairs(inputs) do
-    maxport = data.max(maxport, i)
-  end
-  for i, _ in pairs(outputs) do
-    maxport = data.max(maxport, i)
+  for _, inputs in ipairs({...}) do
+    for i, _ in pairs(inputs) do
+      maxport = data.max(maxport, i)
+    end
   end
   return maxport
 end
@@ -426,12 +425,20 @@ function flow_to_ast.node_task(cx, nid)
   })
 end
 
+local function as_expr_region_root(value, fields)
+  return ast.typed.expr.RegionRoot {
+    region = value,
+    fields = fields,
+    expr_type = value.expr_type,
+    options = value.options,
+    span = value.span,
+  }
+end
+
 function flow_to_ast.node_copy(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
-  local outputs = cx.graph:outgoing_edges_by_port(nid)
-
-  local maxport = get_maxport(inputs, outputs)
+  local maxport = get_maxport(inputs)
 
   local src = cx.ast[get_arg_node(inputs, 1, true)]
   local dst = cx.ast[get_arg_node(inputs, 2, true)]
@@ -441,26 +448,41 @@ function flow_to_ast.node_copy(cx, nid)
     conditions:insert(cx.ast[get_arg_node(inputs, i, false)])
   end
 
-  src = ast.typed.expr.RegionRoot {
-    region = src,
-    fields = label.src_field_paths,
-    expr_type = src.expr_type,
-    options = src.options,
-    span = src.span,
-  }
-
-  dst = ast.typed.expr.RegionRoot {
-    region = dst,
-    fields = label.dst_field_paths,
-    expr_type = dst.expr_type,
-    options = dst.options,
-    span = dst.span,
-  }
-
   local action = ast.typed.expr.Copy {
-    src = src,
-    dst = dst,
+    src = as_expr_region_root(src, label.src_field_paths),
+    dst = as_expr_region_root(dst, label.dst_field_paths),
     op = label.op,
+    conditions = conditions,
+    expr_type = terralib.types.unit,
+    options = label.options,
+    span = label.span,
+  }
+
+  return terralib.newlist({
+      ast.typed.stat.Expr {
+        expr = action,
+        options = action.options,
+        span = action.span,
+      },
+  })
+end
+
+function flow_to_ast.node_fill(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  local maxport = get_maxport(inputs)
+
+  local dst = cx.ast[get_arg_node(inputs, 1, true)]
+  local value = cx.ast[get_arg_node(inputs, 2, true)]
+
+  local conditions = terralib.newlist()
+  for i = 3, maxport do
+    conditions:insert(cx.ast[get_arg_node(inputs, i, false)])
+  end
+
+  local action = ast.typed.expr.Fill {
+    dst = as_expr_region_root(dst, label.dst_field_paths),
+    value = value,
     conditions = conditions,
     expr_type = terralib.types.unit,
     options = label.options,
@@ -698,6 +720,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Copy) then
     return flow_to_ast.node_copy(cx, nid)
+
+  elseif label:is(flow.node.Fill) then
+    return flow_to_ast.node_fill(cx, nid)
 
   elseif label:is(flow.node.Open) then
     return

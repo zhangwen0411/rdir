@@ -500,7 +500,8 @@ function graph:printpretty()
     local shape
     if node:is(flow.node.Opaque) or node:is(flow.node.Deref) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
-      node:is(flow.node.Copy) or node:is(flow.node.IndexAccess) or
+      node:is(flow.node.Copy) or node:is(flow.node.Fill) or
+      node:is(flow.node.IndexAccess) or
       node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
       node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
       node:is(flow.node.MustEpoch)
@@ -547,6 +548,7 @@ flow.node:leaf("Reduce", {"op", "options", "span"})
 flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
 flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",
                         "op", "options", "span"})
+flow.node:leaf("Fill", {"dst_field_paths", "options", "span"})
 
 flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})
