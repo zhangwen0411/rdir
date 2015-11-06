@@ -139,38 +139,56 @@ local function gather_params(cx, nid)
   return result
 end
 
+local function privilege_kind(label)
+  if label:is(flow.edge.HappensBefore) then
+    -- Skip
+  elseif label:is(flow.edge.Name) then
+    -- Skip
+  elseif label:is(flow.edge.None) then
+    -- Skip
+  elseif label:is(flow.edge.Read) then
+    return std.reads
+  elseif label:is(flow.edge.Write) then
+    return std.writes
+  elseif label:is(flow.edge.Reduce) then
+    return std.reduces(label.op)
+  else
+    assert(false)
+  end
+end
+
 local function summarize_privileges(cx, nid)
   local result = terralib.newlist()
   local inputs = cx.graph:incoming_edges(nid)
+  local outputs = cx.graph:outgoing_edges(nid)
   for _, edge in ipairs(inputs) do
     local label = cx.graph:node_label(edge.from_node)
     local region_type
-    if label:is(flow.node.Region) then
+    if label:is(flow.node.Region) or label:is(flow.node.List) then
       region_type = label.region_type
     end
-
-    local privilege
-    if edge.label:is(flow.edge.HappensBefore) then
-      -- Skip
-    elseif edge.label:is(flow.edge.Name) then
-      -- Skip
-    elseif edge.label:is(flow.edge.None) then
-      -- Skip
-    elseif edge.label:is(flow.edge.Read) then
-      privilege = std.reads
-    elseif edge.label:is(flow.edge.Write) then
-      privilege = std.writes
-    elseif edge.label:is(flow.edge.Reduce) then
-      privilege = std.reduces(edge.label.op)
-    else
-      assert(false)
-    end
-
+    local privilege = privilege_kind(edge.label)
     if region_type and privilege then
       result:insert({
           node_type = "privilege",
           region = region_type,
-          field_path = data.newtuple(), -- FIXME: Need field
+          field_path = label.field_path,
+          privilege = privilege,
+      })
+    end
+  end
+  for _, edge in ipairs(outputs) do
+    local label = cx.graph:node_label(edge.to_node)
+    local region_type
+    if label:is(flow.node.Region) or label:is(flow.node.List) then
+      region_type = label.region_type
+    end
+    local privilege = privilege_kind(edge.label)
+    if region_type and privilege then
+      result:insert({
+          node_type = "privilege",
+          region = region_type,
+          field_path = label.field_path,
           privilege = privilege,
       })
     end
@@ -184,6 +202,7 @@ local function extract_task(cx, nid)
   local return_type = terralib.types.unit
   local privileges = summarize_privileges(cx, nid)
   local coherence_modes = data.newmap() -- FIXME: Need coherence.
+  local flags = data.newmap() -- FIXME: Need flags.
   -- FIXME: Need to scope constraints to regions used by task body.
   local constraints = false -- summarize_constraints(cx, nid)
   local body = flow_extract_subgraph.entry(cx.graph, nid)
@@ -197,6 +216,7 @@ local function extract_task(cx, nid)
     params:map(function(param) return param.symbol end))
   prototype:setprivileges(privileges)
   prototype:set_coherence_modes(coherence_modes)
+  prototype:set_flags(flags)
   prototype:set_param_constraints(constraints)
   prototype:set_constraints(cx.tree.constraints)
   prototype:set_region_universe(cx.tree.region_universe)
@@ -207,6 +227,7 @@ local function extract_task(cx, nid)
     return_type = return_type,
     privileges = privileges,
     coherence_modes = coherence_modes,
+    flags = flags,
     constraints = constraints,
     body = body,
     config_options = ast.TaskConfigOptions {
@@ -220,9 +241,10 @@ local function extract_task(cx, nid)
     span = label.span,
   }
   ast = flow_to_ast.entry(ast)
+  ast:printpretty(true)
   -- passes.optimize(ast)
   ast = codegen.entry(ast)
-  return ast, inputs
+  return ast
 end
 
 local function add_call_node(cx, nid)
@@ -268,13 +290,13 @@ local function copy_args(cx, original_nid, call_nid)
   -- Copy special edges first. No need for port mapping here.
   for i = minport, 0 do
     if inputs[i] then
-      for edge in ipairs(inputs[i]) do
+      for _, edge in ipairs(inputs[i]) do
         cx.graph:add_edge(
           edge.label, edge.from_node, edge.from_port, call_nid, edge.to_port)
       end
     end
     if outputs[i] then
-      for edge in ipairs(outputs[i]) do
+      for _, edge in ipairs(outputs[i]) do
         cx.graph:add_edge(
           edge.label, call_nid, edge.from_port, edge.to_node, edge.to_port)
       end
@@ -285,13 +307,13 @@ local function copy_args(cx, original_nid, call_nid)
   local next_port = 2
   for i = 1, maxport do
     if inputs[i] then
-      for edge in ipairs(inputs[i]) do
+      for _, edge in ipairs(inputs[i]) do
         cx.graph:add_edge(
           edge.label, edge.from_node, edge.from_port, call_nid, edge.to_port)
       end
     end
     if outputs[i] then
-      for edge in ipairs(outputs[i]) do
+      for _, edge in ipairs(outputs[i]) do
         cx.graph:add_edge(
           edge.label, call_nid, edge.from_port, edge.to_node, edge.to_port)
       end
@@ -313,9 +335,9 @@ local function outline(cx, nid)
   issue_call(cx, nid, task)
 end
 
-local flow_task_outline = {}
+local flow_outline_task = {}
 
-function flow_task_outline.entry(graph, nid)
+function flow_outline_task.entry(graph, nid)
   assert(flow.is_graph(graph) and flow.is_valid_node(nid))
   local cx = context.new_global_scope():new_graph_scope(graph)
   assert(can_outline(cx, nid))
@@ -324,4 +346,4 @@ function flow_task_outline.entry(graph, nid)
   return result_nid
 end
 
-return flow_task_outline
+return flow_outline_task

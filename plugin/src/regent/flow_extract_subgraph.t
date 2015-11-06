@@ -51,7 +51,7 @@ end
 local function extract_subgraph(cx, nid)
   local subgraph_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
 
-  local label = cx.graph:node_label(nid)
+  local label = flow.node_label_deepcopy(cx.graph:node_label(nid))
   local compute_nid = subgraph_cx.graph:add_node(label)
 
   local inputs = cx.graph:incoming_edges(nid)
@@ -74,7 +74,7 @@ local function extract_subgraph(cx, nid)
     end
   end
 
-  return subgraph_cx.graph
+  return subgraph_cx.graph, compute_nid
 end
 
 local flow_extract_subgraph = {}

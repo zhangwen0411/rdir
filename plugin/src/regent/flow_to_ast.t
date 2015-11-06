@@ -139,7 +139,7 @@ end
 
 local function add_WAR_edges(cx)
   local edges = terralib.newlist()
-  cx.graph:map_edges(get_WAR_edges(cx, edges))
+  cx.graph:traverse_edges(get_WAR_edges(cx, edges))
   for _, edge in ipairs(edges) do
     cx.graph:add_edge(
       flow.edge.HappensBefore {},

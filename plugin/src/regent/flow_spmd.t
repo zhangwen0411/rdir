@@ -190,29 +190,125 @@ local function can_spmdize(cx, loop)
     loops_are_compatible(cx, loop)
 end
 
-local function extract_distribution_loop(cx, loop)
-  local slice_index = terralib.newsymbol("slice_index")
-  local slice_graph = flow_extract_subgraph.entry(cx.graph, loop)
-  slice_graph:printpretty()
+local function rewrite_shard_partitions(shard_graph)
+  -- Every partition is replaced by a list, and every region with a
+  -- fresh region.
+  local mapping = {}
+  local labels = {}
+  shard_graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      if label:is(flow.node.Region) then
+        assert(label.value:is(ast.typed.expr.ID))
 
-  local loop_label = cx.graph:node_label(loop)
+        local region_type = label.region_type
+        if mapping[region_type] then return end
+
+        local fresh_type = std.region(
+          terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
+          region_type:fspace())
+        local fresh_symbol = terralib.newsymbol(
+          fresh_type, label.value.value.displayname)
+
+        -- Could use an AST rewriter here...
+        mapping[region_type] = fresh_type
+        labels[fresh_type] = label {
+          region_type = fresh_type,
+          value = label.value {
+            value = fresh_symbol,
+            expr_type = std.type_sub(label.value.expr_type, mapping),
+          },
+        }
+      elseif label:is(flow.node.Partition) then
+        assert(label.value:is(ast.typed.expr.ID))
+
+        local partition_type = label.region_type
+        local region_type = partition_type:parent_region()
+        if mapping[partition_type] then return end
+
+        local fresh_type = std.list(
+          std.region(
+            terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
+            region_type:fspace()))
+        local fresh_symbol = terralib.newsymbol(
+          fresh_type, label.value.value.displayname)
+
+        -- Could use an AST rewriter here...
+        mapping[partition_type] = fresh_type
+        labels[fresh_type] = flow.node.List(label) {
+          region_type = fresh_type,
+          value = label.value {
+            value = fresh_symbol,
+            expr_type = std.type_sub(label.value.expr_type, mapping),
+          },
+        }
+      end
+    end)
+
+  shard_graph:map_nodes_recursive(
+    function(graph, nid, label)
+      if label:is(flow.node.Region) or label:is(flow.node.Partition) then
+        assert(mapping[label.region_type])
+        label = labels[mapping[label.region_type]]
+      end
+      assert(label)
+      return label
+    end)
+  return mapping, labels
+end
+
+local function rewrite_shard_loop_bounds(shard_graph)
+  assert(false)
+end
+
+local function make_distribution_loop(cx, block, span)
+  local shard_index = terralib.newsymbol("shard_index")
+
   local label = flow.node.ForNum {
-    symbol = slice_index,
-    block = slice_graph,
+    symbol = shard_index,
+    block = block,
     options = ast.default_options(),
-    span = loop_label.span,
+    span = span,
   }
   local nid = cx.graph:add_node(label)
+  summarize_graph(cx, nid, block)
+  return nid
+end
+
+local function make_must_epoch(cx, block, span)
+  local loop_label = cx.graph:node_label(loop)
+  local label = flow.node.MustEpoch {
+    block = block,
+    options = ast.default_options(),
+    span = span,
+  }
+  local nid = cx.graph:add_node(label)
+  summarize_graph(cx, nid, block)
   return nid
 end
 
 local function spmdize(cx, loop)
-  local distribute_nid = extract_distribution_loop(cx, loop)
-  -- Wrap this in a must_epoch launch.
-  -- Convert partitions to lists.
-  -- Outline task.
+  --  1. Extract shard (deep copy).
+  --  2. Rewrite shard partitions as lists.
+  --  2. Rewrite shard loop bounds.
+  --  3. Outline it into a task.
+  --  4. Wrap that in a distribution loop.
+  --  5. Wrap that in a must epoch.
+  --  6. Rewrite inputs/outputs.
+
+  local span = cx.graph:node_label(loop).span
+
+  local shard_graph, shard_loop = flow_extract_subgraph.entry(cx.graph, loop)
+  shard_graph:printpretty()
+  local mapping = rewrite_shard_partitions(shard_graph)
+  rewrite_shard_loop_bounds(shard_graph)
+  shard_graph:printpretty()
+  local shard_task = flow_outline_task.entry(shard_graph, shard_loop)
   assert(false)
-  return distribute_nid
+
+  local dist_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
+  local dist_loop = make_distribution_loop(dist_cx, shard_graph, span)
+
+  local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
 end
 
 local function spmdize_eligible_loop(cx, loops)

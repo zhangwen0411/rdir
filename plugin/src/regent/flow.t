@@ -115,6 +115,24 @@ function graph:copy()
   return result
 end
 
+function flow.node_label_deepcopy(label)
+  local fields = {}
+  for k, v in pairs(label) do
+    if flow.is_graph(v) then
+      fields[k] = v:deepcopy()
+    end
+  end
+  return label(fields)
+end
+
+function graph:deepcopy()
+  local result = self:copy()
+  for node, label in pairs(result.nodes) do
+    result.nodes[node] = flow.node_label_deepcopy(label)
+  end
+  return result
+end
+
 function graph:add_node(label)
   assert(label:is(flow.node))
 
@@ -169,9 +187,31 @@ function graph:add_edge(label, from_node, from_port, to_node, to_port)
   })
 end
 
-function graph:map_nodes(fn)
+function graph:traverse_nodes(fn)
   for node, label in pairs(self.nodes) do
     fn(node, label)
+  end
+end
+
+function graph:traverse_nodes_recursive(fn)
+  for node, label in pairs(self.nodes) do
+    for k, v in pairs(label) do
+      if flow.is_graph(v) then
+        v:traverse_nodes_recursive(fn)
+      end
+    end
+    fn(self, node, label)
+  end
+end
+
+function graph:map_nodes_recursive(fn)
+  for node, label in pairs(self.nodes) do
+    for k, v in pairs(label) do
+      if flow.is_graph(v) then
+        v:map_nodes_recursive(fn)
+      end
+    end
+    self.nodes[node] = fn(self, node, label)
   end
 end
 
@@ -194,7 +234,7 @@ function graph:any_nodes(fn)
   return false
 end
 
-function graph:map_edges(fn)
+function graph:traverse_edges(fn)
   for from, to_list in pairs(self.edges) do
     for to, edge_list in pairs(to_list) do
       for _, edge in pairs(edge_list) do
@@ -457,7 +497,7 @@ end
 function graph:toposort()
   local visited = {}
   local sort = terralib.newlist()
-  self:map_nodes(
+  self:traverse_nodes(
     function(node)
       toposort_node(self, node, visited, {}, sort)
   end)
@@ -467,7 +507,7 @@ end
 function graph:inverse_toposort()
   local visited = {}
   local sort = terralib.newlist()
-  self:map_nodes(
+  self:traverse_nodes(
     function(node)
       inverse_toposort_node(self, node, visited, {}, sort)
   end)
@@ -478,7 +518,7 @@ function graph:printpretty()
   print("digraph {")
   print("rankdir = LR;")
   print("node [ margin = \"0.055,0.0275\" ];")
-  self:map_nodes(function(i, node)
+  self:traverse_nodes(function(i, node)
     local label = tostring(node:type()):gsub("[^.]+[.]", ""):lower()
     if node:is(flow.node.Region) or node:is(flow.node.Partition) or
       node:is(flow.node.List) or node:is(flow.node.Scalar) or
@@ -520,7 +560,7 @@ function graph:printpretty()
     end
     print(tostring(i) .. " [ label = \"" .. label .. "\", shape = " .. shape .. " ];")
   end)
-  self:map_edges(
+  self:traverse_edges(
     function(from, from_port, from_label, to, to_port, to_label, edge)
       local label = tostring(edge:type()):gsub("[^.]+[.]", ""):lower()
       if edge:is(flow.edge.Reduce) then

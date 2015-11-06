@@ -635,7 +635,7 @@ end
 function flow_task_fusion.graph(cx, graph)
   assert(flow.is_graph(graph))
   local cx = cx:new_graph_scope(graph:copy())
-  cx.graph:map_nodes(function(nid) flow_task_fusion.node(cx, nid) end)
+  cx.graph:traverse_nodes(function(nid) flow_task_fusion.node(cx, nid) end)
   fuse_eligible_task_pairs(cx)
   return cx.graph
 end
