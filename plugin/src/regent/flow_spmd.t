@@ -537,6 +537,42 @@ local function make_must_epoch(cx, block, span)
   return nid
 end
 
+local function apply_mapping(old, new)
+  local result = {}
+  for k, v in pairs(old) do
+    result[k] = (new[v] == nil and v) or new[v]
+  end
+  return result
+end
+
+local function rewrite_inputs(cx, old_loop, new_loop, mapping)
+  --  1. Find mapping from old to new inputs (outputs).
+  --  2. For each input (output), either:
+  --      a. Replace new with old (if they are identical).
+  --      b. Add the approach logic to duplicate/slice the input (for lists).
+
+  print("rewrite_inputs")
+  local new_inputs = cx.graph:incoming_edges(new_loop)
+  local new_outputs = cx.graph:incoming_edges(new_loop)
+  print("new_inputs", new_inputs, #new_inputs)
+  print("new_outputs", new_outputs, #new_outputs)
+  for _, edge in ipairs(new_inputs) do
+    print("found an input", edge)
+    local new_input = cx.graph:node_label(edge.from_node)
+    local old_input = cx.graph:find_node(
+      function(nid, label)
+        return (label:is(flow.node.Region) or label:is(flow.node.Partition) or
+                  label:is(flow.node.List) or label:is(flow.node.Scalar)) and
+          mapping[label.region_type] == new_input.region_type
+      end)
+    print("input mapping")
+    print(new_input)
+    print(old_input)
+  end
+
+  assert(false)
+end
+
 local function spmdize(cx, loop)
   --  1. Extract shard (deep copy).
   --  2. Rewrite shard partitions as lists.
@@ -570,6 +606,9 @@ local function spmdize(cx, loop)
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
   local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)
   cx.graph:printpretty()
+
+  local inputs_mapping = apply_mapping(mapping, slice_mapping)
+  rewrite_inputs(cx, loop, epoch_task, inputs_mapping)
 
   assert(false)
 end
