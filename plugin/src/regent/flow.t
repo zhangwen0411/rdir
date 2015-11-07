@@ -32,6 +32,7 @@
 -- Dataflow IR
 
 local ast = require("regent/ast")
+local data = require("regent/data")
 
 local flow = ast.make_factory("flow")
 
@@ -95,6 +96,34 @@ end
 
 function graph:node_sync_port(node)
   return -2
+end
+
+function graph:node_minimum_port(node)
+  local label = self:node_label(node)
+  if label:is(flow.node.Opaque) then
+    return 1
+  elseif label:is(flow.node.WhileLoop) then
+    return 2
+  elseif label:is(flow.node.ForNum) then
+    return 4
+  elseif label:is(flow.node.ForList) then
+    return 2
+  elseif label:is(flow.node.MustEpoch) then
+    return 1
+  else
+    assert(false)
+  end
+end
+
+function graph:node_available_port(node)
+  local i = self:node_minimum_port(node)
+  local inputs = self:incoming_edges_by_port(node)
+  while true do
+    if not rawget(inputs, i) or #inputs[i] == 0 then
+      return i
+    end
+    i = i + 1
+  end
 end
 
 function graph:copy()
@@ -187,6 +216,34 @@ function graph:add_edge(label, from_node, from_port, to_node, to_port)
   })
 end
 
+function graph:remove_edge(from_node, from_port, to_node, to_port)
+  if rawget(self.edges, from_node) and rawget(self.edges[from_node], to_node)
+  then
+    self.edges[from_node][to_node] = data.filter(
+      function(edge)
+        return edge.from_port ~= from_port or edge.to_port ~= to_port
+      end,
+      self.edges[from_node][to_node])
+  end
+  if rawget(self.backedges, to_node) and
+    rawget(self.backedges[to_node], from_node)
+  then
+    self.backedges[to_node][from_node] = data.filter(
+      function(edge)
+        return edge.from_port ~= from_port or edge.to_port ~= to_port
+      end,
+      self.backedges[to_node][from_node])
+  end
+end
+
+function graph:find_node(fn)
+  for node, label in pairs(self.nodes) do
+    if fn(node, label) then
+      return node, label
+    end
+  end
+end
+
 function graph:traverse_nodes(fn)
   for node, label in pairs(self.nodes) do
     fn(node, label)
@@ -211,7 +268,9 @@ function graph:map_nodes_recursive(fn)
         v:map_nodes_recursive(fn)
       end
     end
-    self.nodes[node] = fn(self, node, label)
+    local new_label = fn(self, node, label)
+    assert(new_label:is(flow.node))
+    self.nodes[node] = new_label
   end
 end
 
@@ -248,16 +307,18 @@ end
 
 function graph:incoming_edges(node)
   local result = terralib.newlist()
-  for from_node, edges in pairs(self.backedges[node]) do
-    for _, edge in pairs(edges) do
-      result:insert(
-        {
-          from_node = from_node,
-          from_port = edge.from_port,
-          to_node = node,
-          to_port = edge.to_port,
-          label = edge.label,
-      })
+  if rawget(self.backedges, node) then
+    for from_node, edges in pairs(self.backedges[node]) do
+      for _, edge in pairs(edges) do
+        result:insert(
+          {
+            from_node = from_node,
+            from_port = edge.from_port,
+            to_node = node,
+            to_port = edge.to_port,
+            label = edge.label,
+        })
+      end
     end
   end
   return result
@@ -285,16 +346,18 @@ end
 
 function graph:outgoing_edges(node)
   local result = terralib.newlist()
-  for to_node, edges in pairs(self.edges[node]) do
-    for _, edge in pairs(edges) do
-      result:insert(
-        {
-          from_node = node,
-          from_port = edge.from_port,
-          to_node = to_node,
-          to_port = edge.to_port,
-          label = edge.label,
-      })
+  if rawget(self.edges, node) then
+    for to_node, edges in pairs(self.edges[node]) do
+      for _, edge in pairs(edges) do
+        result:insert(
+          {
+            from_node = node,
+            from_port = edge.from_port,
+            to_node = to_node,
+            to_port = edge.to_port,
+            label = edge.label,
+        })
+      end
     end
   end
   return result

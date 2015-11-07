@@ -309,13 +309,13 @@ local function copy_args(cx, original_nid, call_nid)
     if inputs[i] then
       for _, edge in ipairs(inputs[i]) do
         cx.graph:add_edge(
-          edge.label, edge.from_node, edge.from_port, call_nid, edge.to_port)
+          edge.label, edge.from_node, edge.from_port, call_nid, next_port)
       end
     end
     if outputs[i] then
       for _, edge in ipairs(outputs[i]) do
         cx.graph:add_edge(
-          edge.label, call_nid, edge.from_port, edge.to_node, edge.to_port)
+          edge.label, call_nid, next_port, edge.to_node, edge.to_port)
       end
     end
     if inputs[i] or outputs[i] then
