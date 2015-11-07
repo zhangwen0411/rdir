@@ -119,6 +119,7 @@ local function summarize_subgraph(cx, nid, mapping)
     end)
 
   for region_type, privileges in usage_modes:items() do
+    local port
     for field_path, privilege in privileges:items() do
       local label = labels[region_type][field_path]
 
@@ -134,9 +135,10 @@ local function summarize_subgraph(cx, nid, mapping)
       end
       if read_edge_label then
         local read_nid = cx.graph:add_node(label)
+        port = port or cx.graph:node_available_port(nid)
         cx.graph:add_edge(
           read_edge_label, read_nid, cx.graph:node_result_port(read_nid),
-          nid, cx.graph:node_available_port(nid))
+          nid, port)
       end
 
       local write_edge_label
@@ -154,9 +156,10 @@ local function summarize_subgraph(cx, nid, mapping)
 
       if write_edge_label then
         local write_nid = cx.graph:add_node(label)
+        port = port or cx.graph:node_available_port(nid)
         cx.graph:add_edge(
-          write_edge_label, nid, cx.graph:node_available_port(nid),
-          write_nid, cx.graph:node_result_port(write_nid))
+          write_edge_label, nid, port,
+          write_nid, cx.graph:node_available_port(write_nid))
       end
     end
   end

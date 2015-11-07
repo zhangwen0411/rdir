@@ -110,8 +110,16 @@ function graph:node_minimum_port(node)
     return 2
   elseif label:is(flow.node.MustEpoch) then
     return 1
+  elseif label:is(flow.node.Region) or
+    label:is(flow.node.Partition) or
+    label:is(flow.node.List) or
+    label:is(flow.node.Scalar) or
+    label:is(flow.node.Constant) or
+    label:is(flow.node.Function)
+  then
+    return 1
   else
-    assert(false)
+    assert(false, "unexpected node type " .. tostring(label.node_type))
   end
 end
 

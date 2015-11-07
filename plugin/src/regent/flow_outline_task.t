@@ -203,6 +203,7 @@ local function extract_task(cx, nid)
   local privileges = summarize_privileges(cx, nid)
   local coherence_modes = data.newmap() -- FIXME: Need coherence.
   local flags = data.newmap() -- FIXME: Need flags.
+  local conditions = {} -- FIXME: Need conditions.
   -- FIXME: Need to scope constraints to regions used by task body.
   local constraints = false -- summarize_constraints(cx, nid)
   local body = flow_extract_subgraph.entry(cx.graph, nid)
@@ -217,6 +218,7 @@ local function extract_task(cx, nid)
   prototype:setprivileges(privileges)
   prototype:set_coherence_modes(coherence_modes)
   prototype:set_flags(flags)
+  prototype:set_conditions(conditions)
   prototype:set_param_constraints(constraints)
   prototype:set_constraints(cx.tree.constraints)
   prototype:set_region_universe(cx.tree.region_universe)
@@ -228,6 +230,7 @@ local function extract_task(cx, nid)
     privileges = privileges,
     coherence_modes = coherence_modes,
     flags = flags,
+    conditions = conditions,
     constraints = constraints,
     body = body,
     config_options = ast.TaskConfigOptions {
