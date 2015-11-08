@@ -92,10 +92,7 @@ end
 
 local function split_reduction_edges(cx)
   local nids = cx.graph:filter_nodes(
-    function(nid, label)
-      return label:is(flow.node.Region) or label:is(flow.node.Partition) or
-        label:is(flow.node.List) or label:is(flow.node.Scalar)
-  end)
+    function(nid, label) return label:is(flow.node.data) end)
   for _, nid in ipairs(nids) do
     split_reduction_edges_at_node(cx, nid)
   end
@@ -104,7 +101,7 @@ end
 local function get_WAR_edges(cx, edges)
   return function(from_node, from_port, from_label, to_node, to_port, to_label, label)
     if label:is(flow.edge.Write) then
-      if to_label:is(flow.node.Scalar) and to_label.fresh then
+      if to_label:is(flow.node.data.Scalar) and to_label.fresh then
         return
       end
 
@@ -116,10 +113,7 @@ local function get_WAR_edges(cx, edges)
       local region = to_label.region_type
       for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
         local other_label = cx.graph:node_label(other)
-        if (other_label:is(flow.node.Region) or
-              other_label:is(flow.node.Partition) or
-              other_label:is(flow.node.List) or
-              other_label:is(flow.node.Scalar)) and
+        if other_label:is(flow.node.data) and
           to_label.field_path == other_label.field_path and
           cx.tree:can_alias(other_label.region_type, region)
         then
@@ -166,7 +160,7 @@ function flow_to_ast.node_opaque(cx, nid)
       assert(#input == 1)
       local input_nid = input[1].from_node
       local input_label = cx.graph:node_label(input_nid)
-      if input_label:is(flow.node.Scalar) and input_label.fresh then
+      if input_label:is(flow.node.data.Scalar) and input_label.fresh then
         actions:insert(
           ast.typed.stat.Var {
             symbols = terralib.newlist({ input_label.value.value }),
@@ -177,10 +171,10 @@ function flow_to_ast.node_opaque(cx, nid)
             options = input_label.value.options,
             span = input_label.value.span,
         })
-      elseif input_label:is(flow.node.Region) and
+      elseif input_label:is(flow.node.data) and
         not cx.ast[input_nid]:is(ast.typed.expr.ID)
       then
-        local region_ast = cx.region_ast[input_label.value.expr_type]
+        local region_ast = cx.region_ast[input_label.region_type]
         assert(region_ast)
         local action = ast.typed.stat.Var {
           symbols = terralib.newlist({ input_label.value.value }),
@@ -598,18 +592,21 @@ function flow_to_ast.node_must_epoch(cx, nid)
   })
 end
 
-function flow_to_ast.node_region(cx, nid)
+function flow_to_ast.node_data(cx, nid)
   local label = cx.graph:node_label(nid)
+  if label:is(flow.node.data.Scalar) then
+    return flow_to_ast.node_data_scalar(cx, nid)
+  end
 
   local inputs = cx.graph:incoming_edges_by_port(nid)
   for _, edges in pairs(inputs) do
     for _, edge in ipairs(edges) do
       if edge.label:is(flow.edge.Name) then
-        if not cx.region_ast[label.value.expr_type] then
+        if not cx.region_ast[label.region_type] then
           cx.ast[nid] = cx.ast[edge.from_node]
-          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
+          cx.region_ast[label.region_type] = cx.ast[edge.from_node]
         else
-          cx.ast[nid] = cx.region_ast[label.value.expr_type]
+          cx.ast[nid] = cx.region_ast[label.region_type]
         end
         return terralib.newlist({})
       end
@@ -624,59 +621,7 @@ function flow_to_ast.node_region(cx, nid)
   return terralib.newlist({})
 end
 
-function flow_to_ast.node_partition(cx, nid)
-  local label = cx.graph:node_label(nid)
-
-  local inputs = cx.graph:incoming_edges_by_port(nid)
-  for _, edges in pairs(inputs) do
-    for _, edge in ipairs(edges) do
-      if edge.label:is(flow.edge.Name) then
-        if not cx.region_ast[label.value.expr_type] then
-          cx.ast[nid] = cx.ast[edge.from_node]
-          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
-        else
-          cx.ast[nid] = cx.region_ast[label.value.expr_type]
-        end
-        return terralib.newlist({})
-      end
-    end
-  end
-
-  if cx.region_ast[label.value.expr_type] then
-    cx.ast[nid] = cx.region_ast[label.value.expr_type]
-  else
-    cx.ast[nid] = label.value
-  end
-  return terralib.newlist({})
-end
-
-function flow_to_ast.node_list(cx, nid)
-  local label = cx.graph:node_label(nid)
-
-  local inputs = cx.graph:incoming_edges_by_port(nid)
-  for _, edges in pairs(inputs) do
-    for _, edge in ipairs(edges) do
-      if edge.label:is(flow.edge.Name) then
-        if not cx.region_ast[label.value.expr_type] then
-          cx.ast[nid] = cx.ast[edge.from_node]
-          cx.region_ast[label.value.expr_type] = cx.ast[edge.from_node]
-        else
-          cx.ast[nid] = cx.region_ast[label.value.expr_type]
-        end
-        return terralib.newlist({})
-      end
-    end
-  end
-
-  if cx.region_ast[label.value.expr_type] then
-    cx.ast[nid] = cx.region_ast[label.value.expr_type]
-  else
-    cx.ast[nid] = label.value
-  end
-  return terralib.newlist({})
-end
-
-function flow_to_ast.node_scalar(cx, nid)
+function flow_to_ast.node_data_scalar(cx, nid)
   local label = cx.graph:node_label(nid)
   local outputs = cx.graph:outgoing_edges_by_port(nid)
   if rawget(outputs, cx.graph:node_result_port(nid)) then
@@ -745,17 +690,8 @@ function flow_to_ast.node(cx, nid)
   elseif label:is(flow.node.MustEpoch) then
     return flow_to_ast.node_must_epoch(cx, nid)
 
-  elseif label:is(flow.node.Region) then
-    return flow_to_ast.node_region(cx, nid)
-
-  elseif label:is(flow.node.Partition) then
-    return flow_to_ast.node_partition(cx, nid)
-
-  elseif label:is(flow.node.List) then
-    return flow_to_ast.node_list(cx, nid)
-
-  elseif label:is(flow.node.Scalar) then
-    return flow_to_ast.node_scalar(cx, nid)
+  elseif label:is(flow.node.data) then
+    return flow_to_ast.node_data(cx, nid)
 
   elseif label:is(flow.node.Constant) then
     return flow_to_ast.node_constant(cx, nid)

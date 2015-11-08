@@ -72,9 +72,7 @@ local function summarize_subgraph(cx, nid, mapping)
   local labels = data.newmap()
   block_cx.graph:traverse_nodes(
     function(nid, label)
-      if label:is(flow.node.Region) or label:is(flow.node.Partition) or
-        label:is(flow.node.List) or label:is(flow.node.Scalar)
-      then
+      if label:is(flow.node.data) then
         local region_type = label.region_type
         local field_path = label.field_path
 
@@ -86,8 +84,7 @@ local function summarize_subgraph(cx, nid, mapping)
           region_type = mapping[region_type]
           local nid1, label1 = block_cx.graph:find_node(
             function(nid, label)
-              return (label:is(flow.node.Region) or label:is(flow.node.Partition) or
-                        label:is(flow.node.List) or label:is(flow.node.Scalar)) and
+              return label:is(flow.node.data) and
                 label.region_type == region_type
             end)
           assert(label1)

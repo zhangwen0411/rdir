@@ -100,7 +100,12 @@ end
 
 function graph:node_minimum_port(node)
   local label = self:node_label(node)
-  if label:is(flow.node.Opaque) then
+  if label:is(flow.node.Opaque) or
+    label:is(flow.node.Copy) or
+    label:is(flow.node.Fill) or
+    label:is(flow.node.Open) or
+    label:is(flow.node.Close)
+  then
     return 1
   elseif label:is(flow.node.WhileLoop) then
     return 2
@@ -110,10 +115,7 @@ function graph:node_minimum_port(node)
     return 2
   elseif label:is(flow.node.MustEpoch) then
     return 1
-  elseif label:is(flow.node.Region) or
-    label:is(flow.node.Partition) or
-    label:is(flow.node.List) or
-    label:is(flow.node.Scalar) or
+  elseif label:is(flow.node.data) or
     label:is(flow.node.Constant) or
     label:is(flow.node.Function)
   then
@@ -199,6 +201,20 @@ function graph:remove_node(node)
       from_list[node] = nil
     end
   end
+end
+
+function graph:replace_node(old_node, new_node)
+  local inputs = self:incoming_edges(old_node)
+  for _, edge in ipairs(inputs) do
+    self:add_edge(
+      edge.label, edge.from_node, edge.from_port, new_node, edge.to_port)
+  end
+  local outputs = self:outgoing_edges(old_node)
+  for _, edge in ipairs(outputs) do
+    self:add_edge(
+      edge.label, new_node, edge.from_port, edge.to_node, edge.to_port)
+  end
+  self:remove_node(old_node)
 end
 
 function graph:add_edge(label, from_node, from_port, to_node, to_port)
@@ -314,6 +330,7 @@ function graph:traverse_edges(fn)
 end
 
 function graph:incoming_edges(node)
+  assert(flow.is_valid_node(node))
   local result = terralib.newlist()
   if rawget(self.backedges, node) then
     for from_node, edges in pairs(self.backedges[node]) do
@@ -333,6 +350,7 @@ function graph:incoming_edges(node)
 end
 
 function graph:incoming_edges_by_port(node)
+  assert(flow.is_valid_node(node))
   local result = {}
   for from_node, edges in pairs(self.backedges[node]) do
     for _, edge in pairs(edges) do
@@ -353,6 +371,7 @@ function graph:incoming_edges_by_port(node)
 end
 
 function graph:outgoing_edges(node)
+  assert(flow.is_valid_node(node))
   local result = terralib.newlist()
   if rawget(self.edges, node) then
     for to_node, edges in pairs(self.edges[node]) do
@@ -372,6 +391,7 @@ function graph:outgoing_edges(node)
 end
 
 function graph:outgoing_edges_by_port(node)
+  assert(flow.is_valid_node(node))
   local result = {}
   for to_node, edges in pairs(self.edges[node]) do
     for _, edge in pairs(edges) do
@@ -392,6 +412,7 @@ function graph:outgoing_edges_by_port(node)
 end
 
 function graph:immediate_predecessor(node)
+  assert(flow.is_valid_node(node))
   local pred
   for from_node, _ in pairs(self.backedges[node]) do
     assert(not pred)
@@ -402,6 +423,7 @@ function graph:immediate_predecessor(node)
 end
 
 function graph:immediate_successor(node)
+  assert(flow.is_valid_node(node))
   local succ
   for to_node, _ in pairs(self.edges[node]) do
     assert(not succ)
@@ -412,11 +434,32 @@ function graph:immediate_successor(node)
 end
 
 function graph:immediate_predecessors(node)
+  assert(flow.is_valid_node(node))
   local result = terralib.newlist()
   for from_node, _ in pairs(self.backedges[node]) do
     result:insert(from_node)
   end
   return result
+end
+
+function graph:find_immediate_predecessor(fn, node)
+  assert(flow.is_valid_node(node))
+  for from_node, _ in pairs(self.backedges[node]) do
+    local from_node_label = self:node_label(from_node)
+    if fn(from_node, from_node_label) then
+      return from_node, from_node_label
+    end
+  end
+end
+
+function graph:find_immediate_successor(fn, node)
+  assert(flow.is_valid_node(node))
+  for to_node, _ in pairs(self.edges[node]) do
+    local to_node_label = self:node_label(to_node)
+    if fn(to_node, to_node_label) then
+      return to_node, to_node_label
+    end
+  end
 end
 
 function graph:immediate_successors(node)
@@ -591,8 +634,7 @@ function graph:printpretty()
   print("node [ margin = \"0.055,0.0275\" ];")
   self:traverse_nodes(function(i, node)
     local label = tostring(node:type()):gsub("[^.]+[.]", ""):lower()
-    if node:is(flow.node.Region) or node:is(flow.node.Partition) or
-      node:is(flow.node.List) or node:is(flow.node.Scalar) or
+    if node:is(flow.node.data) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
       local name = tostring(node.value.value)
@@ -600,9 +642,7 @@ function graph:printpretty()
         name = tostring(node.value.value.name)
       end
       label = label .. " " .. tostring(name)
-      if node:is(flow.node.Region) or node:is(flow.node.Partition) or
-        node:is(flow.node.List) or node:is(flow.node.Scalar)
-      then
+      if node:is(flow.node.data) then
         label = label .. " " .. tostring(node.field_path)
       end
     elseif node:is(flow.node.Reduce) then
@@ -620,12 +660,10 @@ function graph:printpretty()
       shape = "rectangle"
     elseif node:is(flow.node.Open) or node:is(flow.node.Close) then
       shape = "diamond"
-    elseif node:is(flow.node.Region) or node:is(flow.node.Scalar) or
+    elseif node:is(flow.node.data) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
       shape = "ellipse"
-    elseif node:is(flow.node.Partition) or node:is(flow.node.List) then
-      shape = "octagon"
     else
       error("unexpected node type " .. tostring(node.node_type))
     end
@@ -672,10 +710,11 @@ flow.node:leaf("ForList", {"symbol", "block", "options", "span"})
 flow.node:leaf("MustEpoch", {"block", "options", "span"})
 
 -- Data
-flow.node:leaf("Region", {"value", "region_type", "field_path"})
-flow.node:leaf("Partition", {"value", "region_type", "field_path"})
-flow.node:leaf("List", {"value", "region_type", "field_path"})
-flow.node:leaf("Scalar", {"value", "region_type", "field_path", "fresh"})
+flow.node:inner("data", {"value", "region_type", "field_path"})
+flow.node.data:leaf("Region", {})
+flow.node.data:leaf("Partition", {})
+flow.node.data:leaf("List", {})
+flow.node.data:leaf("Scalar", {"fresh"})
 flow.node:leaf("Constant", {"value"})
 flow.node:leaf("Function", {"value"})
 

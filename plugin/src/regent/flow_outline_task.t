@@ -63,7 +63,7 @@ local function count_output_scalars(cx, nid)
   local outputs = cx.graph:outgoing_edges(nid)
   for _, edge in ipairs(outputs) do
     local label = cx.graph:node_label(edge.to_node)
-    if label:is(flow.node.Scalar) then
+    if label:is(flow.node.data.Scalar) then
       result = result + 1
     end
   end
@@ -74,7 +74,7 @@ local function has_partition_accesses(cx, nid)
   local inputs = cx.graph:outgoing_edges(nid)
   for _, edge in ipairs(inputs) do
     local label = cx.graph:node_label(edge.from_node)
-    if label:is(flow.node.Partition) and (
+    if label:is(flow.node.data.Partition) and (
       edge.label:is(flow.edge.Read) or
       edge.label:is(flow.edge.Write) or
       edge.label:is(flow.edge.Reduce))
@@ -85,7 +85,7 @@ local function has_partition_accesses(cx, nid)
   local outputs = cx.graph:outgoing_edges(nid)
   for _, edge in ipairs(outputs) do
     local label = cx.graph:node_label(edge.to_node)
-    if label:is(flow.node.Partition) and (
+    if label:is(flow.node.data.Partition) and (
       edge.label:is(flow.edge.Read) or
       edge.label:is(flow.edge.Write) or
       edge.label:is(flow.edge.Reduce))
@@ -163,15 +163,15 @@ local function summarize_privileges(cx, nid)
   local outputs = cx.graph:outgoing_edges(nid)
   for _, edge in ipairs(inputs) do
     local label = cx.graph:node_label(edge.from_node)
-    local region_type
-    if label:is(flow.node.Region) or label:is(flow.node.List) then
-      region_type = label.region_type
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.value.value
     end
     local privilege = privilege_kind(edge.label)
-    if region_type and privilege then
+    if region and privilege then
       result:insert({
           node_type = "privilege",
-          region = region_type,
+          region = region,
           field_path = label.field_path,
           privilege = privilege,
       })
@@ -179,21 +179,21 @@ local function summarize_privileges(cx, nid)
   end
   for _, edge in ipairs(outputs) do
     local label = cx.graph:node_label(edge.to_node)
-    local region_type
-    if label:is(flow.node.Region) or label:is(flow.node.List) then
-      region_type = label.region_type
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.value.value
     end
     local privilege = privilege_kind(edge.label)
-    if region_type and privilege then
+    if region and privilege then
       result:insert({
           node_type = "privilege",
-          region = region_type,
+          region = region,
           field_path = label.field_path,
           privilege = privilege,
       })
     end
   end
-  return result
+  return terralib.newlist({result})
 end
 
 local function extract_task(cx, nid)
@@ -244,7 +244,6 @@ local function extract_task(cx, nid)
     span = label.span,
   }
   ast = flow_to_ast.entry(ast)
-  ast:printpretty(true)
   -- passes.optimize(ast)
   ast = codegen.entry(ast)
   return ast
@@ -331,11 +330,12 @@ local function issue_call(cx, nid, task)
   local call_nid = add_call_node(cx, nid)
   add_task_arg(cx, call_nid, task)
   copy_args(cx, nid, call_nid)
+  return call_nid
 end
 
 local function outline(cx, nid)
   local task = extract_task(cx, nid)
-  issue_call(cx, nid, task)
+  return issue_call(cx, nid, task)
 end
 
 local flow_outline_task = {}

@@ -386,7 +386,7 @@ local function add_result(cx, from_nid, expr_type, options, span)
     span = span,
   }
   local result_nid = cx.graph:add_node(
-    flow.node.Scalar {
+    flow.node.data.Scalar {
       value = label,
       region_type = region_type,
       field_path = data.newtuple(),
@@ -646,26 +646,37 @@ local function get_region_label(cx, region_type, field_path)
     span = cx.tree:region_span(region_type),
   }
   if std.is_region(std.as_read(expr_type)) then
-    return flow.node.Region {
+    if cx.tree:is_point(region_type) then
+      -- FIXME: When we model assignments, this will need to become
+      -- more expressive (i.e. for l-vals to work properly, this will
+      -- need to be a deref, not the result of a deref).
+      local parent = cx.tree:parent(cx.tree:parent(region_type))
+      local expr_type = std.get_field_path(parent:fspace(), field_path)
+      name = name {
+        value = terralib.newsymbol(expr_type),
+        expr_type = expr_type,
+      }
+    end
+    return flow.node.data.Region {
       value = name,
       region_type = region_type,
       field_path = field_path,
     }
   elseif std.is_partition(std.as_read(expr_type)) then
-    return flow.node.Partition {
+    return flow.node.data.Partition {
       value = name,
       region_type = region_type,
       field_path = field_path,
     }
   elseif std.is_list_of_regions(std.as_read(expr_type)) then
-    return flow.node.List {
+    return flow.node.data.List {
       value = name,
       region_type = region_type,
       field_path = field_path,
     }
   else
     assert(not flow_region_tree.is_region(std.as_read(expr_type)))
-    return flow.node.Scalar {
+    return flow.node.data.Scalar {
       value = name,
       region_type = region_type,
       field_path = field_path,
@@ -1627,7 +1638,7 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
   local arg_expr_nids = arg_nids:map(
     function(arg_nid)
       local arg_label = cx.graph:node_label(arg_nid)
-      if arg_label:is(flow.node.Scalar) and arg_label.fresh then
+      if arg_label:is(flow.node.data.Scalar) and arg_label.fresh then
         local arg_expr_nid = cx.graph:immediate_predecessor(arg_nid)
         if cx.graph:node_label(arg_expr_nid):is(flow.node.Opaque) then
           return arg_expr_nid
@@ -2317,7 +2328,7 @@ function flow_from_ast.stat_expr(cx, node)
   local result = flow_from_ast.expr(cx, node.expr, reads)
   for field_path, value in result:items() do
     local privilege, result_nid = unpack(value)
-    if cx.graph:node_label(result_nid):is(flow.node.Scalar) then
+    if cx.graph:node_label(result_nid):is(flow.node.data.Scalar) then
       sequence_advance(cx, cx.graph:immediate_predecessor(result_nid))
     else
       sequence_advance(cx, result_nid)
