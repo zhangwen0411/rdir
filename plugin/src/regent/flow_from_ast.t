@@ -223,10 +223,15 @@ context.__index = context
 
 local region_tree_state
 
-function context:new_local_scope()
+function context:new_local_scope(local_var)
+  local local_vars = self.local_vars:copy()
+  if local_var then
+    local_vars[local_var] = true
+  end
   local cx = {
     constraints = self.constraints,
     graph = flow.empty_graph(self.tree),
+    local_vars = local_vars,
     epoch = terralib.newlist(),
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
@@ -241,6 +246,7 @@ function context:new_task_scope(constraints, region_universe)
   local cx = {
     constraints = constraints,
     graph = flow.empty_graph(tree),
+    local_vars = data.newmap(),
     epoch = terralib.newlist(),
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
@@ -1125,6 +1131,12 @@ function analyze_privileges.expr_id(cx, node, privilege_map)
   local expr_type = std.as_read(node.expr_type)
   if flow_region_tree.is_region(expr_type) then
     return uses(cx, expr_type, privilege_map)
+  else
+    if not cx.local_vars[node.value] then
+      local region_type = cx.tree:intern_variable(
+        node.expr_type, node.value, node.options, node.span)
+      return uses(cx, region_type, privilege_map)
+    end
   end
 end
 
@@ -1437,7 +1449,8 @@ function analyze_privileges.stat_while(cx, node)
 end
 
 function analyze_privileges.stat_for_num(cx, node)
-  local block_privileges = analyze_privileges.block(cx, node.block)
+  local block_cx = cx:new_local_scope(node.symbol)
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
   local outer_privileges = privilege_summary(cx, block_privileges, true)
   return
     data.reduce(
@@ -1448,7 +1461,8 @@ function analyze_privileges.stat_for_num(cx, node)
 end
 
 function analyze_privileges.stat_for_list(cx, node)
-  local block_privileges = analyze_privileges.block(cx, node.block)
+  local block_cx = cx:new_local_scope(node.symbol)
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
   local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
     analyze_privileges.expr(cx, node.value, reads),
@@ -2224,14 +2238,17 @@ function flow_from_ast.stat_for_num(cx, node)
   local inputs = node.values:map(
     function(value) return flow_from_ast.expr(cx, value, reads) end)
 
-  local block_cx = cx:new_local_scope()
+  local block_cx = cx:new_local_scope(node.symbol)
   local block_privileges = analyze_privileges.block(block_cx, node.block)
   local inner_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, false))
   local outer_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, true))
   for region_type, privilege_map in pairs(inner_privileges) do
-    preopen_region_tree(block_cx, region_type, privilege_map)
+    local var_type = cx.tree:region_var_type(region_type)
+    if flow_region_tree.is_region(std.as_read(var_type)) then
+      preopen_region_tree(block_cx, region_type, privilege_map)
+    end
   end
   flow_from_ast.block(block_cx, node.block)
 
@@ -2239,7 +2256,15 @@ function flow_from_ast.stat_for_num(cx, node)
     assert(#inputs <= 3)
     local i = 4
     for region_type, privilege_map in pairs(outer_privileges) do
-      inputs[i] = open_region_tree(cx, region_type, nil, privilege_map)
+      local var_type = cx.tree:region_var_type(region_type)
+      local region_symbol
+      if not flow_region_tree.is_region(std.as_read(var_type)) then
+        region_symbol = cx.tree:region_symbol(region_type)
+        region_type = var_type
+      end
+      inputs[i] = open_region_tree(
+        cx, region_type, region_symbol, privilege_map)
+      i = i + 1
     end
   end
 
@@ -2250,20 +2275,30 @@ end
 function flow_from_ast.stat_for_list(cx, node)
   local value = flow_from_ast.expr(cx, node.value, none)
 
-  local block_cx = cx:new_local_scope()
+  local block_cx = cx:new_local_scope(node.symbol)
   local block_privileges = analyze_privileges.block(block_cx, node.block)
   local inner_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, false))
   local outer_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, true))
   for region_type, privilege_map in pairs(inner_privileges) do
-    preopen_region_tree(block_cx, region_type, privilege_map)
+    local var_type = cx.tree:region_var_type(region_type)
+    if flow_region_tree.is_region(std.as_read(var_type)) then
+      preopen_region_tree(block_cx, region_type, privilege_map)
+    end
   end
   flow_from_ast.block(block_cx, node.block)
 
   local inputs = terralib.newlist({value})
   for region_type, privilege_map in pairs(outer_privileges) do
-    inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
+    local var_type = cx.tree:region_var_type(region_type)
+    local region_symbol
+    if not flow_region_tree.is_region(std.as_read(var_type)) then
+      region_symbol = cx.tree:region_symbol(region_type)
+      region_type = var_type
+    end
+    inputs:insert(open_region_tree(
+                    cx, region_type, region_symbol, privilege_map))
   end
 
   as_forlist_stat(

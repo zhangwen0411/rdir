@@ -502,14 +502,24 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
   data.zip(data.range(1, 1 + #original_bounds), original_bounds):map(
     function(i_bound)
       local i, bound = unpack(i_bound)
-      if bound:is(flow.node.Constant) then
-        local bound_nid = cx.graph:add_node(bound)
-        cx.graph:add_edge(
-          flow.edge.Read {}, bound_nid, cx.graph:node_result_port(bound_nid),
-          nid, i)
-      else
-        assert(false)
+      local bound_nid
+
+      -- Reuse the node if it exists.
+      if bound:is(flow.node.data) then
+        bound_nid = cx.graph:find_immediate_predecessor(
+          function(nid, label)
+            return label.region_type == bound.region_type
+          end,
+          nid)
       end
+
+      -- Otherwise build a new one.
+      if not bound_nid then
+        bound_nid = cx.graph:add_node(bound)
+      end
+      cx.graph:add_edge(
+        flow.edge.Read {}, bound_nid, cx.graph:node_result_port(bound_nid),
+        nid, i)
     end)
 
   -- Add loop stride.
@@ -548,7 +558,7 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
-  --      b. Add the approach logic to duplicate/slice the input (for lists).
+  --      b. Add logic to duplicate/slice the input (for lists).
   --          i. Insert copies and opens/closes to make data consistent.
   --  3. Copy happens-before edges.
 
@@ -571,6 +581,7 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
     if new_input:is(flow.node.data) then
       local old_input_nid = cx.graph:find_immediate_predecessor(
         matches(new_input), old_loop)
+      assert(old_input_nid)
       input_nid_mapping[old_input_nid] = new_input_nid
     end
   end
@@ -582,6 +593,7 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
     if new_output:is(flow.node.data) then
       local old_output_nid = cx.graph:find_immediate_successor(
         matches(new_output), old_loop)
+      assert(old_output_nid)
       output_nid_mapping[old_output_nid] = new_output_nid
     end
   end
