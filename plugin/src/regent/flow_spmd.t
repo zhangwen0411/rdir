@@ -274,7 +274,8 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
         end
 
         local value_type = std.type_meet(
-          value1.value.expr_type, value2.value.expr_type)
+          std.as_read(value1.value.expr_type),
+          std.as_read(value2.value.expr_type))
         if bounds_type then
           assert(std.type_eq(value_type, bounds_type))
         end

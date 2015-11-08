@@ -127,13 +127,15 @@ local function gather_params(cx, nid)
         local edge = outputs[i][1]
         label = cx.graph:node_label(edge.to_node)
       end
-      result:insert(
-        ast.typed.stat.TaskParam {
-          symbol = label.value.value,
-          param_type = std.as_read(label.value.expr_type),
-          options = label.value.options,
-          span = label.value.span,
-      })
+      if not (label:is(flow.node.Constant) or label:is(flow.node.Function)) then
+        result:insert(
+          ast.typed.stat.TaskParam {
+            symbol = label.value.value,
+            param_type = std.as_read(label.value.expr_type),
+            options = label.value.options,
+            span = label.value.span,
+        })
+      end
     end
   end
   return result
@@ -308,19 +310,30 @@ local function copy_args(cx, original_nid, call_nid)
   -- Copy regular edges. Remap these to fill slots 2+ contiguously.
   local next_port = 2
   for i = 1, maxport do
+    local used_port = false
     if inputs[i] then
       for _, edge in ipairs(inputs[i]) do
-        cx.graph:add_edge(
-          edge.label, edge.from_node, edge.from_port, call_nid, next_port)
+        local label = cx.graph:node_label(edge.from_node)
+        if not (label:is(flow.node.Constant) or label:is(flow.node.Function))
+        then
+          cx.graph:add_edge(
+            edge.label, edge.from_node, edge.from_port, call_nid, next_port)
+          used_port = true
+        end
       end
     end
     if outputs[i] then
       for _, edge in ipairs(outputs[i]) do
-        cx.graph:add_edge(
-          edge.label, call_nid, next_port, edge.to_node, edge.to_port)
+        local label = cx.graph:node_label(edge.from_node)
+        if not (label:is(flow.node.Constant) or label:is(flow.node.Function))
+        then
+          cx.graph:add_edge(
+            edge.label, call_nid, next_port, edge.to_node, edge.to_port)
+          used_port = true
+        end
       end
     end
-    if inputs[i] or outputs[i] then
+    if used_port then
       next_port = next_port + 1
     end
   end
