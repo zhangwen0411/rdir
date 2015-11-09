@@ -1016,7 +1016,9 @@ local function privilege_summary_region(cx, usage, strip)
       for other, other_privilege in pairs(summary) do
         if other_privilege ~= "none" then
           local ancestor = cx.tree:lowest_common_ancestor(region, other)
-          if ancestor then
+          if ancestor and
+            not (privilege == "reads" and other_privilege == "reads")
+          then
             assert(not rawget(next_summary, ancestor))
             next_summary[ancestor] = std.meet_privilege(privilege, other_privilege)
             recorded = true

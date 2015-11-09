@@ -38,6 +38,7 @@ local flow_outline_task = require("regent/flow_outline_task")
 local flow_region_tree = require("regent/flow_region_tree")
 local flow_summarize_subgraph = require("regent/flow_summarize_subgraph")
 local flow_to_ast = require("regent/flow_to_ast")
+local log = require("regent/log")
 local std = require("regent/std")
 
 local context = {}
@@ -128,7 +129,8 @@ local function contains_only_parallel_loops(cx, loop_nid)
   local function is_bad(nid, label)
     if label:is(flow.node.ForNum) then
       return is_parallel_loop(block_cx, nid)
-    elseif label:is(flow.node.Constant) or label:is(flow.node.Function) or
+    elseif label:is(flow.node.Open) or label:is(flow.node.Close) or
+      label:is(flow.node.Constant) or label:is(flow.node.Function) or
       label:is(flow.node.data)
     then
       return false
@@ -180,9 +182,10 @@ local function can_spmdize(cx, loop)
   --  3. Loop body contains:
   --      a. For loops with:
   --           * Same index space
-  --           * Parallelizable
-  --           * No communication between
-  --      b. Any variables updated must be updated uniformly.
+  --           * Parallelizable (no data dependencies)
+  --      b. Open and close ops
+  --      c. Data nodes (regions, partitions, scalars) of any kinds
+  --      d. Any variables updated must be updated uniformly (not checked yet)
 
   return has_demand_spmd(cx, loop) and
     contains_only_parallel_loops(cx, loop) and
@@ -1081,6 +1084,9 @@ local function spmdize_eligible_loop(cx, loops)
       -- Don't need to re-analyze already-SPMDized loops.
       -- loops[new_loop] = true
       return true
+    elseif has_demand_spmd(cx, loop) then
+      log.error(cx.graph:node_label(loop),
+                "unable to apply SPMD transformation")
     end
   end
   return false
