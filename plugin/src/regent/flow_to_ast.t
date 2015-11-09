@@ -149,6 +149,27 @@ end
 
 local flow_to_ast = {}
 
+local function get_maxport(...)
+  local maxport = 0
+  for _, inputs in ipairs({...}) do
+    for i, _ in pairs(inputs) do
+      maxport = data.max(maxport, i)
+    end
+  end
+  return maxport
+end
+
+local function get_arg_edge(edges, allow_fields)
+  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
+  return edges[1]
+end
+
+local function get_arg_node(inputs, port, allow_fields)
+  local edges = inputs[port]
+  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
+  return edges[1].from_node
+end
+
 function flow_to_ast.node_opaque(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -157,7 +178,7 @@ function flow_to_ast.node_opaque(cx, nid)
   local actions = terralib.newlist()
   for input_port, input in pairs(inputs) do
     if input_port >= 0 then
-      assert(#input == 1)
+      assert(#input >= 1)
       local input_nid = input[1].from_node
       local input_label = cx.graph:node_label(input_nid)
       if input_label:is(flow.node.data.Scalar) and input_label.fresh then
@@ -208,11 +229,7 @@ function flow_to_ast.node_opaque(cx, nid)
     return actions
   else
     assert(label.action:is(ast.typed.expr))
-    assert(#outputs[cx.graph:node_result_port(nid)] == 1)
-    local result_nid = outputs[cx.graph:node_result_port(nid)][1].to_node
-    local result = cx.graph:node_label(result_nid)
-    local read_nids = cx.graph:outgoing_use_set(result_nid)
-    if #read_nids > 0 then
+    if cx.graph:node_result_is_used(nid) then
       cx.ast[nid] = label.action
       return actions
     else
@@ -230,12 +247,9 @@ end
 function flow_to_ast.node_index_access(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
-  local outputs = cx.graph:outgoing_edges_by_port(nid)
 
-  assert(rawget(inputs, 1) and #inputs[1] == 1)
-  local value = cx.ast[inputs[1][1].from_node]
-  assert(rawget(inputs, 2) and #inputs[2] == 1)
-  local index = cx.ast[inputs[2][1].from_node]
+  local value = cx.ast[get_arg_node(inputs, 1, true)]
+  local index = cx.ast[get_arg_node(inputs, 2, false)]
 
   local action = ast.typed.expr.IndexAccess {
     value = value,
@@ -245,15 +259,9 @@ function flow_to_ast.node_index_access(cx, nid)
     span = label.span,
   }
 
-  if rawget(outputs, cx.graph:node_result_port(nid)) then
-    assert(#outputs[cx.graph:node_result_port(nid)] == 1)
-    local result_nid = outputs[cx.graph:node_result_port(nid)][1].to_node
-    local result = cx.graph:node_label(result_nid)
-    local read_nids = cx.graph:outgoing_use_set(result_nid)
-    if #read_nids > 0 then
-      cx.ast[nid] = action
-      return terralib.newlist()
-    end
+  if cx.graph:node_result_is_used(nid) then
+    cx.ast[nid] = action
+    return terralib.newlist()
   end
 
   return terralib.newlist({
@@ -268,10 +276,8 @@ end
 function flow_to_ast.node_deref(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
-  local outputs = cx.graph:outgoing_edges_by_port(nid)
 
-  assert(rawget(inputs, 1) and #inputs[1] == 1)
-  local value = cx.ast[inputs[1][1].from_node]
+  local value = cx.ast[get_arg_node(inputs, 1, false)]
 
   local action = ast.typed.expr.Deref {
     value = value,
@@ -280,15 +286,9 @@ function flow_to_ast.node_deref(cx, nid)
     span = label.span,
   }
 
-  if rawget(outputs, cx.graph:node_result_port(nid)) then
-    assert(#outputs[cx.graph:node_result_port(nid)] == 1)
-    local result_nid = outputs[cx.graph:node_result_port(nid)][1].to_node
-    local result = cx.graph:node_label(result_nid)
-    local read_nids = cx.graph:outgoing_use_set(result_nid)
-    if #read_nids > 0 then
-      cx.ast[nid] = action
-      return terralib.newlist()
-    end
+  if cx.graph:node_result_is_used(nid) then
+    cx.ast[nid] = action
+    return terralib.newlist()
   end
 
   return terralib.newlist({
@@ -305,10 +305,7 @@ function flow_to_ast.node_reduce(cx, nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
   local outputs = cx.graph:outgoing_edges_by_port(nid)
 
-  local maxport = 0
-  for i, _ in pairs(inputs) do
-    maxport = data.max(maxport, i)
-  end
+  local maxport = get_maxport(inputs)
   assert(maxport % 2 == 0)
 
   local lhs = terralib.newlist()
@@ -331,27 +328,6 @@ function flow_to_ast.node_reduce(cx, nid)
     span = label.span,
   }
   return terralib.newlist({action})
-end
-
-local function get_maxport(...)
-  local maxport = 0
-  for _, inputs in ipairs({...}) do
-    for i, _ in pairs(inputs) do
-      maxport = data.max(maxport, i)
-    end
-  end
-  return maxport
-end
-
-local function get_arg_edge(edges, allow_fields)
-  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
-  return edges[1]
-end
-
-local function get_arg_node(inputs, port, allow_fields)
-  local edges = inputs[port]
-  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
-  return edges[1].from_node
 end
 
 function flow_to_ast.node_task(cx, nid)

@@ -171,7 +171,7 @@ local function summarize_privileges(cx, nid)
     end
     local privilege = privilege_kind(edge.label)
     if region and privilege then
-      result:insert({
+      result:insert(data.map_from_table {
           node_type = "privilege",
           region = region,
           field_path = label.field_path,
@@ -187,7 +187,7 @@ local function summarize_privileges(cx, nid)
     end
     local privilege = privilege_kind(edge.label)
     if region and privilege then
-      result:insert({
+      result:insert(data.map_from_table {
           node_type = "privilege",
           region = region,
           field_path = label.field_path,

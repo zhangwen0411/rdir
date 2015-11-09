@@ -68,8 +68,8 @@ local function summarize_subgraph(cx, nid, mapping)
            label:is(flow.node.ForList) or label:is(flow.node.MustEpoch))
 
   local block_cx = cx:new_graph_scope(label.block)
-  local usage_modes = data.newmap()
-  local labels = data.newmap()
+  local usage_modes = data.new_recursive_map(1)
+  local labels = data.new_recursive_map(1)
   block_cx.graph:traverse_nodes(
     function(nid, label)
       if label:is(flow.node.data) then
@@ -85,7 +85,8 @@ local function summarize_subgraph(cx, nid, mapping)
           local nid1, label1 = block_cx.graph:find_node(
             function(nid, label)
               return label:is(flow.node.data) and
-                label.region_type == region_type
+                label.region_type == region_type and
+                label.field_path == field_path
             end)
           assert(label1)
           label = label1
@@ -97,15 +98,10 @@ local function summarize_subgraph(cx, nid, mapping)
           for _, edge in ipairs(edges) do
             local privilege = privilege_kind(edge.label)
             if privilege then
-              if not usage_modes[region_type] then
-                usage_modes[region_type] = data.newmap()
-              end
               usage_modes[region_type][field_path] =
-                std.meet_privilege(privilege, usage_modes[region_type][field_path])
+                std.meet_privilege(privilege,
+                                   usage_modes[region_type][field_path])
 
-              if not labels[region_type] then
-                labels[region_type] = data.newmap()
-              end
               if not labels[region_type][field_path] then
                 labels[region_type][field_path] = label
               end

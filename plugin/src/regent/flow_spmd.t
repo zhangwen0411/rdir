@@ -192,55 +192,61 @@ end
 local function rewrite_shard_partitions(cx)
   -- Every partition is replaced by a list, and every region with a
   -- fresh region.
+  local function get_label_type(label)
+    if label:is(flow.node.data.Region) then
+        return flow.node.data.Region
+    elseif label:is(flow.node.data.Partition) then
+        return flow.node.data.List
+    else
+      assert(false)
+    end
+  end
+
+  local function make_fresh_type(value_type)
+    if std.is_region(value_type) then
+      return std.region(
+        terralib.newsymbol(std.ispace(value_type:ispace().index_type)),
+        value_type:fspace())
+    elseif std.is_partition(value_type) then
+      local region_type = value_type:parent_region()
+      return std.list(
+        std.region(
+          terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
+          region_type:fspace()),
+        value_type)
+    else
+      assert(false)
+    end
+  end
+
   local mapping = {}
-  local labels = {}
+  local symbols = data.newmap()
+  local labels = data.new_recursive_map(1)
   cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
-      if label:is(flow.node.data.Region) then
+      if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition)
+      then
         assert(label.value:is(ast.typed.expr.ID))
 
         local region_type = label.region_type
-        if mapping[region_type] then return end
+        if not mapping[region_type] then
+          mapping[region_type] = make_fresh_type(region_type)
+          symbols[region_type] = terralib.newsymbol(
+            mapping[region_type], label.value.value.displayname)
+        end
+        assert(not std.is_partition(mapping[region_type]))
 
-        local fresh_type = std.region(
-          terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
-          region_type:fspace())
-        local fresh_symbol = terralib.newsymbol(
-          fresh_type, label.value.value.displayname)
-
-        -- Could use an AST rewriter here...
-        mapping[region_type] = fresh_type
-        labels[fresh_type] = label {
-          region_type = fresh_type,
-          value = label.value {
-            value = fresh_symbol,
-            expr_type = std.type_sub(label.value.expr_type, mapping),
-          },
-        }
-      elseif label:is(flow.node.data.Partition) then
-        assert(label.value:is(ast.typed.expr.ID))
-
-        local partition_type = label.region_type
-        local region_type = partition_type:parent_region()
-        if mapping[partition_type] then return end
-
-        local fresh_type = std.list(
-          std.region(
-            terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
-            region_type:fspace()),
-          partition_type)
-        local fresh_symbol = terralib.newsymbol(
-          fresh_type, label.value.value.displayname)
-
-        -- Could use an AST rewriter here...
-        mapping[partition_type] = fresh_type
-        labels[fresh_type] = flow.node.data.List(label) {
-          region_type = fresh_type,
-          value = label.value {
-            value = fresh_symbol,
-            expr_type = std.type_sub(label.value.expr_type, mapping),
-          },
-        }
+        if not labels[mapping[region_type]][label.field_path] then
+          -- Could use an AST rewriter here...
+          local label_type = get_label_type(label)
+          labels[mapping[region_type]][label.field_path] = label_type(label) {
+            region_type = mapping[region_type],
+            value = label.value {
+              value = symbols[region_type],
+              expr_type = std.type_sub(label.value.expr_type, mapping),
+            },
+          }
+        end
       end
     end)
 
@@ -249,7 +255,7 @@ local function rewrite_shard_partitions(cx)
       if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition)
       then
         assert(mapping[label.region_type])
-        label = labels[mapping[label.region_type]]
+        label = labels[mapping[label.region_type]][label.field_path]
       end
       assert(label)
       return label
@@ -422,31 +428,30 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
     end)
 
   -- Build list slices from shard index and stride.
-  for _, list in pairs(lists) do
-    local list_nid = cx.graph:find_node(
+  for _, list_type in lists:keys() do
+    local list_nids = cx.graph:filter_nodes(
       function(nid, label)
         return label:is(flow.node.data) and
-          label.region_type == list.region_type and
-          label.field_path == list.field_path
-    end)
-    if list_nid then
-      local parent_list_type = std.as_read(list.value.expr_type):slice()
-      slice_mapping[list.region_type] = parent_list_type
-
+          label.region_type == list_type and
+          #cx.graph:immediate_predecessors(nid) == 0
+      end)
+    if #list_nids > 0 then
+      local parent_list_type = list_type:slice()
+      slice_mapping[list_type] = parent_list_type
       local parent_list_symbol = terralib.newsymbol(
-          parent_list_type, list.value.value.displayname)
-      local parent_list = list {
-        region_type = parent_list_type,
-        value = list.value {
-          value = parent_list_symbol,
-          expr_type = std.type_sub(list.value.expr_type, slice_mapping),
-        },
+        parent_list_type,
+        cx.graph:node_label(list_nids[1]).value.value.displayname)
+
+      -- Grab one of them so we can make the slice...
+      local first_list = cx.graph:node_label(list_nids[1])
+      local first_parent_list_value = first_list.value {
+        value = parent_list_symbol,
+        expr_type = std.type_sub(first_list.value.expr_type, slice_mapping),
       }
-      local parent_nid = cx.graph:add_node(parent_list)
 
       local compute_list = flow.node.Opaque {
         action = ast.typed.expr.IndexAccess {
-          value = parent_list.value,
+          value = first_parent_list_value,
           index = ast.typed.expr.ListRange {
             start = index_label.value,
             stop = ast.typed.expr.Binary {
@@ -455,31 +460,44 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
               op = "+",
               expr_type = bounds_type,
               options = ast.default_options(),
-              span = list.value.span,
+              span = first_list.value.span,
             },
             expr_type = std.list(int),
             options = ast.default_options(),
-            span = list.value.span,
+            span = first_list.value.span,
           },
-          expr_type = std.as_read(list.value.expr_type),
+          expr_type = std.as_read(first_list.value.expr_type),
           options = ast.default_options(),
-          span = list.value.span,
+          span = first_list.value.span,
         },
       }
       local compute_list_nid = cx.graph:add_node(compute_list)
-      cx.graph:add_edge(
-        flow.edge.Name {},
-        compute_list_nid, cx.graph:node_result_port(compute_list_nid),
-        list_nid, 1)
-      cx.graph:add_edge(
-        flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
-        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-      cx.graph:add_edge(
-        flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
-        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-      cx.graph:add_edge(
-        flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
-        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+
+      for _, list_nid in ipairs(list_nids) do
+        local list = cx.graph:node_label(list_nid)
+        local parent_list = list {
+          region_type = parent_list_type,
+          value = list.value {
+            value = parent_list_symbol,
+            expr_type = std.type_sub(list.value.expr_type, slice_mapping),
+          },
+        }
+        local parent_nid = cx.graph:add_node(parent_list)
+
+        cx.graph:add_edge(
+          flow.edge.Name {},
+          compute_list_nid, cx.graph:node_result_port(compute_list_nid),
+          list_nid, 1)
+        cx.graph:add_edge(
+          flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
+          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+        cx.graph:add_edge(
+          flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
+          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+        cx.graph:add_edge(
+          flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+      end
     end
   end
 
@@ -574,7 +592,7 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
 
   -- Find mapping from old to new inputs.
   local new_inputs = cx.graph:incoming_edges(new_loop)
-  local input_nid_mapping = {}
+  local input_nid_mapping = data.new_recursive_map(2)
   for _, edge in ipairs(new_inputs) do
     local new_input_nid = edge.from_node
     local new_input = cx.graph:node_label(new_input_nid)
@@ -582,10 +600,11 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
       local old_input_nid = cx.graph:find_immediate_predecessor(
         matches(new_input), old_loop)
       assert(old_input_nid)
-      input_nid_mapping[old_input_nid] = new_input_nid
+      input_nid_mapping[new_input.region_type][new_input.field_path][
+        old_input_nid] = new_input_nid
     end
   end
-  local output_nid_mapping = {}
+  local output_nid_mapping = data.new_recursive_map(2)
   local new_outputs = cx.graph:outgoing_edges(new_loop)
   for _, edge in ipairs(new_outputs) do
     local new_output_nid = edge.to_node
@@ -594,115 +613,197 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
       local old_output_nid = cx.graph:find_immediate_successor(
         matches(new_output), old_loop)
       assert(old_output_nid)
-      output_nid_mapping[old_output_nid] = new_output_nid
+      output_nid_mapping[new_output.region_type][new_output.field_path][
+        old_output_nid] = new_output_nid
     end
   end
 
-  -- Rewrite inputs.
-  local closed_nids = data.newmap()
+  local closed_nids = data.new_recursive_map(1)
   local copy_nids = data.newmap()
-  for old_nid, new_nid in pairs(input_nid_mapping) do
-    local old_label = cx.graph:node_label(old_nid)
-    local new_label = cx.graph:node_label(new_nid)
-    if old_label:type() == new_label:type() then
-      cx.graph:replace_node(new_nid, old_nid)
-    elseif old_label:is(flow.node.data.Partition) and
-      new_label:is(flow.node.data.List)
-    then
-      -- Find the region which roots this partition.
-      local region_nid = cx.graph:immediate_predecessor(
-        cx.graph:find_immediate_predecessor(
-          function(nid, label) return label:is(flow.node.Open) end,
-          old_nid))
-      local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
-      closed_nids[data.newtuple(old_label.region_type, old_label.field_path)] =
-        closed_nid
+  for region_type, region_fields in input_nid_mapping:items() do
+    local need_copy = data.new_recursive_map(1)
+    for field_path, nid_mapping in region_fields:items() do
+      for old_nid, new_nid in nid_mapping:items() do
+        local old_label = cx.graph:node_label(old_nid)
+        local new_label = cx.graph:node_label(new_nid)
+        if old_label:type() == new_label:type() then
+          cx.graph:replace_node(new_nid, old_nid)
+        elseif old_label:is(flow.node.data.Partition) and
+          new_label:is(flow.node.data.List)
+        then
+          need_copy[field_path][old_nid] = new_nid
+        else
+          assert(false)
+        end
+      end
+    end
+    if not need_copy:is_empty() then
+      local old_nids = data.newmap()
+      local new_nids = data.newmap()
+      for field_path, nid_mapping in need_copy:items() do
+        for old_nid, new_nid in nid_mapping:items() do
+          assert(not old_nids[field_path] and not new_nids[field_path])
+          old_nids[field_path] = old_nid
+          new_nids[field_path] = new_nid
+        end
+      end
 
-      -- Add a node to name the intermediate list (before it has valid data).
-      local name_nid = cx.graph:add_node(new_label)
+      -- Grab the first of each for convenience.
+      local first_old_label, first_new_label
+      for field_path, old_nid in old_nids:items() do
+        first_old_label = cx.graph:node_label(old_nid)
+        break
+      end
+      for field_path, new_nid in new_nids:items() do
+        first_new_label = cx.graph:node_label(new_nid)
+        break
+      end
+      assert(first_old_label and first_new_label)
+
+      -- Find the region which roots each partition and make a copy.
+      local region_nids = data.newmap()
+      for field_path, old_nid in old_nids:items() do
+        local region_nid = cx.graph:immediate_predecessor(
+          cx.graph:find_immediate_predecessor(
+            function(nid, label) return label:is(flow.node.Open) end,
+            old_nid))
+        region_nids[field_path] = region_nid
+        local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
+        closed_nids[region_type][field_path] = closed_nid
+      end
+
+        -- Name the intermediate list (before it has valid data).
+      local name_nids = data.newmap()
+      for field_path, new_nid in new_nids:items() do
+        local new_label = cx.graph:node_label(new_nid)
+        local name_nid = cx.graph:add_node(new_label)
+        name_nids[field_path] = name_nid
+      end
 
       -- Duplicate the partition.
       local duplicate = flow.node.Opaque {
         action = ast.typed.stat.Var {
           symbols = terralib.newlist({
-              new_label.value.value,
+              first_new_label.value.value,
           }),
           types = terralib.newlist({
-              std.as_read(new_label.value.expr_type),
+              region_type,
           }),
           values = terralib.newlist({
               ast.typed.expr.ListDuplicatePartition {
-                partition = old_label.value,
+                partition = first_old_label.value,
                 indices = ast.typed.expr.ListRange {
                   start = original_bounds[1].value,
                   stop = original_bounds[2].value,
                   expr_type = std.list(int),
                   options = ast.default_options(),
-                  span = old_label.value.span,
+                  span = first_old_label.value.span,
                 },
-                expr_type = std.as_read(new_label.value.expr_type),
+                expr_type = std.as_read(first_new_label.value.expr_type),
                 options = ast.default_options(),
-                span = old_label.value.span,
+                span = first_old_label.value.span,
               },
           }),
           options = ast.default_options(),
-          span = old_label.value.span,
+          span = first_old_label.value.span,
         }
       }
       local duplicate_nid = cx.graph:add_node(duplicate)
-      cx.graph:add_edge(
-        flow.edge.None {}, old_nid, cx.graph:node_result_port(),
-        duplicate_nid, cx.graph:node_available_port(duplicate_nid))
-      cx.graph:add_edge(
-        flow.edge.HappensBefore {},
-        duplicate_nid, cx.graph:node_sync_port(duplicate_nid),
-        name_nid, cx.graph:node_sync_port(name_nid))
+      local duplicate_port = cx.graph:node_available_port(duplicate_nid)
+      for field_path, old_nid in old_nids:items() do
+        cx.graph:add_edge(
+          flow.edge.None {}, old_nid, cx.graph:node_result_port(),
+          duplicate_nid, duplicate_port)
+      end
+      for field_path, name_nid in name_nids:items() do
+        cx.graph:add_edge(
+          flow.edge.HappensBefore {},
+          duplicate_nid, cx.graph:node_sync_port(duplicate_nid),
+          name_nid, cx.graph:node_sync_port(name_nid))
+      end
 
-      -- Close the partition so that it can be copied.
-      local close_nid = cx.graph:add_node(flow.node.Close {})
-      cx.graph:add_edge(
-        flow.edge.Read {}, old_nid, cx.graph:node_result_port(old_nid),
-        close_nid, cx.graph:node_available_port(close_nid))
-      cx.graph:add_edge(
-        flow.edge.Write {}, close_nid, cx.graph:node_result_port(close_nid),
-        closed_nid, cx.graph:node_available_port(closed_nid))
+      -- Close each partition so that it can be copied.
+      for field_path, closed_nid in closed_nids[region_type]:items() do
+        local old_nid = old_nids[field_path]
+        local close_nid = cx.graph:add_node(flow.node.Close {})
+        cx.graph:add_edge(
+          flow.edge.Read {}, old_nid, cx.graph:node_result_port(old_nid),
+          close_nid, cx.graph:node_available_port(close_nid))
+        cx.graph:add_edge(
+          flow.edge.Write {}, close_nid, cx.graph:node_result_port(close_nid),
+          closed_nid, cx.graph:node_available_port(closed_nid))
+      end
 
       -- Copy data from the closed partition.
+      local field_paths = new_nids:map_list(function(k) return k end)
       local copy = flow.node.Copy {
-        src_field_paths = terralib.newlist({old_label.field_path}),
-        dst_field_paths = terralib.newlist({new_label.field_path}),
+        src_field_paths = field_paths,
+        dst_field_paths = field_paths,
         op = false,
         options = ast.default_options(),
-        span = old_label.value.span,
+        span = first_old_label.value.span,
       }
       local copy_nid = cx.graph:add_node(copy)
-      cx.graph:add_edge(
-        flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
-        copy_nid, cx.graph:node_available_port(copy_nid))
-      local copy_to_new_port = cx.graph:node_available_port(copy_nid)
-      cx.graph:add_edge(
-        flow.edge.Read {}, name_nid, cx.graph:node_result_port(name_nid),
-        copy_nid, copy_to_new_port)
-      cx.graph:add_edge(
-        flow.edge.Write {}, copy_nid, copy_to_new_port,
-        new_nid, cx.graph:node_result_port(new_nid))
+      copy_nids[region_type] = copy_nid
 
-      copy_nids[data.newtuple(old_label.region_type, old_label.field_path)] =
-        copy_nid
-    else
-      assert(false)
+      for field_path, closed_nid in closed_nids[region_type]:items() do
+        cx.graph:add_edge(
+          flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
+          copy_nid, 1)
+      end
+      for field_path, name_nid in name_nids:items() do
+        local new_nid = new_nids[field_path]
+        cx.graph:add_edge(
+          flow.edge.Read {}, name_nid, cx.graph:node_result_port(name_nid),
+          copy_nid, 2)
+        cx.graph:add_edge(
+          flow.edge.Write {}, copy_nid, 2,
+          new_nid, cx.graph:node_result_port(new_nid))
+      end
     end
   end
 
   -- Rewrite outputs.
-  for old_nid, new_nid in pairs(output_nid_mapping) do
-    local old_label = cx.graph:node_label(old_nid)
-    local new_label = cx.graph:node_label(new_nid)
-    if old_label:type() == new_label:type() then
-      cx.graph:replace_node(new_nid, old_nid)
-    elseif old_label:is(flow.node.data.Partition) and
-      new_label:is(flow.node.data.List)
-    then
+  for region_type, region_fields in output_nid_mapping:items() do
+    local need_copy = data.new_recursive_map(1)
+    for field_path, nid_mapping in region_fields:items() do
+      for old_nid, new_nid in nid_mapping:items() do
+        local old_label = cx.graph:node_label(old_nid)
+        local new_label = cx.graph:node_label(new_nid)
+        if old_label:type() == new_label:type() then
+          cx.graph:replace_node(new_nid, old_nid)
+        elseif old_label:is(flow.node.data.Partition) and
+          new_label:is(flow.node.data.List)
+        then
+          need_copy[field_path][old_nid] = new_nid
+        else
+          assert(false)
+        end
+      end
+    end
+    if not need_copy:is_empty() then
+      local old_nids = data.newmap()
+      local new_nids = data.newmap()
+      for field_path, nid_mapping in need_copy:items() do
+        for old_nid, new_nid in nid_mapping:items() do
+          assert(not old_nids[field_path] and not new_nids[field_path])
+          old_nids[field_path] = old_nid
+          new_nids[field_path] = new_nid
+        end
+      end
+
+      -- Grab the first of each for convenience.
+      local first_old_label, first_new_label
+      for field_path, old_nid in old_nids:items() do
+        first_old_label = cx.graph:node_label(old_nid)
+        break
+      end
+      for field_path, new_nid in new_nids:items() do
+        first_new_label = cx.graph:node_label(new_nid)
+        break
+      end
+      assert(first_old_label and first_new_label)
+
       -- Unfortunately, this loop has to be unrolled, because the
       -- runtime only understands copies where the source dominates
       -- the destination.
@@ -711,49 +812,58 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
       local index_symbol = terralib.newsymbol(int, "index")
       local index_region = cx.tree:intern_variable(
         index_type, index_symbol, ast.default_options(),
-        old_label.value.span)
+        first_old_label.value.span)
       local index_label = flow.node.data.Scalar {
         value = ast.typed.expr.ID {
           value = index_symbol,
           expr_type = index_type,
           options = ast.default_options(),
-          span = old_label.value.span,
+          span = first_old_label.value.span,
         },
         region_type = index_region,
         field_path = data.newtuple(),
         fresh = false,
       }
 
+      -- Duplicate the partition again, this time for opening.
+      local opened_nids = data.newmap()
+      for field_path, old_nid in old_nids:items() do
+        local old_label = cx.graph:node_label(old_nid)
+        opened_nids[field_path] = cx.graph:add_node(old_label)
+      end
+
+      -- Open the partition so that it can be copied.
+      local open_nids = data.newmap()
+      for field_path, closed_nid in closed_nids[region_type]:items() do
+        local opened_nid = opened_nids[field_path]
+        local open_nid = cx.graph:add_node(flow.node.Open {})
+        open_nids[field_path] = open_nid
+        cx.graph:add_edge(
+          flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
+          open_nid, cx.graph:node_available_port(open_nid))
+        cx.graph:add_edge(
+          flow.edge.Write {}, open_nid, cx.graph:node_result_port(open_nid),
+          opened_nid, cx.graph:node_available_port(opened_nid))
+      end
+
+      local copy_nid = copy_nids[region_type]
+      for field_path, open_nid in open_nids:items() do
+        cx.graph:add_edge(
+          flow.edge.HappensBefore {},
+          copy_nid, cx.graph:node_sync_port(copy_nid),
+          open_nid, cx.graph:node_sync_port(open_nid))
+      end
+
+      -- Build the copy loop.
       local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
       local index_nid = block_cx.graph:add_node(index_label)
 
-      -- Find the region which roots this partition.
-      local closed_nid = closed_nids[
-        data.newtuple(old_label.region_type, old_label.field_path)]
-      local copy_nid = copy_nids[
-        data.newtuple(old_label.region_type, old_label.field_path)]
-      assert(closed_nid and copy_nid)
-      local opened_nid = cx.graph:add_node(old_label)
-
-      -- Open the partition so that it can be copied.
-      local open_nid = cx.graph:add_node(flow.node.Open {})
-      cx.graph:add_edge(
-        flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
-        open_nid, cx.graph:node_available_port(open_nid))
-      cx.graph:add_edge(
-        flow.edge.Write {}, open_nid, cx.graph:node_result_port(open_nid),
-        opened_nid, cx.graph:node_available_port(opened_nid))
-
-      cx.graph:add_edge(
-        flow.edge.HappensBefore {}, copy_nid, cx.graph:node_sync_port(copy_nid),
-        open_nid, cx.graph:node_sync_port(open_nid))
-
-      -- Add the loop.
+      -- Exterior of the loop:
       local copy_loop = flow.node.ForNum {
         symbol = index_symbol,
         block = block_cx.graph,
         options = ast.default_options(),
-        span = old_label.value.span,
+        span = first_old_label.value.span,
       }
       local copy_loop_nid = cx.graph:add_node(copy_loop)
       local original_bound1_nid = cx.graph:add_node(original_bounds[1])
@@ -766,106 +876,148 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
         flow.edge.Read {}, original_bound2_nid,
         cx.graph:node_result_port(original_bound2_nid),
         copy_loop_nid, 2)
-      cx.graph:add_edge(
-        flow.edge.Read {}, new_nid, cx.graph:node_result_port(new_nid),
-        copy_loop_nid, cx.graph:node_available_port(copy_loop_nid))
+      local copy_loop_new_port = cx.graph:node_available_port(copy_loop_nid)
+      for field_path, new_nid in new_nids:items() do
+        cx.graph:add_edge(
+          flow.edge.Read {}, new_nid, cx.graph:node_result_port(new_nid),
+          copy_loop_nid, copy_loop_new_port)
+      end
       local copy_loop_opened_port = cx.graph:node_available_port(copy_loop_nid)
-      cx.graph:add_edge(
-        flow.edge.Read {}, opened_nid, cx.graph:node_result_port(opened_nid),
-        copy_loop_nid, copy_loop_opened_port)
-      cx.graph:add_edge(
-        flow.edge.Write {}, copy_loop_nid, copy_loop_opened_port,
-        old_nid, cx.graph:node_available_port(old_nid))
+      for field_path, opened_nid in opened_nids:items() do
+        local old_nid = old_nids[field_path]
+        cx.graph:add_edge(
+          flow.edge.Read {}, opened_nid, cx.graph:node_result_port(opened_nid),
+          copy_loop_nid, copy_loop_opened_port)
+        cx.graph:add_edge(
+          flow.edge.Write {}, copy_loop_nid, copy_loop_opened_port,
+          old_nid, cx.graph:node_available_port(old_nid))
+      end
 
-      -- Inside the loop:
-      local block_new_nid = block_cx.graph:add_node(new_label)
-      local block_new_i_type = std.as_read(
-        new_label.value.expr_type):subregion_dynamic()
-      local block_new_i_nid = block_cx.graph:add_node(
-        new_label {
-          value = new_label.value {
-            value = terralib.newsymbol(block_new_i_type),
-            expr_type = block_new_i_type,
-          },
-      })
-      local block_opened_nid = block_cx.graph:add_node(old_label)
-      local old_type = std.as_read(old_label.value.expr_type)
-      local block_opened_i_type = old_type:subregion_dynamic()
-      std.add_constraint(cx.tree, old_type, old_type:parent_region(), "<=", false)
-      std.add_constraint(cx.tree, block_opened_i_type, old_type, "<=", false)
+      -- Interior of the loop:
+      local block_new_i_type = region_type:subregion_dynamic()
+
+      local block_new_nids = data.newmap()
+      local block_new_i_nids = data.newmap()
+      for field_path, new_nid in new_nids:items() do
+        local new_label = cx.graph:node_label(new_nid)
+        block_new_nids[field_path] = block_cx.graph:add_node(new_label)
+        block_new_i_nids[field_path] = block_cx.graph:add_node(
+          new_label {
+            value = new_label.value {
+              value = terralib.newsymbol(block_new_i_type),
+              expr_type = block_new_i_type,
+            },
+          })
+      end
+
+      local first_old_type = std.as_read(first_old_label.value.expr_type)
+      local block_opened_i_type = first_old_type:subregion_dynamic()
+      std.add_constraint(
+        cx.tree, first_old_type, first_old_type:parent_region(), "<=", false)
+      std.add_constraint(
+        cx.tree, block_opened_i_type, first_old_type, "<=", false)
       cx.tree.region_universe[block_opened_i_type] = true
-      local block_opened_i = flow.node.data.Region(old_label) {
-        value = old_label.value {
-          value = terralib.newsymbol(block_opened_i_type),
-          expr_type = block_opened_i_type,
-        },
-      }
-      local block_opened_i_before_nid = block_cx.graph:add_node(block_opened_i)
-      local block_opened_i_after_nid = block_cx.graph:add_node(block_opened_i)
+
+      local block_opened_nids = data.newmap()
+      local block_opened_i_before_nids = data.newmap()
+      local block_opened_i_after_nids = data.newmap()
+      for field_path, old_nid in old_nids:items() do
+        local old_label = cx.graph:node_label(old_nid)
+        block_opened_nids[field_path] = block_cx.graph:add_node(old_label)
+
+        local block_opened_i = flow.node.data.Region(old_label) {
+          value = old_label.value {
+            value = terralib.newsymbol(block_opened_i_type),
+            expr_type = block_opened_i_type,
+          },
+        }
+        block_opened_i_before_nids[field_path] = block_cx.graph:add_node(
+          block_opened_i)
+        block_opened_i_after_nids[field_path] = block_cx.graph:add_node(
+          block_opened_i)
+      end
 
       local block_index_new_nid = block_cx.graph:add_node(
         flow.node.IndexAccess {
           expr_type = block_new_i_type,
           options = ast.default_options(),
-          span = new_label.value.span,
+          span = first_new_label.value.span,
         })
-     block_cx.graph:add_edge(
-       flow.edge.None {},
-       block_new_nid, block_cx.graph:node_result_port(block_new_nid),
-       block_index_new_nid, 1)
-     block_cx.graph:add_edge(
-       flow.edge.Read {},
-       index_nid, block_cx.graph:node_result_port(index_nid),
-       block_index_new_nid, 2)
-     block_cx.graph:add_edge(
-       flow.edge.Name {},
-       block_index_new_nid, block_cx.graph:node_result_port(block_index_new_nid),
-       block_new_i_nid, block_cx.graph:node_available_port(block_new_i_nid))
+      for field_path, block_new_nid in block_new_nids:items() do
+        block_cx.graph:add_edge(
+          flow.edge.None {},
+          block_new_nid, block_cx.graph:node_result_port(block_new_nid),
+          block_index_new_nid, 1)
+      end
+      block_cx.graph:add_edge(
+        flow.edge.Read {},
+        index_nid, block_cx.graph:node_result_port(index_nid),
+        block_index_new_nid, 2)
+      for field_path, block_new_i_nid in block_new_i_nids:items() do
+        block_cx.graph:add_edge(
+          flow.edge.Name {},
+          block_index_new_nid,
+          block_cx.graph:node_result_port(block_index_new_nid),
+          block_new_i_nid, block_cx.graph:node_available_port(block_new_i_nid))
+      end
 
       local block_index_opened_nid = block_cx.graph:add_node(
         flow.node.IndexAccess {
           expr_type = block_opened_i_type,
           options = ast.default_options(),
-          span = old_label.value.span,
+          span = first_old_label.value.span,
         })
-     block_cx.graph:add_edge(
-       flow.edge.None {},
-       block_opened_nid, block_cx.graph:node_result_port(block_opened_nid),
-       block_index_opened_nid, 1)
-     block_cx.graph:add_edge(
-       flow.edge.Read {},
-       index_nid, block_cx.graph:node_result_port(index_nid),
-       block_index_opened_nid, 2)
-     block_cx.graph:add_edge(
-       flow.edge.Name {},
-       block_index_opened_nid,
-       block_cx.graph:node_result_port(block_index_opened_nid),
-       block_opened_i_before_nid,
-       block_cx.graph:node_available_port(block_opened_i_before_nid))
+      for field_path, block_opened_nid in block_opened_nids:items() do
+        block_cx.graph:add_edge(
+          flow.edge.None {},
+          block_opened_nid, block_cx.graph:node_result_port(block_opened_nid),
+          block_index_opened_nid, 1)
+      end
+      block_cx.graph:add_edge(
+        flow.edge.Read {},
+        index_nid, block_cx.graph:node_result_port(index_nid),
+        block_index_opened_nid, 2)
+      for field_path, block_opened_i_before_nid in
+        block_opened_i_before_nids:items()
+      do
+        block_cx.graph:add_edge(
+          flow.edge.Name {},
+          block_index_opened_nid,
+          block_cx.graph:node_result_port(block_index_opened_nid),
+          block_opened_i_before_nid,
+          block_cx.graph:node_available_port(block_opened_i_before_nid))
+      end
 
       -- Copy data to the opened partition.
+      local field_paths = new_nids:map_list(function(k) return k end)
       local block_copy = flow.node.Copy {
-        src_field_paths = terralib.newlist({new_label.field_path}),
-        dst_field_paths = terralib.newlist({old_label.field_path}),
+        src_field_paths = field_paths,
+        dst_field_paths = field_paths,
         op = false,
         options = ast.default_options(),
-        span = old_label.value.span,
+        span = first_old_label.value.span,
       }
       local block_copy_nid = block_cx.graph:add_node(block_copy)
-      block_cx.graph:add_edge(
-        flow.edge.Read {},
-        block_new_i_nid, block_cx.graph:node_result_port(block_new_i_nid),
-        block_copy_nid, block_cx.graph:node_available_port(block_copy_nid))
-      local copy_to_new_port = block_cx.graph:node_available_port(block_copy_nid)
-      block_cx.graph:add_edge(
-        flow.edge.Read {},
-        block_opened_i_before_nid,
-        block_cx.graph:node_result_port(block_opened_i_before_nid),
-        block_copy_nid, copy_to_new_port)
-      block_cx.graph:add_edge(
-        flow.edge.Write {}, block_copy_nid, copy_to_new_port,
-        block_opened_i_after_nid,
-        block_cx.graph:node_result_port(block_opened_i_after_nid))
+      for field_path, block_new_i_nid in block_new_i_nids:items() do
+        block_cx.graph:add_edge(
+          flow.edge.Read {},
+          block_new_i_nid, block_cx.graph:node_result_port(block_new_i_nid),
+          block_copy_nid, 1)
+      end
+      for field_path, block_opened_i_before_nid in
+        block_opened_i_before_nids:items()
+      do
+        local block_opened_i_after_nid = block_opened_i_after_nids[field_path]
+        block_cx.graph:add_edge(
+          flow.edge.Read {},
+          block_opened_i_before_nid,
+          block_cx.graph:node_result_port(block_opened_i_before_nid),
+          block_copy_nid, 2)
+        block_cx.graph:add_edge(
+          flow.edge.Write {}, block_copy_nid, 2,
+          block_opened_i_after_nid,
+          block_cx.graph:node_result_port(block_opened_i_after_nid))
+      end
     end
   end
 

@@ -220,6 +220,7 @@ end
 function graph:add_edge(label, from_node, from_port, to_node, to_port)
   assert(label:is(flow.edge))
   assert(flow.is_valid_node(from_node) and flow.is_valid_node(to_node))
+  assert(from_port and to_port)
   if not rawget(self.edges[from_node], to_node) then
     self.edges[from_node][to_node] = terralib.newlist()
   end
@@ -395,7 +396,7 @@ function graph:outgoing_edges_by_port(node)
   local result = {}
   for to_node, edges in pairs(self.edges[node]) do
     for _, edge in pairs(edges) do
-      if not rawget(result, edge.to_port) then
+      if not rawget(result, edge.from_port) then
         result[edge.from_port] = terralib.newlist()
       end
       result[edge.from_port]:insert(
@@ -533,6 +534,18 @@ function graph:outgoing_write_set(node)
     end
   end
   return result
+end
+
+function graph:node_result_is_used(node)
+  local outputs = self:outgoing_edges_by_port(node)[self:node_result_port(node)]
+  if outputs then
+    for _, edge in ipairs(outputs) do
+      if #self:outgoing_use_set(edge.to_node) > 0 then
+        return true
+      end
+    end
+  end
+  return false
 end
 
 local function dfs(graph, node, predicate, visited)
