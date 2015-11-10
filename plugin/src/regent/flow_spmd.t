@@ -216,14 +216,14 @@ local function find_close_results(cx, close_nid)
   return result_nids
 end
 
-local function find_matching_input(cx, close_nid, region_type, field_path)
+local function find_matching_input(cx, op_nid, region_type, field_path)
   return cx.graph:find_immediate_predecessor(
     function(nid, label)
       return label:is(flow.node.data) and
         label.region_type == region_type and
         label.field_path == field_path
     end,
-    close_nid)
+    op_nid)
 end
 
 local function find_predecessor_maybe(cx, nid)
@@ -462,6 +462,96 @@ local function rewrite_shard_partitions(cx)
       return label
     end)
   return labels, mapping
+end
+
+local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
+                                       intersections)
+  local src_label = cx.graph:node_label(src_nid)
+  local src_type = src_label.region_type
+  local dst_label = cx.graph:node_label(dst_in_nid)
+  local dst_type = dst_label.region_type
+  assert(src_label.field_path == dst_label.field_path)
+
+  local intersection_label
+  if intersections[src_type][dst_type] then
+    intersection_label = intersections[src_type][dst_type]
+  else
+    local intersection_type = std.list(std.list(dst_type:subregion_dynamic()))
+    local intersection_symbol = terralib.newsymbol(
+      intersection_type, dst_label.value.value.displayname)
+    intersection_label = dst_label {
+      value = dst_label.value {
+        value = intersection_symbol,
+        expr_type = std.type_sub(dst_label.value.expr_type,
+                                 {[dst_type] = intersection_type}),
+      },
+      region_type = intersection_type,
+    }
+    intersections[src_type][dst_type] = intersection_label
+  end
+  local intersection_in_nid = cx.graph:add_node(intersection_label)
+  local intersection_out_nid = cx.graph:add_node(intersection_label)
+
+  -- Add happens-before synchronization on the intersection nids since
+  -- these won't be constrained by the copy.
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    dst_in_nid, cx.graph:node_sync_port(dst_in_nid),
+    intersection_in_nid, cx.graph:node_sync_port(intersection_in_nid))
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    intersection_out_nid, cx.graph:node_sync_port(intersection_out_nid),
+    dst_out_nid, cx.graph:node_sync_port(dst_out_nid))
+
+  -- Add the copy.
+  local field_paths = terralib.newlist({src_label.field_path})
+  local copy = flow.node.Copy {
+    src_field_paths = field_paths,
+    dst_field_paths = field_paths,
+    op = false,
+    options = ast.default_options(),
+    span = src_label.value.span,
+  }
+  local copy_nid = cx.graph:add_node(copy)
+
+  cx.graph:add_edge(
+    flow.edge.Read {}, src_nid, cx.graph:node_result_port(src_nid),
+    copy_nid, 1)
+  cx.graph:add_edge(
+    flow.edge.Read {},
+    intersection_in_nid, cx.graph:node_result_port(intersection_in_nid),
+    copy_nid, 2)
+  cx.graph:add_edge(
+    flow.edge.Write {}, copy_nid, 2,
+    intersection_out_nid, cx.graph:node_result_port(intersection_out_nid))
+end
+
+local function rewrite_communication(cx, shard_loop)
+  local shard_label = cx.graph:node_label(shard_loop)
+  local block_cx = cx:new_graph_scope(shard_label.block)
+
+  local close_nids = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.Close) end)
+  local intersections = data.new_recursive_map(1)
+  for _, close_nid in ipairs(close_nids) do
+    local dst_out_nid = block_cx.graph:immediate_successor(close_nid)
+    local dst_out_label = block_cx.graph:node_label(dst_out_nid)
+    local dst_in_nid = find_matching_input(
+      block_cx, close_nid, dst_out_label.region_type, dst_out_label.field_path)
+    local src_nids = data.filter(
+      function(nid) return nid ~= dst_in_nid end,
+      block_cx.graph:immediate_predecessors(close_nid))
+    assert(#src_nids == 1)
+    local src_nid = src_nids[1]
+    issue_intersection_copy(
+      block_cx, src_nid, dst_in_nid, dst_out_nid, intersections)
+    block_cx.graph:remove_node(close_nid)
+  end
+
+  block_cx.graph:printpretty()
+  assert(false, "working")
+
+  return intersections
 end
 
 local function rewrite_shard_loop_bounds(cx, shard_loop)
@@ -1235,8 +1325,9 @@ end
 
 local function spmdize(cx, loop)
   --  1. Extract shard (deep copy).
-  --  2. Normalize the communication graph.
+  --  2. Normalize communication graph (remove opens).
   --  3. Rewrite shard partitions as lists.
+  --  4. Rewrite communication graph (change closes to copies).
   --  4. Rewrite shard loop bounds.
   --  5. Outline shard into a task.
   --  6. Compute shard bounds and list slices.
@@ -1250,9 +1341,10 @@ local function spmdize(cx, loop)
 
   local shard_cx = cx:new_graph_scope(shard_graph)
   normalize_communication(shard_cx, shard_loop)
+  local lists, mapping = rewrite_shard_partitions(shard_cx)
+  rewrite_communication(shard_cx, shard_loop)
   shard_cx.graph:node_label(shard_loop).block:printpretty()
   assert(false, "elliott")
-  local lists, mapping = rewrite_shard_partitions(shard_cx)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
