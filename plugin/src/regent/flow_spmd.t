@@ -192,6 +192,136 @@ local function can_spmdize(cx, loop)
     loops_are_compatible(cx, loop)
 end
 
+local function find_close_results(cx, close_nid)
+  local result_nids = terralib.newlist()
+  cx.graph:traverse_immediate_successors(
+    function(nid, label)
+      if label:is(flow.node.data) then
+        cx.graph:traverse_immediate_successors(
+          function(nid, label)
+            if label:is(flow.node.Open) then
+              cx.graph:traverse_immediate_successors(
+                function(nid, label)
+                  if label:is(flow.node.data) then
+                    result_nids:insert(nid)
+                  end
+                end,
+                nid)
+            end
+          end,
+          nid)
+      end
+    end,
+    close_nid)
+  return result_nids
+end
+
+local function find_matching_input(cx, close_nid, region_type, field_path)
+  return cx.graph:find_immediate_predecessor(
+    function(nid, label)
+      return label:is(flow.node.data) and
+        label.region_type == region_type and
+        label.field_path == field_path
+    end,
+    close_nid)
+end
+
+local function find_predecessor_maybe(cx, nid)
+  local preds = cx.graph:immediate_predecessors(nid)
+  if #preds == 0 then
+    return
+  end
+  assert(#preds == 1)
+  return preds[1]
+end
+
+local function find_open_source_close(cx, open_nid)
+  local source_nid = find_predecessor_maybe(cx, open_nid)
+  if not source_nid then return end
+  assert(cx.graph:node_label(source_nid):is(flow.node.data))
+  local close_nid = find_predecessor_maybe(cx, source_nid)
+  if not close_nid then return end
+  assert(cx.graph:node_label(close_nid):is(flow.node.Close))
+  return close_nid
+end
+
+local function normalize_communication(cx, shard_loop)
+  -- This step simplifies and normalizes the communication graph,
+  -- removing opens and instances of parent regions. Close nodes in
+  -- the resulting graph represent locations where explicit copies are
+  -- required.
+  --
+  --  1. Normalize close inputs.
+  --  2. Remove opens.
+  --  3. Normalize versioning.
+
+  local shard_label = cx.graph:node_label(shard_loop)
+  local block_cx = cx:new_graph_scope(shard_label.block)
+
+  -- Normalize close inputs.
+  local close_nids = block_cx.graph:filter_nodes(
+    function(nid, label) return label:is(flow.node.Close) end)
+  for _, close_nid in ipairs(close_nids) do
+    -- Look forward in the graph to find regions resulting from this close.
+    local result_nids = find_close_results(block_cx, close_nid)
+
+    -- For each region, look back in the graph to find a matching region.
+    for _, result_nid in ipairs(result_nids) do
+      local result_label = block_cx.graph:node_label(result_nid)
+      -- Look for an exact match first.
+      local input_nid = find_matching_input(
+        block_cx, close_nid, result_label.region_type, result_label.field_path)
+      if not input_nid then
+        -- Otherwise look for a parent of the region.
+        local parent_nid = find_matching_input(
+          block_cx, close_nid,
+          block_cx.tree:parent(result_label.region_type), result_label.field_path)
+        assert(parent_nid)
+        -- Try to find the region among the parent's sources, if any.
+        local open_nid = find_predecessor_maybe(block_cx, parent_nid)
+        if open_nid then
+          assert(block_cx.graph:node_label(open_nid):is(flow.node.Open))
+          input_nid = find_matching_input(
+            block_cx, open_nid,
+            result_label.region_type, result_label.field_path)
+          assert(input_nid)
+        else
+          -- Otherwise just duplicate it.
+          input_nid = block_cx.graph:add_node(result_label)
+          block_cx.graph:replace_edges(close_nid, parent_nid, input_nid)
+        end
+      end
+    end
+  end
+
+  -- Remove opens.
+  local open_nids = block_cx.graph:filter_nodes(
+    function(nid, label) return label:is(flow.node.Open) end)
+  for _, open_nid in ipairs(open_nids) do
+    local close_nid = find_open_source_close(block_cx, open_nid)
+    if close_nid then
+      local result_nids = block_cx.graph:immediate_successors(open_nid)
+      for _, result_nid in ipairs(result_nids) do
+        assert(block_cx.graph:node_label(result_nid):is(flow.node.data))
+        print("attempting replace", result_nid, open_nid, close_nid)
+        block_cx.graph:replace_edges(result_nid, open_nid, close_nid)
+      end
+    end
+    local source_nids = block_cx.graph:immediate_predecessors(open_nid)
+    for _, source_nid in ipairs(source_nids) do
+      block_cx.graph:remove_node(source_nid)
+    end
+    block_cx.graph:remove_node(open_nid)
+  end
+
+  block_cx.graph:printpretty()
+  assert(false, "working")
+
+  -- FIXME: Handle singleton regions.
+  assert(not block_cx.graph:find_node(
+           function(nid, label) return label:is(flow.node.Region) end))
+end
+
 local function rewrite_shard_partitions(cx)
   -- Every partition is replaced by a list, and every region with a
   -- fresh region.
@@ -330,11 +460,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
               assert(false)
             end
           end
-          block_cx.graph:add_edge(
-            edge.label, block_bounds[i], edge.from_port,
-            edge.to_node, edge.to_port)
-          block_cx.graph:remove_edge(
-            edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+          block_cx.graph:replace_edges(edge.to_node, edge.from_node, block_bounds[i])
           if #block_cx.graph:outgoing_edges(value_nid) == 0 then
             block_cx.graph:remove_node(value_nid)
           end
@@ -1041,19 +1167,23 @@ end
 
 local function spmdize(cx, loop)
   --  1. Extract shard (deep copy).
-  --  2. Rewrite shard partitions as lists.
-  --  3. Rewrite shard loop bounds.
-  --  4. Outline shard into a task.
-  --  5. Compute shard bounds and list slices.
-  --  6. Wrap that in a distribution loop.
-  --  7. Wrap that in a must epoch.
-  --  8. Rewrite inputs/outputs.
+  --  2. Normalize the communication graph.
+  --  3. Rewrite shard partitions as lists.
+  --  4. Rewrite shard loop bounds.
+  --  5. Outline shard into a task.
+  --  6. Compute shard bounds and list slices.
+  --  7. Wrap that in a distribution loop.
+  --  8. Wrap that in a must epoch.
+  --  9. Rewrite inputs/outputs.
 
   local span = cx.graph:node_label(loop).span
 
   local shard_graph, shard_loop = flow_extract_subgraph.entry(cx.graph, loop)
 
   local shard_cx = cx:new_graph_scope(shard_graph)
+  normalize_communication(shard_cx, shard_loop)
+  shard_cx.graph:node_label(shard_loop).block:printpretty()
+  assert(false, "elliott")
   local lists, mapping = rewrite_shard_partitions(shard_cx)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.

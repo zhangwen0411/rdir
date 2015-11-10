@@ -80,13 +80,18 @@ function flow.is_opaque_node(label)
     label:is(flow.node.ForNum) or label:is(flow.node.ForList)
 end
 
-function graph:node_label(node)
+function graph:has_node(node)
   assert(flow.is_valid_node(node))
   return self.nodes[node]
 end
 
+function graph:node_label(node)
+  assert(self:has_node(node))
+  return self.nodes[node]
+end
+
 function graph:set_node_label(node, label)
-  assert(rawget(self.nodes, node))
+  assert(self:has_node(node))
   self.nodes[node] = label
 end
 
@@ -185,7 +190,7 @@ function graph:add_node(label)
 end
 
 function graph:remove_node(node)
-  assert(rawget(self.nodes, node))
+  assert(self:has_node(node))
 
   self.nodes[node] = nil
   self.edges[node] = nil
@@ -261,6 +266,25 @@ function graph:remove_edge(from_node, from_port, to_node, to_port)
   end
 end
 
+function graph:replace_edges(node, old_node, new_node)
+  for _, edge in ipairs(self:incoming_edges(node)) do
+    if edge.from_node == old_node then
+      self:remove_edge(
+        edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+      self:add_edge(
+        edge.label, new_node, edge.from_port, edge.to_node, edge.to_port)
+    end
+  end
+  for _, edge in ipairs(self:outgoing_edges(node)) do
+    if edge.to_node == old_node then
+      self:remove_edge(
+        edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+      self:add_edge(
+        edge.label, edge.from_node, edge.from_port, new_node, edge.to_port)
+    end
+  end
+end
+
 function graph:find_node(fn)
   for node, label in pairs(self.nodes) do
     if fn(node, label) then
@@ -331,7 +355,7 @@ function graph:traverse_edges(fn)
 end
 
 function graph:incoming_edges(node)
-  assert(flow.is_valid_node(node))
+  assert(self:has_node(node))
   local result = terralib.newlist()
   if rawget(self.backedges, node) then
     for from_node, edges in pairs(self.backedges[node]) do
@@ -351,7 +375,7 @@ function graph:incoming_edges(node)
 end
 
 function graph:incoming_edges_by_port(node)
-  assert(flow.is_valid_node(node))
+  assert(self:has_node(node))
   local result = {}
   for from_node, edges in pairs(self.backedges[node]) do
     for _, edge in pairs(edges) do
@@ -372,7 +396,7 @@ function graph:incoming_edges_by_port(node)
 end
 
 function graph:outgoing_edges(node)
-  assert(flow.is_valid_node(node))
+  assert(self:has_node(node))
   local result = terralib.newlist()
   if rawget(self.edges, node) then
     for to_node, edges in pairs(self.edges[node]) do
@@ -392,7 +416,7 @@ function graph:outgoing_edges(node)
 end
 
 function graph:outgoing_edges_by_port(node)
-  assert(flow.is_valid_node(node))
+  assert(self:has_node(node))
   local result = {}
   for to_node, edges in pairs(self.edges[node]) do
     for _, edge in pairs(edges) do
@@ -412,63 +436,68 @@ function graph:outgoing_edges_by_port(node)
   return result
 end
 
-function graph:immediate_predecessor(node)
-  assert(flow.is_valid_node(node))
-  local pred
+function graph:traverse_immediate_predecessors(fn, node)
+  assert(self:has_node(node))
   for from_node, _ in pairs(self.backedges[node]) do
-    assert(not pred)
-    pred = from_node
+    local from_node_label = self:node_label(from_node)
+    local result = {fn(from_node, from_node_label)}
+    if result[1] ~= nil then return unpack(result) end
   end
-  assert(pred)
-  return pred
 end
 
-function graph:immediate_successor(node)
-  assert(flow.is_valid_node(node))
-  local succ
+function graph:traverse_immediate_successors(fn, node)
+  assert(self:has_node(node))
   for to_node, _ in pairs(self.edges[node]) do
-    assert(not succ)
-    succ = to_node
+    local to_node_label = self:node_label(to_node)
+    local result = {fn(to_node, to_node_label)}
+    if result[1] ~= nil then return unpack(result) end
   end
-  assert(succ)
-  return succ
 end
 
-function graph:immediate_predecessors(node)
-  assert(flow.is_valid_node(node))
-  local result = terralib.newlist()
-  for from_node, _ in pairs(self.backedges[node]) do
-    result:insert(from_node)
-  end
+function graph:immediate_predecessor(node)
+  local result
+  self:traverse_immediate_predecessors(
+    function(pred) assert(not result); result = pred end,
+    node)
+  assert(result)
   return result
 end
 
-function graph:find_immediate_predecessor(fn, node)
-  assert(flow.is_valid_node(node))
-  for from_node, _ in pairs(self.backedges[node]) do
-    local from_node_label = self:node_label(from_node)
-    if fn(from_node, from_node_label) then
-      return from_node, from_node_label
-    end
-  end
+function graph:immediate_successor(node)
+  local result
+  self:traverse_immediate_successors(
+    function(succ) assert(not result); result = succ end,
+    node)
+  assert(result)
+  return result
 end
 
-function graph:find_immediate_successor(fn, node)
-  assert(flow.is_valid_node(node))
-  for to_node, _ in pairs(self.edges[node]) do
-    local to_node_label = self:node_label(to_node)
-    if fn(to_node, to_node_label) then
-      return to_node, to_node_label
-    end
-  end
+function graph:immediate_predecessors(node)
+  local result = terralib.newlist()
+  self:traverse_immediate_predecessors(
+    function(pred) result:insert(pred) end,
+    node)
+  return result
 end
 
 function graph:immediate_successors(node)
   local result = terralib.newlist()
-  for to_node, _ in pairs(self.edges[node]) do
-    result:insert(to_node)
-  end
+  self:traverse_immediate_successors(
+    function(succ) result:insert(succ) end,
+    node)
   return result
+end
+
+function graph:find_immediate_predecessor(fn, node)
+  return self:traverse_immediate_predecessors(
+    function(...) if fn(...) then return ... end end,
+    node)
+end
+
+function graph:find_immediate_successor(fn, node)
+  return self:traverse_immediate_successors(
+    function(...) if fn(...) then return ... end end,
+    node)
 end
 
 function graph:incoming_read_set(node)
