@@ -208,7 +208,7 @@ function graph:remove_node(node)
   end
 end
 
-function graph:replace_node(old_node, new_node)
+function graph:copy_node_edges(old_node, new_node)
   local inputs = self:incoming_edges(old_node)
   for _, edge in ipairs(inputs) do
     self:add_edge(
@@ -219,6 +219,10 @@ function graph:replace_node(old_node, new_node)
     self:add_edge(
       edge.label, new_node, edge.from_port, edge.to_node, edge.to_port)
   end
+end
+
+function graph:replace_node(old_node, new_node)
+  self:copy_node_edges(old_node, new_node)
   self:remove_node(old_node)
 end
 

@@ -245,6 +245,27 @@ local function find_open_source_close(cx, open_nid)
   return close_nid
 end
 
+local function compute_version_numbers(cx)
+  local versions = data.newmap()
+  local nids = cx.graph:toposort()
+  for _, nid in ipairs(nids) do
+    local edges = cx.graph:incoming_edges(nid)
+    local version = 0
+    for _, edge in ipairs(edges) do
+      local contribute = 0
+      local pred_label = cx.graph:node_label(edge.from_node)
+      if (edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Reduce)) and
+        not (pred_label:is(flow.node.Open) or pred_label:is(flow.node.Close))
+      then
+        contribute = 1
+      end
+      version = data.max(version, versions[edge.from_node] + contribute)
+    end
+    versions[nid] = version
+  end
+  return versions
+end
+
 local function normalize_communication(cx, shard_loop)
   -- This step simplifies and normalizes the communication graph,
   -- removing opens and instances of parent regions. Close nodes in
@@ -314,12 +335,59 @@ local function normalize_communication(cx, shard_loop)
     block_cx.graph:remove_node(open_nid)
   end
 
-  block_cx.graph:printpretty()
-  assert(false, "working")
+  -- Normalize versioning.
+  local versions = compute_version_numbers(block_cx)
+  for _, close_nid in ipairs(close_nids) do
+    local result_nids = block_cx.graph:immediate_successors(close_nid)
+    print("for close", close_nid, "results", result_nids:mkstring(" "))
+    local versions_changed = 0
+    for _, result_nid in ipairs(result_nids) do
+      local result_label = block_cx.graph:node_label(result_nid)
+      local input_nid = find_matching_input(
+        block_cx, close_nid, result_label.region_type, result_label.field_path)
+      if versions[result_nid] > versions[input_nid] then
+        versions_changed = versions_changed + 1
+        assert(versions_changed <= 1)
+      else
+        local user_nids = block_cx.graph:immediate_successors(result_nid)
+        for _, user_nid in ipairs(user_nids) do
+          block_cx.graph:replace_edges(user_nid, result_nid, input_nid)
+        end
+        block_cx.graph:remove_node(result_nid)
+      end
+    end
+  end
 
+  -- At this point, the graph should have no regions.
   -- FIXME: Handle singleton regions.
   assert(not block_cx.graph:find_node(
-           function(nid, label) return label:is(flow.node.Region) end))
+           function(_, label) return label:is(flow.node.data.Region) end))
+
+  -- Replace regions at top level context as well.
+  local region_nids = cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.data.Region) end)
+  for _, region_nid in ipairs(region_nids) do
+    local region_label = cx.graph:node_label(region_nid)
+    local replacement_labels = data.newmap()
+    block_cx.graph:traverse_nodes(
+      function(_, label)
+        if label:is(flow.node.data) and
+          cx.tree:can_alias(label.region_type, region_label.region_type) and
+          label.field_path == region_label.field_path
+        then
+          replacement_labels[label.region_type] = label
+        end
+      end)
+    assert(not replacement_labels:is_empty())
+    for _, label in replacement_labels:items() do
+      local nid = cx.graph:add_node(label)
+      cx.graph:copy_node_edges(region_nid, nid)
+    end
+    cx.graph:remove_node(region_nid)
+  end
+
+  assert(not block_cx.graph:find_node(
+           function(_, label) return label:is(flow.node.data.Region) end))
 end
 
 local function rewrite_shard_partitions(cx)
