@@ -58,12 +58,17 @@ end
 local function split_reduction_edges_at_node(cx, nid)
   local inputs = cx.graph:incoming_edges(nid)
   local reductions = data.filter(
-    function(edge) return edge.label:is(flow.edge.Reduce) end,
+    function(edge)
+      return edge.label:is(flow.edge.Reduce) or edge.label:is(flow.edge.Arrive)
+    end,
     inputs)
 
   if #reductions > 0 then
     local nonreductions = data.filter(
-      function(edge) return not edge.label:is(flow.edge.Reduce) end,
+      function(edge)
+        return not (edge.label:is(flow.edge.Reduce) or
+                      edge.label:is(flow.edge.Arrive))
+      end,
       inputs)
     local outputs = cx.graph:outgoing_edges(nid)
 
@@ -159,7 +164,8 @@ local function get_maxport(...)
   return maxport
 end
 
-local function get_arg_edge(edges, allow_fields)
+local function get_arg_edge(inputs, port, allow_fields)
+  local edges = inputs[port]
   assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
   return edges[1]
 end
@@ -408,6 +414,7 @@ end
 function flow_to_ast.node_copy(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
+  local outputs = cx.graph:outgoing_edges_by_port(nid)
   local maxport = get_maxport(inputs)
 
   local src = cx.ast[get_arg_node(inputs, 1, true)]
@@ -415,7 +422,26 @@ function flow_to_ast.node_copy(cx, nid)
 
   local conditions = terralib.newlist()
   for i = 3, maxport do
-    conditions:insert(cx.ast[get_arg_node(inputs, i, false)])
+    local edge = get_arg_edge(inputs, i, false)
+    local value = cx.ast[edge.from_node]
+    if edge.label:is(flow.edge.Await) then
+      value = ast.typed.expr.Condition {
+        value = value,
+        conditions = terralib.newlist({std.awaits}),
+        expr_type = value.expr_type,
+        options = ast.default_options(),
+        span = value.span,
+      }
+    elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
+      value = ast.typed.expr.Condition {
+        value = value,
+        conditions = terralib.newlist({std.arrives}),
+        expr_type = value.expr_type,
+        options = ast.default_options(),
+        span = value.span,
+      }
+    end
+    conditions:insert(value)
   end
 
   local action = ast.typed.expr.Copy {
@@ -599,15 +625,12 @@ end
 
 function flow_to_ast.node_data_scalar(cx, nid)
   local label = cx.graph:node_label(nid)
-  local outputs = cx.graph:outgoing_edges_by_port(nid)
-  if rawget(outputs, cx.graph:node_result_port(nid)) then
-    if label.fresh then
-      local inputs = cx.graph:incoming_edges_by_port(nid)
-      assert(rawget(inputs, 0) and #inputs[0] == 1)
-      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
-    else
-      cx.ast[nid] = cx.graph:node_label(nid).value
-    end
+  if label.fresh then
+    local inputs = cx.graph:incoming_edges_by_port(nid)
+    assert(rawget(inputs, 0) and #inputs[0] == 1)
+    cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+  else
+    cx.ast[nid] = cx.graph:node_label(nid).value
   end
   return terralib.newlist({})
 end
@@ -687,6 +710,7 @@ function flow_to_ast.graph(cx, graph)
   -- First, augment the graph in several ways to make it amenable to
   -- be converted into an AST.
   augment_graph(cx)
+  cx.graph:printpretty()
 
   -- Next, generate AST nodes in topological order.
   local nodes = cx.graph:toposort()

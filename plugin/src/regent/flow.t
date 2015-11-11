@@ -776,4 +776,7 @@ flow.edge:leaf("Discard", {})
 flow.edge:leaf("Write", {})
 flow.edge:leaf("Reduce", {"op"})
 
+flow.edge:leaf("Await", {})
+flow.edge:leaf("Arrive", {})
+
 return flow

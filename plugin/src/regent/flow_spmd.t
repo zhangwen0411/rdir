@@ -245,6 +245,46 @@ local function find_open_source_close(cx, open_nid)
   return close_nid
 end
 
+local function make_variable_label(cx, var_symbol, var_type, span)
+  local node = ast.typed.expr.ID {
+    value = var_symbol,
+    expr_type = std.rawref(&var_type),
+    options = ast.default_options(),
+    span = span,
+  }
+  local var_region = cx.tree:intern_variable(
+    node.expr_type, node.value, node.options, node.span)
+  return flow.node.data.Scalar {
+    value = node,
+    region_type = var_region,
+    field_path = data.newtuple(),
+    fresh = false,
+  }
+end
+
+local function make_constant(value, value_type, span)
+  return ast.typed.expr.Constant {
+    value = value,
+    expr_type = value_type,
+    options = ast.default_options(),
+    span = span,
+  }
+end
+
+local function find_last_instance(cx, value_label)
+  local nids = cx.graph:inverse_toposort()
+  for _, nid in ipairs(nids) do
+    local label = cx.graph:node_label(nid)
+    if label:is(flow.node.data) and
+      label.region_type == value_label.region_type and
+      label.field_path == value_label.field_path
+    then
+      return nid
+    end
+  end
+  assert(false)
+end
+
 local function compute_version_numbers(cx)
   local versions = data.newmap()
   local nids = cx.graph:toposort()
@@ -524,6 +564,78 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   cx.graph:add_edge(
     flow.edge.Write {}, copy_nid, 2,
     intersection_out_nid, cx.graph:node_result_port(intersection_out_nid))
+
+  return copy_nid
+end
+
+local function issue_intersection_copy_synchronization(
+    cx, src_nid, dst_in_nid, dst_out_nid, copy_nid, barriers)
+  local src_label = cx.graph:node_label(src_nid)
+  local src_type = src_label.region_type
+  local dst_label = cx.graph:node_label(dst_in_nid)
+  local dst_type = dst_label.region_type
+  assert(src_label.field_path == dst_label.field_path)
+
+  local empty_barrier, full_barrier
+  local bars = barriers[src_type][dst_type][src_label.field_path]
+  if bars then
+    empty_barrier, full_barrier = unpack(bars)
+    assert(false) -- if this happens, need to advance the barrier
+  else
+    local bar_type = std.list(std.list(std.phase_barrier))
+    local empty_symbol = terralib.newsymbol(
+      bar_type, "empty_" .. tostring(dst_label.value.value))
+    empty_barrier = make_variable_label(
+      cx, empty_symbol, bar_type, dst_label.value.span)
+    local full_symbol = terralib.newsymbol(
+      bar_type, "full_" .. tostring(dst_label.value.value))
+    full_barrier = make_variable_label(
+      cx, full_symbol, bar_type, dst_label.value.span)
+    barriers[src_type][dst_type][src_label.field_path] = data.newtuple(
+      empty_barrier, full_barrier)
+  end
+
+  local empty_in_nid = cx.graph:add_node(empty_barrier)
+  local empty_out_nid = cx.graph:add_node(empty_barrier)
+  local full_in_nid = cx.graph:add_node(full_barrier)
+  local full_out_nid = cx.graph:add_node(full_barrier)
+
+  cx.graph:add_edge(
+    flow.edge.Await {},
+    empty_out_nid, cx.graph:node_available_port(empty_out_nid),
+    copy_nid, cx.graph:node_available_port(copy_nid))
+  cx.graph:add_edge(
+    flow.edge.Arrive {}, copy_nid, cx.graph:node_available_port(copy_nid),
+    full_out_nid, cx.graph:node_available_port(full_out_nid))
+
+  local consumer_nids = cx.graph:immediate_successors(dst_out_nid)
+  for _, consumer_nid in ipairs(consumer_nids) do
+    cx.graph:add_edge(
+      flow.edge.Await {},
+      full_in_nid, cx.graph:node_available_port(full_in_nid),
+      consumer_nid, cx.graph:node_available_port(consumer_nid))
+  end
+
+  local producer_nids = cx.graph:immediate_predecessors(dst_in_nid)
+  if #producer_nids == 0 then
+    local final_nid = find_last_instance(cx, dst_label)
+    local final_succ_nids = cx.graph:immediate_successors(final_nid)
+    if #final_succ_nids > 0 then
+      producer_nids = final_succ_nids
+    else
+      producer_nids = cx.graph:immediate_predecessors(final_nid)
+    end
+  end
+  -- If there were more than one of these, we would need to increase
+  -- the expected arrival count.
+  assert(#producer_nids == 1)
+  local producer_nid = producer_nids[1]
+  cx.graph:add_edge(
+    flow.edge.Arrive {},
+    producer_nid, cx.graph:node_available_port(producer_nid),
+    empty_in_nid, cx.graph:node_available_port(empty_in_nid))
+
+  print("FIXME: need to push phase barriers down into loops")
 end
 
 local function rewrite_communication(cx, shard_loop)
@@ -533,6 +645,7 @@ local function rewrite_communication(cx, shard_loop)
   local close_nids = block_cx.graph:filter_nodes(
     function(_, label) return label:is(flow.node.Close) end)
   local intersections = data.new_recursive_map(1)
+  local barriers = data.new_recursive_map(2)
   for _, close_nid in ipairs(close_nids) do
     local dst_out_nid = block_cx.graph:immediate_successor(close_nid)
     local dst_out_label = block_cx.graph:node_label(dst_out_nid)
@@ -543,15 +656,28 @@ local function rewrite_communication(cx, shard_loop)
       block_cx.graph:immediate_predecessors(close_nid))
     assert(#src_nids == 1)
     local src_nid = src_nids[1]
-    issue_intersection_copy(
+    local copy_nid = issue_intersection_copy(
       block_cx, src_nid, dst_in_nid, dst_out_nid, intersections)
+    issue_intersection_copy_synchronization(
+      block_cx, src_nid, dst_in_nid, dst_out_nid, copy_nid, barriers)
     block_cx.graph:remove_node(close_nid)
   end
 
-  block_cx.graph:printpretty()
-  assert(false, "working")
+  -- Raise barriers as arguments to loop.
+  for _, b1 in barriers:items() do
+    for _, b2 in b1:items() do
+      for _, b3 in b2:items() do
+        for _, barrier in ipairs(b3) do
+          local nid = cx.graph:add_node(barrier)
+          cx.graph:add_edge(
+            flow.edge.Read {}, nid, cx.graph:node_result_port(nid),
+            shard_loop, cx.graph:node_available_port(shard_loop))
+        end
+      end
+    end
+  end
 
-  return intersections
+  return intersections, barriers
 end
 
 local function rewrite_shard_loop_bounds(cx, shard_loop)
@@ -586,20 +712,9 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   local block_bounds = terralib.newlist()
   local shard_bounds = terralib.newlist()
   for i = 1, 2 do
-    local bound = ast.typed.expr.ID {
-      value = terralib.newsymbol(bounds_type, "shard_bound" .. i),
-      expr_type = std.rawref(&bounds_type),
-      options = ast.default_options(),
-      span = shard_label.span,
-    }
-    local bound_region = cx.tree:intern_variable(
-      bound.expr_type, bound.value, bound.options, bound.span)
-    local bound_label = flow.node.data.Scalar {
-      value = bound,
-      region_type = bound_region,
-      field_path = data.newtuple(),
-      fresh = false,
-    }
+    local bound_label = make_variable_label(
+      cx, terralib.newsymbol(bounds_type, "shard_bound" .. i),
+      bounds_type, shard_label.span)
     bounds_labels:insert(bound_label)
     block_bounds:insert(block_cx.graph:add_node(bound_label))
     shard_bounds:insert(cx.graph:add_node(bound_label))
@@ -635,15 +750,6 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   return bounds_labels, original_bounds_labels
 end
 
-local function make_constant(value, value_type, span)
-  return ast.typed.expr.Constant {
-    value = value,
-    expr_type = value_type,
-    options = ast.default_options(),
-    span = span,
-  }
-end
-
 local function rewrite_shard_slices(cx, bounds, lists, mapping)
   assert(#bounds == 2)
 
@@ -651,20 +757,9 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
 
   -- Build the actual shard index.
   local bounds_type = std.as_read(bounds[1].value.expr_type)
-  local index = ast.typed.expr.ID {
-    value = terralib.newsymbol(bounds_type, "shard_index"),
-    expr_type = std.rawref(&bounds_type),
-    options = ast.default_options(),
-    span = bounds[1].value.span,
-  }
-  local index_region = cx.tree:intern_variable(
-    index.expr_type, index.value, index.options, index.span)
-  local index_label = flow.node.data.Scalar {
-    value = index,
-    region_type = index_region,
-    field_path = data.newtuple(),
-    fresh = false,
-  }
+  local index_label = make_variable_label(
+    cx, terralib.newsymbol(bounds_type, "shard_index"),
+    bounds_type, bounds[1].value.span)
   local index_nid = cx.graph:add_node(index_label)
 
   -- Build shard stride (i.e. size of each shard). Currently constant.
@@ -1097,20 +1192,8 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
 
       local index_type = std.rawref(&int)
       local index_symbol = terralib.newsymbol(int, "index")
-      local index_region = cx.tree:intern_variable(
-        index_type, index_symbol, ast.default_options(),
-        first_old_label.value.span)
-      local index_label = flow.node.data.Scalar {
-        value = ast.typed.expr.ID {
-          value = index_symbol,
-          expr_type = index_type,
-          options = ast.default_options(),
-          span = first_old_label.value.span,
-        },
-        region_type = index_region,
-        field_path = data.newtuple(),
-        fresh = false,
-      }
+      local index_label = make_variable_label(
+        index_symbol, int, first_old_label.value.span)
 
       -- Duplicate the partition again, this time for opening.
       local opened_nids = data.newmap()
@@ -1343,11 +1426,11 @@ local function spmdize(cx, loop)
   normalize_communication(shard_cx, shard_loop)
   local lists, mapping = rewrite_shard_partitions(shard_cx)
   rewrite_communication(shard_cx, shard_loop)
-  shard_cx.graph:node_label(shard_loop).block:printpretty()
-  assert(false, "elliott")
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
+  shard_cx.graph:node_label(shard_loop).block:printpretty()
+  assert(false, "elliott")
   local shard_index, shard_stride, slice_mapping = rewrite_shard_slices(
     shard_cx, bounds, lists, mapping)
 
