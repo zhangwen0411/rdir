@@ -797,7 +797,103 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   return bounds_labels, original_bounds_labels
 end
 
-local function rewrite_shard_slices(cx, bounds, lists, mapping)
+local function get_slice_type_and_symbol(cx, region_type, list_type, label)
+  if std.is_list_of_regions(region_type) then
+    local parent_list_type = list_type:slice()
+    local parent_list_symbol = terralib.newsymbol(
+      parent_list_type,
+      label.value.value.displayname)
+    return parent_list_type, parent_list_type, parent_list_symbol
+  else
+    local parent_list_type = std.rawref(&list_type)
+    local parent_list_symbol = terralib.newsymbol(
+      parent_list_type,
+      label.value.value.displayname)
+    local parent_list_region = cx.tree:intern_variable(
+      parent_list_type, parent_list_symbol,
+      ast.default_options(), label.value.span)
+    return parent_list_type, parent_list_region, parent_list_symbol
+  end
+end
+
+local function build_slice(cx, region_type, list_type, index_nid, index_label,
+                           stride_nid, stride_label, bounds_type, slice_mapping)
+  local list_nids = cx.graph:filter_nodes(
+    function(nid, label)
+      return label:is(flow.node.data) and
+        label.region_type == region_type and
+        #cx.graph:immediate_predecessors(nid) == 0
+    end)
+  if #list_nids > 0 then
+    -- Grab one of them so we can make the slice...
+    local first_list = cx.graph:node_label(list_nids[1])
+
+    local parent_list_type, parent_list_region, parent_list_symbol =
+      get_slice_type_and_symbol(cx, region_type, list_type, first_list)
+    slice_mapping[region_type] = parent_list_region
+    local first_parent_list = first_list {
+      region_type = parent_list_region,
+      value = first_list.value {
+        value = parent_list_symbol,
+        expr_type = std.type_sub(first_list.value.expr_type, slice_mapping),
+      }
+    }
+
+    local compute_list = flow.node.Opaque {
+      action = ast.typed.expr.IndexAccess {
+        value = first_parent_list.value,
+        index = ast.typed.expr.ListRange {
+          start = index_label.value,
+          stop = ast.typed.expr.Binary {
+            lhs = index_label.value,
+            rhs = stride_label.value,
+            op = "+",
+            expr_type = bounds_type,
+            options = ast.default_options(),
+            span = first_list.value.span,
+          },
+          expr_type = std.list(int),
+          options = ast.default_options(),
+          span = first_list.value.span,
+        },
+        expr_type = std.as_read(first_list.value.expr_type),
+        options = ast.default_options(),
+        span = first_list.value.span,
+      },
+    }
+    local compute_list_nid = cx.graph:add_node(compute_list)
+
+    for _, list_nid in ipairs(list_nids) do
+      local list = cx.graph:node_label(list_nid)
+      local parent_list = list {
+        region_type = parent_list_region,
+        value = list.value {
+          value = parent_list_symbol,
+          expr_type = std.type_sub(list.value.expr_type, slice_mapping),
+        },
+      }
+      local parent_nid = cx.graph:add_node(parent_list)
+
+      cx.graph:add_edge(
+        flow.edge.Name {},
+        compute_list_nid, cx.graph:node_result_port(compute_list_nid),
+        list_nid, 1)
+      cx.graph:add_edge(
+        flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
+        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+      cx.graph:add_edge(
+        flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
+        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+      cx.graph:add_edge(
+        flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+    end
+    return first_parent_list
+  end
+end
+
+local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
+                                    mapping)
   assert(#bounds == 2)
 
   local slice_mapping = {}
@@ -856,81 +952,51 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
       slice_mapping[bound.region_type] = false
     end)
 
-  -- Build list slices from shard index and stride.
+  -- Build list slices for original lists.
   for _, list_type in lists:keys() do
-    local list_nids = cx.graph:filter_nodes(
-      function(nid, label)
-        return label:is(flow.node.data) and
-          label.region_type == list_type and
-          #cx.graph:immediate_predecessors(nid) == 0
-      end)
-    if #list_nids > 0 then
-      local parent_list_type = list_type:slice()
-      slice_mapping[list_type] = parent_list_type
-      local parent_list_symbol = terralib.newsymbol(
-        parent_list_type,
-        cx.graph:node_label(list_nids[1]).value.value.displayname)
+    build_slice(
+      cx, list_type, list_type, index_nid, index_label, stride_nid, stride_label,
+      bounds_type, slice_mapping)
+  end
 
-      -- Grab one of them so we can make the slice...
-      local first_list = cx.graph:node_label(list_nids[1])
-      local first_parent_list_value = first_list.value {
-        value = parent_list_symbol,
-        expr_type = std.type_sub(first_list.value.expr_type, slice_mapping),
-      }
+  -- Build list slices for intersections.
+  local parent_intersections = data.new_recursive_map(1)
+  for lhs_type, i1 in intersections:items() do
+    for rhs_type, intersection_label in i1:items() do
+      local list_type = intersection_label.region_type
+      local parent = build_slice(
+        cx, list_type, list_type, index_nid, index_label,
+        stride_nid, stride_label, bounds_type, slice_mapping)
+      assert(parent)
+      parent_intersections[slice_mapping[lhs_type]][slice_mapping[rhs_type]] =
+        parent
+    end
+  end
 
-      local compute_list = flow.node.Opaque {
-        action = ast.typed.expr.IndexAccess {
-          value = first_parent_list_value,
-          index = ast.typed.expr.ListRange {
-            start = index_label.value,
-            stop = ast.typed.expr.Binary {
-              lhs = index_label.value,
-              rhs = stride_label.value,
-              op = "+",
-              expr_type = bounds_type,
-              options = ast.default_options(),
-              span = first_list.value.span,
-            },
-            expr_type = std.list(int),
-            options = ast.default_options(),
-            span = first_list.value.span,
-          },
-          expr_type = std.as_read(first_list.value.expr_type),
-          options = ast.default_options(),
-          span = first_list.value.span,
-        },
-      }
-      local compute_list_nid = cx.graph:add_node(compute_list)
-
-      for _, list_nid in ipairs(list_nids) do
-        local list = cx.graph:node_label(list_nid)
-        local parent_list = list {
-          region_type = parent_list_type,
-          value = list.value {
-            value = parent_list_symbol,
-            expr_type = std.type_sub(list.value.expr_type, slice_mapping),
-          },
-        }
-        local parent_nid = cx.graph:add_node(parent_list)
-
-        cx.graph:add_edge(
-          flow.edge.Name {},
-          compute_list_nid, cx.graph:node_result_port(compute_list_nid),
-          list_nid, 1)
-        cx.graph:add_edge(
-          flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
-          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-        cx.graph:add_edge(
-          flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
-          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-        cx.graph:add_edge(
-          flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
-          compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+  local parent_barriers = data.new_recursive_map(2)
+  for lhs_type, b1 in barriers:items() do
+    for rhs_type, b2 in b1:items() do
+      for field_path, barrier_labels in b2:items() do
+        local barrier_empty, barrier_full = unpack(barrier_labels)
+        local empty_type = std.as_read(barrier_empty.value.expr_type)
+        local empty_region = barrier_empty.region_type
+        local empty_parent = build_slice(
+          cx, empty_region, empty_type, index_nid, index_label,
+          stride_nid, stride_label, bounds_type, slice_mapping)
+        local full_type = std.as_read(barrier_full.value.expr_type)
+        local full_region = barrier_full.region_type
+        local full_parent = build_slice(
+          cx, full_region, full_type, index_nid, index_label,
+          stride_nid, stride_label, bounds_type, slice_mapping)
+        assert(empty_parent and full_parent)
+        parent_barriers[slice_mapping[lhs_type]][slice_mapping[rhs_type]][
+          field_path] = data.newtuple(empty_parent, full_parent)
       end
     end
   end
 
-  return index_label, stride_label, slice_mapping
+  return index_label, stride_label, slice_mapping,
+    parent_intersections, parent_barriers
 end
 
 local function make_distribution_loop(cx, block, shard_index, shard_stride,
@@ -997,7 +1063,8 @@ local function apply_mapping(old, new)
   return result
 end
 
-local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
+local function rewrite_inputs(cx, old_loop, new_loop, original_bounds,
+                              intersections, barriers, mapping)
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
@@ -1009,11 +1076,43 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
     return function(nid, label)
       if label:is(flow.node.data) then
         local region_type = mapping[label.region_type] or label.region_type
-        return region_type == new_label.region_type and
+        return cx.tree:can_alias(region_type, new_label.region_type) and
           label.field_path == new_label.field_path
       end
     end
   end
+
+  cx.graph:printpretty()
+
+  print("mapping")
+  for k, v in pairs(mapping) do
+    print("", k, v)
+  end
+
+  local intersection_types = data.newmap()
+  for lhs_type, i1 in intersections:items() do
+    for rhs_type, intersection_label in i1:items() do
+      intersection_types[intersection_label.region_type] = data.newtuple(
+        lhs_type, rhs_type)
+    end
+  end
+  print("intersections", intersection_types)
+
+  local barriers_empty = data.newmap()
+  local barriers_full = data.newmap()
+  for lhs_type, b1 in barriers:items() do
+    for rhs_type, b2 in b1:items() do
+      for field_path, barrier_labels in b2:items() do
+        local barrier_empty, barrier_full = unpack(barrier_labels)
+        barriers_empty[barrier_empty.region_type] = data.newtuple(
+          lhs_type, rhs_type, field_path)
+        barriers_full[barrier_full.region_type] = data.newtuple(
+          lhs_type, rhs_type, field_path)
+      end
+    end
+  end
+  print("empty", barriers_empty)
+  print("full", barriers_full)
 
   -- Find mapping from old to new inputs.
   local new_inputs = cx.graph:incoming_edges(new_loop)
@@ -1024,9 +1123,15 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
     if new_input:is(flow.node.data) then
       local old_input_nid = cx.graph:find_immediate_predecessor(
         matches(new_input), old_loop)
-      assert(old_input_nid)
-      input_nid_mapping[new_input.region_type][new_input.field_path][
-        old_input_nid] = new_input_nid
+      if not old_input_nid then
+        assert(intersection_types[new_input.region_type] or
+                 barriers_empty[new_input.region_type] or
+                 barriers_full[new_input.region_type])
+        -- Skip intersections and phase barriers.
+      else
+        input_nid_mapping[new_input.region_type][new_input.field_path][
+          old_input_nid] = new_input_nid
+      end
     end
   end
   local output_nid_mapping = data.new_recursive_map(2)
@@ -1037,11 +1142,20 @@ local function rewrite_inputs(cx, old_loop, new_loop, original_bounds, mapping)
     if new_output:is(flow.node.data) then
       local old_output_nid = cx.graph:find_immediate_successor(
         matches(new_output), old_loop)
-      assert(old_output_nid)
-      output_nid_mapping[new_output.region_type][new_output.field_path][
-        old_output_nid] = new_output_nid
+      if not old_output_nid then
+        assert(intersection_types[new_output.region_type] or
+                 barriers_empty[new_output.region_type] or
+                 barriers_full[new_output.region_type])
+        -- Skip intersections and phase barriers.
+      else
+        output_nid_mapping[new_output.region_type][new_output.field_path][
+          old_output_nid] = new_output_nid
+      end
     end
   end
+
+  print("input_nid_mapping", input_nid_mapping)
+  print("output_nid_mapping", output_nid_mapping)
 
   local closed_nids = data.new_recursive_map(1)
   local copy_nids = data.newmap()
@@ -1468,12 +1582,13 @@ local function spmdize(cx, loop)
   local shard_cx = cx:new_graph_scope(shard_graph)
   normalize_communication(shard_cx, shard_loop)
   local lists, mapping = rewrite_shard_partitions(shard_cx)
-  rewrite_communication(shard_cx, shard_loop)
+  local intersections, barriers = rewrite_communication(shard_cx, shard_loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
-  local shard_index, shard_stride, slice_mapping = rewrite_shard_slices(
-    shard_cx, bounds, lists, mapping)
+  local shard_index, shard_stride, slice_mapping,
+      new_intersections, new_barriers = rewrite_shard_slices(
+    shard_cx, bounds, lists, intersections, barriers, mapping)
 
   local dist_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local dist_loop = make_distribution_loop(
@@ -1482,11 +1597,17 @@ local function spmdize(cx, loop)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
   local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)
-  shard_cx.graph:printpretty()
-  assert(false, "elliott")
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
-  rewrite_inputs(cx, loop, epoch_task, original_bounds, inputs_mapping)
+  print("slice_mapping")
+  for k, v in pairs(slice_mapping) do
+    print("", k, v)
+  end
+  rewrite_inputs(cx, loop, epoch_task, original_bounds,
+                 new_intersections, new_barriers, inputs_mapping)
+
+  shard_cx.graph:printpretty()
+  assert(false, "elliott")
 
   return epoch_task
 end

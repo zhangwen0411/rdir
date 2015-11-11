@@ -1265,7 +1265,9 @@ function analyze_privileges.expr_cross_product(cx, node, privilege_map)
   return data.reduce(
     privilege_meet,
     node.args:map(
-      function(arg) return analyze_privileges.expr(cx, arg, reads) end))
+      function(arg)
+        return analyze_privileges.expr(cx, arg, reads) or new_field_map()
+  end))
 end
 
 function analyze_privileges.expr_copy(cx, node, privilege_map)
@@ -1280,7 +1282,8 @@ function analyze_privileges.expr_copy(cx, node, privilege_map)
       privilege_meet,
       node.conditions:map(
         function(condition)
-          return analyze_privileges.expr_condition(cx, condition, reads)
+          return analyze_privileges.expr_condition(cx, condition, reads) or
+            new_field_map()
         end)))
 end
 
@@ -1292,7 +1295,8 @@ function analyze_privileges.expr_fill(cx, node, privilege_map)
       privilege_meet,
       node.conditions:map(
         function(condition)
-          return analyze_privileges.expr_condition(cx, condition, reads)
+          return analyze_privileges.expr_condition(cx, condition, reads) or
+            new_field_map()
         end)))
 end
 
@@ -1421,7 +1425,10 @@ end
 function analyze_privileges.block(cx, node)
   return data.reduce(
     privilege_meet,
-    node.stats:map(function(stat) return analyze_privileges.stat(cx, stat) end))
+    node.stats:map(
+      function(stat)
+        return analyze_privileges.stat(cx, stat) or new_field_map()
+      end))
 end
 
 function analyze_privileges.stat_if(cx, node)
@@ -1432,7 +1439,9 @@ function analyze_privileges.stat_if(cx, node)
       data.reduce(
         privilege_meet,
         node.elseif_blocks:map(
-          function(block) return analyze_privileges.stat_elseif(cx, block) end)),
+          function(block)
+            return analyze_privileges.stat_elseif(cx, block) or new_field_map()
+          end)),
       analyze_privileges.block(cx, node.else_block))
 end
 
@@ -1458,7 +1467,9 @@ function analyze_privileges.stat_for_num(cx, node)
     data.reduce(
       privilege_meet,
       node.values:map(
-        function(value) return analyze_privileges.expr(cx, value, reads) end),
+        function(value)
+          return analyze_privileges.expr(cx, value, reads) or new_field_map()
+        end),
       outer_privileges)
 end
 
@@ -1489,7 +1500,9 @@ function analyze_privileges.stat_var(cx, node)
   return data.reduce(
     privilege_meet,
     node.values:map(
-      function(value) return analyze_privileges.expr(cx, value, reads) end))
+      function(value)
+        return analyze_privileges.expr(cx, value, reads) or new_field_map()
+      end))
 end
 
 function analyze_privileges.stat_var_unpack(cx, node)
@@ -1511,11 +1524,14 @@ function analyze_privileges.stat_assignment(cx, node)
       node.lhs:map(
         function(lh)
           return analyze_privileges.expr(cx, lh, reads_writes)
-      end),
+            or new_field_map()
+        end),
       data.reduce(
         privilege_meet,
         node.rhs:map(
-          function(rh) return analyze_privileges.expr(cx, rh, reads) end)))
+          function(rh)
+            return analyze_privileges.expr(cx, rh, reads) or new_field_map()
+          end)))
 end
 
 function analyze_privileges.stat_reduce(cx, node)
@@ -1523,11 +1539,16 @@ function analyze_privileges.stat_reduce(cx, node)
     data.reduce(
       privilege_meet,
       node.lhs:map(
-        function(lh) return analyze_privileges.expr(cx, lh, reads_writes) end),
+        function(lh)
+          return analyze_privileges.expr(cx, lh, reads_writes) or
+            new_field_map()
+        end),
       data.reduce(
         privilege_meet,
         node.rhs:map(
-          function(rh) return analyze_privileges.expr(cx, rh, reads) end)))
+          function(rh)
+            return analyze_privileges.expr(cx, rh, reads) or new_field_map()
+          end)))
 end
 
 function analyze_privileges.stat_expr(cx, node)
