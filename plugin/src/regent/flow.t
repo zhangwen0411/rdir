@@ -270,6 +270,23 @@ function graph:remove_edge(from_node, from_port, to_node, to_port)
   end
 end
 
+function graph:copy_edges(node, old_node, new_node, new_port)
+  for _, edge in ipairs(self:incoming_edges(node)) do
+    if edge.from_node == old_node then
+      self:add_edge(
+        edge.label, new_node, edge.from_port,
+        edge.to_node, new_port or edge.to_port)
+    end
+  end
+  for _, edge in ipairs(self:outgoing_edges(node)) do
+    if edge.to_node == old_node then
+      self:add_edge(
+        edge.label, edge.from_node, new_port or edge.from_port,
+        new_node, edge.to_port)
+    end
+  end
+end
+
 function graph:replace_edges(node, old_node, new_node)
   for _, edge in ipairs(self:incoming_edges(node)) do
     if edge.from_node == old_node then

@@ -221,7 +221,7 @@ local function find_matching_input(cx, op_nid, region_type, field_path)
     function(nid, label)
       return label:is(flow.node.data) and
         label.region_type == region_type and
-        label.field_path == field_path
+        (not field_path or label.field_path == field_path)
     end,
     op_nid)
 end
@@ -419,9 +419,41 @@ local function normalize_communication(cx, shard_loop)
         end
       end)
     assert(not replacement_labels:is_empty())
-    for _, label in replacement_labels:items() do
-      local nid = cx.graph:add_node(label)
-      cx.graph:copy_node_edges(region_nid, nid)
+    for _, replacement_label in replacement_labels:items() do
+      local nid = cx.graph:add_node(replacement_label)
+      local similar_nid = cx.graph:find_node(
+        function(_, label)
+          return label:is(flow.node.data) and
+            label.region_type == replacement_label.region_type
+        end)
+      local port
+      if similar_nid then
+        for _, edge in ipairs(cx.graph:incoming_edges(similar_nid)) do
+          if edge.from_node == shard_loop then
+            port = edge.from_port
+            break
+          end
+        end
+        if not port then
+          for _, edge in ipairs(cx.graph:outgoing_edges(similar_nid)) do
+            if edge.to_node == shard_loop then
+              port = edge.to_port
+              break
+            end
+          end
+        end
+      end
+      if not port then
+        port = cx.graph:node_available_port(shard_loop)
+      end
+      cx.graph:copy_edges(shard_loop, region_nid, nid, port)
+    end
+    -- Sanity check the region wasn't connected to anything else.
+    for _, edge in ipairs(cx.graph:incoming_edges(region_nid)) do
+      assert(edge.from_node == shard_loop)
+    end
+    for _, edge in ipairs(cx.graph:outgoing_edges(region_nid)) do
+      assert(edge.to_node == shard_loop)
     end
     cx.graph:remove_node(region_nid)
   end
@@ -663,6 +695,21 @@ local function rewrite_communication(cx, shard_loop)
     block_cx.graph:remove_node(close_nid)
   end
 
+  -- Raise intersections as arguments to loop.
+  for _, i1 in intersections:items() do
+    for _, list in i1:items() do
+      local in_nid = cx.graph:add_node(list)
+      local out_nid = cx.graph:add_node(list)
+      local port = cx.graph:node_available_port(shard_loop)
+      cx.graph:add_edge(
+        flow.edge.Read {}, in_nid, cx.graph:node_result_port(in_nid),
+        shard_loop, port)
+      cx.graph:add_edge(
+        flow.edge.Write {}, shard_loop, port,
+        out_nid, cx.graph:node_available_port(out_nid))
+    end
+  end
+
   -- Raise barriers as arguments to loop.
   for _, b1 in barriers:items() do
     for _, b2 in b1:items() do
@@ -764,7 +811,7 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
 
   -- Build shard stride (i.e. size of each shard). Currently constant.
   local stride_label = flow.node.Constant {
-    value = make_constant(1, bounds_type, index.span),
+    value = make_constant(1, bounds_type, index_label.value.span),
   }
   local stride_nid = cx.graph:add_node(stride_label)
 
@@ -784,11 +831,11 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
       types = bounds:map(
         function(bound) return std.as_read(bound.value.expr_type) end),
       values = terralib.newlist({
-          make_constant(0, bounds_type, index.span),
+          make_constant(0, bounds_type, index_label.value.span),
           stride_label.value,
       }),
       options = ast.default_options(),
-      span = index.span,
+      span = index_label.value.span,
     }
   }
   local compute_bounds_nid = cx.graph:add_node(compute_bounds)
@@ -803,7 +850,7 @@ local function rewrite_shard_slices(cx, bounds, lists, mapping)
     compute_bounds_nid, 1)
 
   -- Kill local bounds in the slice mapping.
-  slice_mapping[index_region] = false
+  slice_mapping[index_label.region_type] = false
   bounds:map(
     function(bound)
       slice_mapping[bound.region_type] = false
@@ -906,11 +953,7 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
 
       -- Reuse the node if it exists.
       if bound:is(flow.node.data) then
-        bound_nid = cx.graph:find_immediate_predecessor(
-          function(nid, label)
-            return label.region_type == bound.region_type
-          end,
-          nid)
+        bound_nid = find_matching_input(cx, nid, bound.region_type)
       end
 
       -- Otherwise build a new one.
@@ -1429,8 +1472,6 @@ local function spmdize(cx, loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
-  shard_cx.graph:node_label(shard_loop).block:printpretty()
-  assert(false, "elliott")
   local shard_index, shard_stride, slice_mapping = rewrite_shard_slices(
     shard_cx, bounds, lists, mapping)
 
@@ -1441,6 +1482,8 @@ local function spmdize(cx, loop)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
   local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)
+  shard_cx.graph:printpretty()
+  assert(false, "elliott")
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
   rewrite_inputs(cx, loop, epoch_task, original_bounds, inputs_mapping)

@@ -610,7 +610,7 @@ function flow_to_ast.node_data(cx, nid)
         else
           cx.ast[nid] = cx.region_ast[label.region_type]
         end
-        return terralib.newlist({})
+        return terralib.newlist()
       end
     end
   end
@@ -620,7 +620,7 @@ function flow_to_ast.node_data(cx, nid)
   else
     cx.ast[nid] = label.value
   end
-  return terralib.newlist({})
+  return terralib.newlist()
 end
 
 function flow_to_ast.node_data_scalar(cx, nid)
@@ -632,17 +632,17 @@ function flow_to_ast.node_data_scalar(cx, nid)
   else
     cx.ast[nid] = cx.graph:node_label(nid).value
   end
-  return terralib.newlist({})
+  return terralib.newlist()
 end
 
 function flow_to_ast.node_constant(cx, nid)
   cx.ast[nid] = cx.graph:node_label(nid).value
-  return terralib.newlist({})
+  return terralib.newlist()
 end
 
 function flow_to_ast.node_function(cx, nid)
   cx.ast[nid] = cx.graph:node_label(nid).value
-  return terralib.newlist({})
+  return terralib.newlist()
 end
 
 function flow_to_ast.node(cx, nid)
@@ -710,7 +710,6 @@ function flow_to_ast.graph(cx, graph)
   -- First, augment the graph in several ways to make it amenable to
   -- be converted into an AST.
   augment_graph(cx)
-  cx.graph:printpretty()
 
   -- Next, generate AST nodes in topological order.
   local nodes = cx.graph:toposort()
