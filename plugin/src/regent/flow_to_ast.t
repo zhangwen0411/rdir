@@ -628,7 +628,9 @@ function flow_to_ast.node_data_scalar(cx, nid)
   if label.fresh then
     local inputs = cx.graph:incoming_edges_by_port(nid)
     assert(rawget(inputs, 0) and #inputs[0] == 1)
-    cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+    if #(cx.graph:outgoing_use_set(nid)) > 0 then
+      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+    end
   else
     cx.ast[nid] = cx.graph:node_label(nid).value
   end
