@@ -521,6 +521,14 @@ function graph:find_immediate_successor(fn, node)
     node)
 end
 
+function graph:filter_immediate_predecessors(fn, node)
+  local result = terralib.newlist()
+  self:traverse_immediate_predecessors(
+    function(pred, label) if fn(pred, label) then result:insert(pred) end end,
+    node)
+  return result
+end
+
 function graph:incoming_read_set(node)
   local result = terralib.newlist()
   for from_node, edges in pairs(self.backedges[node]) do

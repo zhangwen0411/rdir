@@ -226,6 +226,16 @@ local function find_matching_input(cx, op_nid, region_type, field_path)
     op_nid)
 end
 
+local function find_matching_inputs(cx, op_nid, region_type, field_path)
+  return cx.graph:filter_immediate_predecessors(
+    function(nid, label)
+      return label:is(flow.node.data) and
+        label.region_type == region_type and
+        (not field_path or label.field_path == field_path)
+    end,
+    op_nid)
+end
+
 local function find_predecessor_maybe(cx, nid)
   local preds = cx.graph:immediate_predecessors(nid)
   if #preds == 0 then
@@ -560,7 +570,8 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   else
     local intersection_type = std.list(std.list(dst_type:subregion_dynamic()))
     local intersection_symbol = terralib.newsymbol(
-      intersection_type, dst_label.value.value.displayname)
+      intersection_type,
+      "intersection_" .. tostring(dst_label.value.value.displayname))
     intersection_label = dst_label {
       value = dst_label.value {
         value = intersection_symbol,
@@ -618,29 +629,42 @@ local function issue_intersection_copy_synchronization(
   local dst_type = dst_label.region_type
   assert(src_label.field_path == dst_label.field_path)
 
-  local empty_barrier, full_barrier
+  local empty_in, empty_out, full_in, full_out
   local bars = barriers[src_type][dst_type][src_label.field_path]
   if bars then
-    empty_barrier, full_barrier = unpack(bars)
+    empty_in, empty_out, full_in, full_out = unpack(bars)
     assert(false) -- if this happens, need to advance the barrier
   else
     local bar_type = std.list(std.list(std.phase_barrier))
-    local empty_symbol = terralib.newsymbol(
-      bar_type, "empty_" .. tostring(dst_label.value.value))
-    empty_barrier = make_variable_label(
-      cx, empty_symbol, bar_type, dst_label.value.span)
-    local full_symbol = terralib.newsymbol(
-      bar_type, "full_" .. tostring(dst_label.value.value))
-    full_barrier = make_variable_label(
-      cx, full_symbol, bar_type, dst_label.value.span)
+
+    local empty_in_symbol = terralib.newsymbol(
+      bar_type, "empty_in_" .. tostring(dst_label.value.value))
+    empty_in = make_variable_label(
+      cx, empty_in_symbol, bar_type, dst_label.value.span)
+
+    local empty_out_symbol = terralib.newsymbol(
+      bar_type, "empty_out_" .. tostring(dst_label.value.value))
+    empty_out = make_variable_label(
+      cx, empty_out_symbol, bar_type, dst_label.value.span)
+
+    local full_in_symbol = terralib.newsymbol(
+      bar_type, "full_in_" .. tostring(dst_label.value.value))
+    full_in = make_variable_label(
+      cx, full_in_symbol, bar_type, dst_label.value.span)
+
+    local full_out_symbol = terralib.newsymbol(
+      bar_type, "full_out_" .. tostring(dst_label.value.value))
+    full_out = make_variable_label(
+      cx, full_out_symbol, bar_type, dst_label.value.span)
+
     barriers[src_type][dst_type][src_label.field_path] = data.newtuple(
-      empty_barrier, full_barrier)
+      empty_in, empty_out, full_in, full_out)
   end
 
-  local empty_in_nid = cx.graph:add_node(empty_barrier)
-  local empty_out_nid = cx.graph:add_node(empty_barrier)
-  local full_in_nid = cx.graph:add_node(full_barrier)
-  local full_out_nid = cx.graph:add_node(full_barrier)
+  local empty_in_nid = cx.graph:add_node(empty_in)
+  local empty_out_nid = cx.graph:add_node(empty_out)
+  local full_in_nid = cx.graph:add_node(full_in)
+  local full_out_nid = cx.graph:add_node(full_out)
 
   cx.graph:add_edge(
     flow.edge.Await {},
@@ -998,20 +1022,37 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
   for lhs_type, b1 in barriers:items() do
     for rhs_type, b2 in b1:items() do
       for field_path, barrier_labels in b2:items() do
-        local barrier_empty, barrier_full = unpack(barrier_labels)
-        local empty_type = std.as_read(barrier_empty.value.expr_type)
-        local empty_region = barrier_empty.region_type
-        local empty_parent = build_slice(
-          cx, empty_region, empty_type, index_nid, index_label,
+        local empty_in, empty_out, full_in, full_out = unpack(barrier_labels)
+
+        local empty_in_type = std.as_read(empty_in.value.expr_type)
+        local empty_in_region = empty_in.region_type
+        local empty_in_parent = build_slice(
+          cx, empty_in_region, empty_in_type, index_nid, index_label,
           stride_nid, stride_label, bounds_type, slice_mapping)
-        local full_type = std.as_read(barrier_full.value.expr_type)
-        local full_region = barrier_full.region_type
-        local full_parent = build_slice(
-          cx, full_region, full_type, index_nid, index_label,
+
+        local empty_out_type = std.as_read(empty_out.value.expr_type)
+        local empty_out_region = empty_out.region_type
+        local empty_out_parent = build_slice(
+          cx, empty_out_region, empty_out_type, index_nid, index_label,
           stride_nid, stride_label, bounds_type, slice_mapping)
-        assert(empty_parent and full_parent)
+
+        local full_in_type = std.as_read(full_in.value.expr_type)
+        local full_in_region = full_in.region_type
+        local full_in_parent = build_slice(
+          cx, full_in_region, full_in_type, index_nid, index_label,
+          stride_nid, stride_label, bounds_type, slice_mapping)
+
+        local full_out_type = std.as_read(full_out.value.expr_type)
+        local full_out_region = full_out.region_type
+        local full_out_parent = build_slice(
+          cx, full_out_region, full_out_type, index_nid, index_label,
+          stride_nid, stride_label, bounds_type, slice_mapping)
+
+        assert(empty_in_parent and empty_out_parent and
+                 full_in_parent and full_out_parent)
         parent_barriers[slice_mapping[lhs_type]][slice_mapping[rhs_type]][
-          field_path] = data.newtuple(empty_parent, full_parent)
+          field_path] = data.newtuple(empty_in_parent, empty_out_parent,
+                                      full_in_parent, full_out_parent)
       end
     end
   end
@@ -1086,7 +1127,8 @@ end
 
 local function find_nid_mapping(cx, old_loop, new_loop,
                                 intersection_types,
-                                barriers_empty, barriers_full, mapping)
+                                barriers_empty_in, barriers_empty_out,
+                                barriers_full_in, barriers_full_out, mapping)
   local function matches(new_label)
     return function(nid, label)
       if label:is(flow.node.data) then
@@ -1115,8 +1157,10 @@ local function find_nid_mapping(cx, old_loop, new_loop,
         matches(new_input), old_loop)
       if not old_input_nid then
         assert(intersection_types[new_input.region_type] or
-                 barriers_empty[new_input.region_type] or
-                 barriers_full[new_input.region_type])
+                 barriers_empty_in[new_input.region_type] or
+                 barriers_empty_out[new_input.region_type] or
+                 barriers_full_in[new_input.region_type] or
+                 barriers_full_out[new_input.region_type])
         -- Skip intersections and phase barriers.
       else
         input_nid_mapping[new_input.region_type][new_input.field_path][
@@ -1134,8 +1178,10 @@ local function find_nid_mapping(cx, old_loop, new_loop,
         matches(new_output), old_loop)
       if not old_output_nid then
         assert(intersection_types[new_output.region_type] or
-                 barriers_empty[new_output.region_type] or
-                 barriers_full[new_output.region_type])
+                 barriers_empty_in[new_output.region_type] or
+                 barriers_empty_out[new_output.region_type] or
+                 barriers_full_in[new_output.region_type] or
+                 barriers_full_out[new_output.region_type])
         -- Skip intersections and phase barriers.
       else
         output_nid_mapping[new_output.region_type][new_output.field_path][
@@ -1441,12 +1487,12 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
   local block_opened_nids = data.newmap()
   local block_opened_i_before_nids = data.newmap()
   local block_opened_i_after_nids = data.newmap()
-  for field_path, old_nid in old_nids:items() do
-    local old_label = cx.graph:node_label(old_nid)
-    block_opened_nids[field_path] = block_cx.graph:add_node(old_label)
+  for field_path, opened_nid in opened_nids:items() do
+    local opened_label = cx.graph:node_label(opened_nid)
+    block_opened_nids[field_path] = block_cx.graph:add_node(opened_label)
 
-    local block_opened_i = flow.node.data.Region(old_label) {
-      value = old_label.value {
+    local block_opened_i = flow.node.data.Region(opened_label) {
+      value = opened_label.value {
         value = terralib.newsymbol(block_opened_i_type),
         expr_type = block_opened_i_type,
       },
@@ -1538,6 +1584,57 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
       block_opened_i_after_nid,
       block_cx.graph:node_result_port(block_opened_i_after_nid))
   end
+end
+
+local function issue_intersection_creation(cx, intersection_nids,
+                                           lhs_nid, rhs_nid)
+  local first_intersection = cx.graph:node_label(intersection_nids[1])
+  local lhs = cx.graph:node_label(lhs_nid)
+  local rhs = cx.graph:node_label(rhs_nid)
+
+  local cross_product = flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({
+          first_intersection.value.value,
+      }),
+      types = terralib.newlist({
+          first_intersection.region_type,
+      }),
+      values = terralib.newlist({
+          ast.typed.expr.ListCrossProduct {
+            lhs = lhs.value,
+            rhs = rhs.value,
+            expr_type = std.as_read(first_intersection.value.expr_type),
+            options = ast.default_options(),
+            span = first_intersection.value.span,
+          },
+      }),
+      options = ast.default_options(),
+      span = first_intersection.value.span,
+    }
+  }
+  local cross_product_nid = cx.graph:add_node(cross_product)
+  cx.graph:add_edge(
+    flow.edge.None {}, lhs_nid, cx.graph:node_result_port(lhs_nid),
+    cross_product_nid, cx.graph:node_available_port(cross_product_nid))
+  cx.graph:add_edge(
+    flow.edge.None {}, rhs_nid, cx.graph:node_result_port(rhs_nid),
+    cross_product_nid, cx.graph:node_available_port(cross_product_nid))
+  for _, intersection_nid in ipairs(intersection_nids) do
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {},
+      cross_product_nid, cx.graph:node_sync_port(cross_product_nid),
+      intersection_nid, cx.graph:node_sync_port(intersection_nid))
+  end
+end
+
+local function issue_barrier_creation(cx, intersection_nid,
+                                      barrier_in_nid, barrier_out_nid)
+  local intersection = cx.graph:node_label(intersection_nid)
+  local barrier_in = cx.graph:node_label(barrier_in_nid)
+  local barrier_out = cx.graph:node_label(barrier_out_nid)
+
+  assert(false)
 end
 
 local function merge_open_nids(cx)
@@ -1640,30 +1737,40 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   end
   print("intersections", intersection_types)
 
-  local barriers_empty = data.newmap()
-  local barriers_full = data.newmap()
+  local barriers_empty_in = data.newmap()
+  local barriers_empty_out = data.newmap()
+  local barriers_full_in = data.newmap()
+  local barriers_full_out = data.newmap()
   for lhs_type, b1 in barriers:items() do
     for rhs_type, b2 in b1:items() do
       for field_path, barrier_labels in b2:items() do
-        local barrier_empty, barrier_full = unpack(barrier_labels)
-        barriers_empty[barrier_empty.region_type] = data.newtuple(
+        local empty_in, empty_out, full_in, full_out = unpack(barrier_labels)
+        barriers_empty_in[empty_in.region_type] = data.newtuple(
           lhs_type, rhs_type, field_path)
-        barriers_full[barrier_full.region_type] = data.newtuple(
+        barriers_empty_out[empty_out.region_type] = data.newtuple(
+          lhs_type, rhs_type, field_path)
+        barriers_full_in[full_in.region_type] = data.newtuple(
+          lhs_type, rhs_type, field_path)
+        barriers_full_out[full_out.region_type] = data.newtuple(
           lhs_type, rhs_type, field_path)
       end
     end
   end
-  print("empty", barriers_empty)
-  print("full", barriers_full)
+  print("empty_in", barriers_empty_in)
+  print("empty_out", barriers_empty_out)
+  print("full_in", barriers_full_in)
+  print("full_out", barriers_full_out)
 
   -- Find mapping from old to new inputs.
   local input_nid_mapping, output_nid_mapping = find_nid_mapping(
-    cx, old_loop, new_loop, intersection_types, barriers_empty, barriers_full,
+    cx, old_loop, new_loop, intersection_types,
+    barriers_empty_in, barriers_empty_out, barriers_full_in, barriers_full_out,
     mapping)
 
   print("input_nid_mapping", input_nid_mapping)
   print("output_nid_mapping", output_nid_mapping)
 
+  -- Rewrite inputs.
   local closed_nids = data.new_recursive_map(1)
   local copy_nids = data.newmap()
   for region_type, region_fields in input_nid_mapping:items() do
@@ -1718,6 +1825,49 @@ local function rewrite_inputs(cx, old_loop, new_loop,
         closed_nids, copy_nids)
     end
   end
+
+  -- Rewrite intersections.
+  for intersection_type, list_types in intersection_types:items() do
+    local lhs_type, rhs_type = unpack(list_types)
+    local intersection_nids = find_matching_inputs(
+      cx, new_loop, intersection_type)
+    local lhs_nid = find_matching_input(cx, new_loop, lhs_type)
+    local rhs_nid = find_matching_input(cx, new_loop, rhs_type)
+    assert(#intersection_nids > 0 and lhs_nid and rhs_nid)
+    issue_intersection_creation(cx, intersection_nids, lhs_nid, rhs_nid)
+  end
+
+  -- Rewrite barriers.
+  for lhs_type, b1 in barriers:items() do
+    for rhs_type, b2 in b1:items() do
+      for field_path, barrier_labels in b2:items() do
+        local empty_in, empty_out, full_in, full_out = unpack(barrier_labels)
+
+        local intersection_type = intersections[lhs_type][rhs_type].region_type
+        local intersection_nid = find_matching_input(
+          cx, new_loop, intersection_type)
+
+        local empty_in_nid = find_matching_input(
+          cx, new_loop, empty_in.region_type)
+        local empty_out_nid = find_matching_input(
+          cx, new_loop, empty_out.region_type)
+        local full_in_nid = find_matching_input(
+          cx, new_loop, full_in.region_type)
+        local full_out_nid = find_matching_input(
+          cx, new_loop, full_out.region_type)
+
+        assert(intersection_nid and empty_in_nid and empty_out_nid and
+                 full_in_nid and full_out_nid)
+
+        issue_barrier_creation(
+          cx, intersection_nid, empty_in_nid, empty_out_nid)
+        issue_barrier_creation(
+          cx, intersection_nid, full_in_nid, full_out_nid)
+      end
+    end
+  end
+
+  assert(false)
 
   -- Merge open and close nodes for racing copies.
 
