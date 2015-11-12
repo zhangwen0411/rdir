@@ -596,11 +596,15 @@ end
 
 function flow_to_ast.node_data(cx, nid)
   local label = cx.graph:node_label(nid)
-  if label:is(flow.node.data.Scalar) then
-    return flow_to_ast.node_data_scalar(cx, nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  if label:is(flow.node.data.Scalar) and label.fresh then
+    assert(rawget(inputs, 0) and #inputs[0] == 1)
+    if #(cx.graph:outgoing_use_set(nid)) > 0 then
+      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+    end
+    return terralib.newlist()
   end
 
-  local inputs = cx.graph:incoming_edges_by_port(nid)
   for _, edges in pairs(inputs) do
     for _, edge in ipairs(edges) do
       if edge.label:is(flow.edge.Name) then
@@ -619,20 +623,6 @@ function flow_to_ast.node_data(cx, nid)
     cx.ast[nid] = cx.region_ast[label.value.expr_type]
   else
     cx.ast[nid] = label.value
-  end
-  return terralib.newlist()
-end
-
-function flow_to_ast.node_data_scalar(cx, nid)
-  local label = cx.graph:node_label(nid)
-  if label.fresh then
-    local inputs = cx.graph:incoming_edges_by_port(nid)
-    assert(rawget(inputs, 0) and #inputs[0] == 1)
-    if #(cx.graph:outgoing_use_set(nid)) > 0 then
-      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
-    end
-  else
-    cx.ast[nid] = cx.graph:node_label(nid).value
   end
   return terralib.newlist()
 end

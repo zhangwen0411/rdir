@@ -374,7 +374,6 @@ local function normalize_communication(cx, shard_loop)
       local result_nids = block_cx.graph:immediate_successors(open_nid)
       for _, result_nid in ipairs(result_nids) do
         assert(block_cx.graph:node_label(result_nid):is(flow.node.data))
-        print("attempting replace", result_nid, open_nid, close_nid)
         block_cx.graph:replace_edges(result_nid, open_nid, close_nid)
       end
     end
@@ -389,7 +388,6 @@ local function normalize_communication(cx, shard_loop)
   local versions = compute_version_numbers(block_cx)
   for _, close_nid in ipairs(close_nids) do
     local result_nids = block_cx.graph:immediate_successors(close_nid)
-    print("for close", close_nid, "results", result_nids:mkstring(" "))
     local versions_changed = 0
     for _, result_nid in ipairs(result_nids) do
       local result_label = block_cx.graph:node_label(result_nid)
@@ -571,7 +569,8 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
     local intersection_type = std.list(std.list(dst_type:subregion_dynamic()))
     local intersection_symbol = terralib.newsymbol(
       intersection_type,
-      "intersection_" .. tostring(dst_label.value.value.displayname))
+      "intersection_" .. tostring(src_label.value.value) .. "_" ..
+        tostring(dst_label.value.value))
     intersection_label = dst_label {
       value = dst_label.value {
         value = intersection_symbol,
@@ -847,13 +846,13 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
 
     local parent_list_symbol = terralib.newsymbol(
       parent_list_type,
-      label.value.value.displayname)
+      "parent_" .. tostring(label.value.value))
     return parent_list_type, parent_list_type, parent_list_symbol
   else
     local parent_list_type = std.rawref(&list_type)
     local parent_list_symbol = terralib.newsymbol(
       parent_list_type,
-      label.value.value.displayname)
+      "parent_" .. tostring(label.value.value))
     local parent_list_region = cx.tree:intern_variable(
       parent_list_type, parent_list_symbol,
       ast.default_options(), label.value.span)
@@ -926,13 +925,13 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
       cx.graph:add_edge(
         flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
         compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-      cx.graph:add_edge(
-        flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
-        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-      cx.graph:add_edge(
-        flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
-        compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     end
+    cx.graph:add_edge(
+      flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
+      compute_list_nid, cx.graph:node_available_port(compute_list_nid))
+    cx.graph:add_edge(
+      flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+      compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     return first_parent_list
   end
 end
@@ -1628,13 +1627,78 @@ local function issue_intersection_creation(cx, intersection_nids,
   end
 end
 
-local function issue_barrier_creation(cx, intersection_nid,
+local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
                                       barrier_in_nid, barrier_out_nid)
+  local rhs = cx.graph:node_label(rhs_nid)
   local intersection = cx.graph:node_label(intersection_nid)
   local barrier_in = cx.graph:node_label(barrier_in_nid)
   local barrier_out = cx.graph:node_label(barrier_out_nid)
 
-  assert(false)
+  local list_barriers = flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({
+          barrier_in.value.value,
+      }),
+      types = terralib.newlist({
+          std.as_read(barrier_in.value.expr_type),
+      }),
+      values = terralib.newlist({
+          ast.typed.expr.ListPhaseBarriers {
+            product = intersection.value,
+            expr_type = std.as_read(barrier_in.value.expr_type),
+            options = ast.default_options(),
+            span = barrier_in.value.span,
+          },
+      }),
+      options = ast.default_options(),
+      span = barrier_in.value.span,
+    }
+  }
+  local list_barriers_nid = cx.graph:add_node(list_barriers)
+  cx.graph:add_edge(
+    flow.edge.None {}, intersection_nid, cx.graph:node_result_port(intersection_nid),
+    list_barriers_nid, cx.graph:node_available_port(list_barriers_nid))
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    list_barriers_nid, cx.graph:node_sync_port(list_barriers_nid),
+    barrier_in_nid, cx.graph:node_sync_port(barrier_in_nid))
+
+  local list_invert = flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({
+          barrier_out.value.value,
+      }),
+      types = terralib.newlist({
+          std.as_read(barrier_out.value.expr_type),
+      }),
+      values = terralib.newlist({
+          ast.typed.expr.ListInvert {
+            rhs = rhs.value,
+            product = intersection.value,
+            barriers = barrier_in.value,
+            expr_type = std.as_read(barrier_out.value.expr_type),
+            options = ast.default_options(),
+            span = barrier_out.value.span,
+          },
+      }),
+      options = ast.default_options(),
+      span = barrier_out.value.span,
+    }
+  }
+  local list_invert_nid = cx.graph:add_node(list_invert)
+  cx.graph:add_edge(
+    flow.edge.None {}, rhs_nid, cx.graph:node_result_port(rhs_nid),
+    list_invert_nid, cx.graph:node_available_port(list_invert_nid))
+  cx.graph:add_edge(
+    flow.edge.None {}, intersection_nid, cx.graph:node_result_port(intersection_nid),
+    list_invert_nid, cx.graph:node_available_port(list_invert_nid))
+  cx.graph:add_edge(
+    flow.edge.Read {}, barrier_in_nid, cx.graph:node_result_port(barrier_in_nid),
+    list_invert_nid, cx.graph:node_available_port(list_invert_nid))
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    list_invert_nid, cx.graph:node_sync_port(list_invert_nid),
+    barrier_out_nid, cx.graph:node_sync_port(barrier_out_nid))
 end
 
 local function merge_open_nids(cx)
@@ -1715,11 +1779,6 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   --  3. Merge open and close nodes for racing copies.
   --  4. Copy happens-before edges for the loop node itself.
 
-  print("mapping")
-  for k, v in pairs(mapping) do
-    print("", k, v)
-  end
-
   -- Compute more useful indexes for intersections and phase barriers.
   local partitions = data.new_recursive_map(1)
   for old_type, labels in original_partitions:items() do
@@ -1735,7 +1794,6 @@ local function rewrite_inputs(cx, old_loop, new_loop,
         lhs_type, rhs_type)
     end
   end
-  print("intersections", intersection_types)
 
   local barriers_empty_in = data.newmap()
   local barriers_empty_out = data.newmap()
@@ -1756,19 +1814,12 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       end
     end
   end
-  print("empty_in", barriers_empty_in)
-  print("empty_out", barriers_empty_out)
-  print("full_in", barriers_full_in)
-  print("full_out", barriers_full_out)
 
   -- Find mapping from old to new inputs.
   local input_nid_mapping, output_nid_mapping = find_nid_mapping(
     cx, old_loop, new_loop, intersection_types,
     barriers_empty_in, barriers_empty_out, barriers_full_in, barriers_full_out,
     mapping)
-
-  print("input_nid_mapping", input_nid_mapping)
-  print("output_nid_mapping", output_nid_mapping)
 
   -- Rewrite inputs.
   local closed_nids = data.new_recursive_map(1)
@@ -1787,8 +1838,6 @@ local function rewrite_inputs(cx, old_loop, new_loop,
         then
           need_copy[field_path][old_nid] = new_nid
         else
-          print(old_label)
-          print(new_label)
           assert(false)
         end
       end
@@ -1843,6 +1892,8 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       for field_path, barrier_labels in b2:items() do
         local empty_in, empty_out, full_in, full_out = unpack(barrier_labels)
 
+        local rhs_nid = find_matching_input(cx, new_loop, rhs_type)
+
         local intersection_type = intersections[lhs_type][rhs_type].region_type
         local intersection_nid = find_matching_input(
           cx, new_loop, intersection_type)
@@ -1860,14 +1911,12 @@ local function rewrite_inputs(cx, old_loop, new_loop,
                  full_in_nid and full_out_nid)
 
         issue_barrier_creation(
-          cx, intersection_nid, empty_in_nid, empty_out_nid)
+          cx, rhs_nid, intersection_nid, empty_in_nid, empty_out_nid)
         issue_barrier_creation(
-          cx, intersection_nid, full_in_nid, full_out_nid)
+          cx, rhs_nid, intersection_nid, full_in_nid, full_out_nid)
       end
     end
   end
-
-  assert(false)
 
   -- Merge open and close nodes for racing copies.
 
@@ -1932,10 +1981,6 @@ local function spmdize(cx, loop)
   local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
-  print("slice_mapping")
-  for k, v in pairs(slice_mapping) do
-    print("", k, v)
-  end
   rewrite_inputs(cx, loop, epoch_task, original_partitions, original_bounds,
                  new_intersections, new_barriers, inputs_mapping)
 
