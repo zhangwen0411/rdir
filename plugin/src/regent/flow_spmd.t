@@ -620,6 +620,36 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   return copy_nid
 end
 
+local function issue_barrier_advance(cx, v0_nid)
+  local v0 = cx.graph:node_label(v0_nid)
+  local v1_nid = cx.graph:add_node(v0)
+
+  local advance = flow.node.Opaque {
+    action = ast.typed.stat.Assignment {
+      lhs = terralib.newlist({v0.value}),
+      rhs = terralib.newlist({
+          ast.typed.expr.Advance {
+            value = v0.value,
+            expr_type = std.as_read(v0.value.expr_type),
+            options = ast.default_options(),
+            span = v0.value.span,
+          },
+      }),
+      options = ast.default_options(),
+      span = v0.value.span,
+    },
+  }
+  local advance_nid = cx.graph:add_node(advance)
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {}, v0_nid, cx.graph:node_sync_port(v0_nid),
+    advance_nid, cx.graph:node_sync_port(advance_nid))
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    advance_nid, cx.graph:node_sync_port(advance_nid),
+    v1_nid, cx.graph:node_sync_port(v1_nid))
+  return v1_nid
+end
+
 local function issue_intersection_copy_synchronization(
     cx, src_nid, dst_in_nid, dst_out_nid, copy_nid, barriers)
   local src_label = cx.graph:node_label(src_nid)
@@ -660,24 +690,28 @@ local function issue_intersection_copy_synchronization(
       empty_in, empty_out, full_in, full_out)
   end
 
-  local empty_in_nid = cx.graph:add_node(empty_in)
-  local empty_out_nid = cx.graph:add_node(empty_out)
-  local full_in_nid = cx.graph:add_node(full_in)
-  local full_out_nid = cx.graph:add_node(full_out)
+  local empty_in_v0_nid = cx.graph:add_node(empty_in)
+  local empty_out_v0_nid = cx.graph:add_node(empty_out)
+  local full_in_v0_nid = cx.graph:add_node(full_in)
+  local full_out_v0_nid = cx.graph:add_node(full_out)
+  local empty_in_v1_nid = issue_barrier_advance(cx, empty_in_v0_nid)
+  local empty_out_v1_nid = issue_barrier_advance(cx, empty_out_v0_nid)
+  local full_in_v1_nid = issue_barrier_advance(cx, full_in_v0_nid)
+  local full_out_v1_nid = issue_barrier_advance(cx, full_out_v0_nid)
 
   cx.graph:add_edge(
     flow.edge.Await {},
-    empty_out_nid, cx.graph:node_available_port(empty_out_nid),
+    empty_out_v0_nid, cx.graph:node_available_port(empty_out_v0_nid),
     copy_nid, cx.graph:node_available_port(copy_nid))
   cx.graph:add_edge(
     flow.edge.Arrive {}, copy_nid, cx.graph:node_available_port(copy_nid),
-    full_out_nid, cx.graph:node_available_port(full_out_nid))
+    full_out_v0_nid, cx.graph:node_available_port(full_out_v0_nid))
 
   local consumer_nids = cx.graph:immediate_successors(dst_out_nid)
   for _, consumer_nid in ipairs(consumer_nids) do
     cx.graph:add_edge(
       flow.edge.Await {},
-      full_in_nid, cx.graph:node_available_port(full_in_nid),
+      full_in_v1_nid, cx.graph:node_available_port(full_in_v1_nid),
       consumer_nid, cx.graph:node_available_port(consumer_nid))
   end
 
@@ -698,7 +732,7 @@ local function issue_intersection_copy_synchronization(
   cx.graph:add_edge(
     flow.edge.Arrive {},
     producer_nid, cx.graph:node_available_port(producer_nid),
-    empty_in_nid, cx.graph:node_available_port(empty_in_nid))
+    empty_in_v0_nid, cx.graph:node_available_port(empty_in_v0_nid))
 
   print("FIXME: need to push phase barriers down into loops")
 end
