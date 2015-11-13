@@ -566,7 +566,8 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   if intersections[src_type][dst_type] then
     intersection_label = intersections[src_type][dst_type]
   else
-    local intersection_type = std.list(std.list(dst_type:subregion_dynamic()))
+    local intersection_type = std.list(
+      std.list(dst_type:subregion_dynamic(), nil, 1), nil, 1)
     local intersection_symbol = terralib.newsymbol(
       intersection_type,
       "intersection_" .. tostring(src_label.value.value) .. "_" ..
