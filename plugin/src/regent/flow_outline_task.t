@@ -274,7 +274,7 @@ local function add_task_arg(cx, call_nid, task)
   }
   local nid = cx.graph:add_node(label)
   cx.graph:add_edge(
-    flow.edge.Read {}, nid, cx.graph:node_result_port(nid), call_nid, 1)
+    flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid), call_nid, 1)
 end
 
 local function copy_args(cx, original_nid, call_nid)

@@ -790,18 +790,43 @@ flow.node:leaf("Constant", {"value"})
 flow.node:leaf("Function", {"value"})
 
 -- Dataflow Graph: Edges
+flow:inner("coherence_kind")
+flow.coherence_kind:leaf("Exclusive")
+flow.coherence_kind:leaf("Atomic")
+flow.coherence_kind:leaf("Simultaneous")
+flow.coherence_kind:leaf("Relaxed")
+
+flow:inner("flag_kind", {})
+flow.flag_kind:leaf("NoFlag")
+flow.flag_kind:leaf("NoAccessFlag")
+
 flow:inner("edge")
 
 flow.edge:leaf("HappensBefore", {})
 flow.edge:leaf("Name", {})
 
-flow.edge:leaf("None", {})
-flow.edge:leaf("Read", {})
-flow.edge:leaf("Discard", {})
-flow.edge:leaf("Write", {})
-flow.edge:leaf("Reduce", {"op"})
+flow.edge:leaf("None", {"coherence", "flag"})
+flow.edge:leaf("Read", {"coherence", "flag"})
+flow.edge:leaf("Discard", {"coherence", "flag"})
+flow.edge:leaf("Write", {"coherence", "flag"})
+flow.edge:leaf("Reduce", {"coherence", "flag", "op"})
 
 flow.edge:leaf("Await", {})
 flow.edge:leaf("Arrive", {})
+
+function flow.default_coherence()
+  return flow.coherence_kind.Exclusive {}
+end
+
+function flow.default_flag()
+  return flow.flag_kind.NoFlag {}
+end
+
+function flow.default_mode()
+  return {
+    coherence = flow.coherence_kind.Exclusive {},
+    flag = flow.flag_kind.NoFlag {},
+  }
+end
 
 return flow

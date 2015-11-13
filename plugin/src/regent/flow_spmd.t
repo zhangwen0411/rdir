@@ -608,14 +608,14 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   local copy_nid = cx.graph:add_node(copy)
 
   cx.graph:add_edge(
-    flow.edge.Read {}, src_nid, cx.graph:node_result_port(src_nid),
+    flow.edge.Read(flow.default_mode()), src_nid, cx.graph:node_result_port(src_nid),
     copy_nid, 1)
   cx.graph:add_edge(
-    flow.edge.Read {},
+    flow.edge.Read(flow.default_mode()),
     intersection_in_nid, cx.graph:node_result_port(intersection_in_nid),
     copy_nid, 2)
   cx.graph:add_edge(
-    flow.edge.Write {}, copy_nid, 2,
+    flow.edge.Write(flow.default_mode()), copy_nid, 2,
     intersection_out_nid, cx.graph:node_result_port(intersection_out_nid))
 
   return copy_nid
@@ -770,10 +770,10 @@ local function rewrite_communication(cx, shard_loop)
       local out_nid = cx.graph:add_node(list)
       local port = cx.graph:node_available_port(shard_loop)
       cx.graph:add_edge(
-        flow.edge.Read {}, in_nid, cx.graph:node_result_port(in_nid),
+        flow.edge.Read(flow.default_mode()), in_nid, cx.graph:node_result_port(in_nid),
         shard_loop, port)
       cx.graph:add_edge(
-        flow.edge.Write {}, shard_loop, port,
+        flow.edge.Write(flow.default_mode()), shard_loop, port,
         out_nid, cx.graph:node_available_port(out_nid))
     end
   end
@@ -785,7 +785,7 @@ local function rewrite_communication(cx, shard_loop)
         for _, barrier in ipairs(b3) do
           local nid = cx.graph:add_node(barrier)
           cx.graph:add_edge(
-            flow.edge.Read {}, nid, cx.graph:node_result_port(nid),
+            flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid),
             shard_loop, cx.graph:node_available_port(shard_loop))
         end
       end
@@ -858,7 +858,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
 
   for _, nid in ipairs(shard_bounds) do
     cx.graph:add_edge(
-      flow.edge.Read {}, nid, cx.graph:node_result_port(nid),
+      flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid),
       shard_loop, cx.graph:node_available_port(shard_loop))
   end
 
@@ -958,14 +958,14 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
         compute_list_nid, cx.graph:node_result_port(compute_list_nid),
         list_nid, 1)
       cx.graph:add_edge(
-        flow.edge.None {}, parent_nid, cx.graph:node_result_port(parent_nid),
+        flow.edge.None(flow.default_mode()), parent_nid, cx.graph:node_result_port(parent_nid),
         compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     end
     cx.graph:add_edge(
-      flow.edge.Read {}, index_nid, cx.graph:node_result_port(index_nid),
+      flow.edge.Read(flow.default_mode()), index_nid, cx.graph:node_result_port(index_nid),
       compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     cx.graph:add_edge(
-      flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+      flow.edge.Read(flow.default_mode()), stride_nid, cx.graph:node_result_port(stride_nid),
       compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     return first_parent_list
   end
@@ -1021,7 +1021,7 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
       bound_nid, cx.graph:node_sync_port(bound_nid))
   end
   cx.graph:add_edge(
-    flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+    flow.edge.Read(flow.default_mode()), stride_nid, cx.graph:node_result_port(stride_nid),
     compute_bounds_nid, 1)
 
   -- Kill local bounds in the slice mapping.
@@ -1123,7 +1123,7 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
         bound_nid = cx.graph:add_node(bound)
       end
       cx.graph:add_edge(
-        flow.edge.Read {}, bound_nid, cx.graph:node_result_port(bound_nid),
+        flow.edge.Read(flow.default_mode()), bound_nid, cx.graph:node_result_port(bound_nid),
         nid, i)
     end)
 
@@ -1131,7 +1131,7 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
   if shard_stride:is(flow.node.Constant) then
     local stride_nid = cx.graph:add_node(shard_stride)
     cx.graph:add_edge(
-      flow.edge.Read {}, stride_nid, cx.graph:node_result_port(stride_nid),
+      flow.edge.Read(flow.default_mode()), stride_nid, cx.graph:node_result_port(stride_nid),
       nid, 3)
   else
     assert(false)
@@ -1338,7 +1338,7 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
   local duplicate_port = cx.graph:node_available_port(duplicate_nid)
   for field_path, partition_nid in partition_nids:items() do
     cx.graph:add_edge(
-      flow.edge.None {}, partition_nid, cx.graph:node_result_port(),
+      flow.edge.None(flow.default_mode()), partition_nid, cx.graph:node_result_port(),
       duplicate_nid, duplicate_port)
   end
   for field_path, name_nid in name_nids:items() do
@@ -1354,10 +1354,10 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
     if not cx.graph:node_label(old_nid):is(flow.node.data.Region) then
       local close_nid = cx.graph:add_node(flow.node.Close {})
       cx.graph:add_edge(
-        flow.edge.Read {}, old_nid, cx.graph:node_result_port(old_nid),
+        flow.edge.Read(flow.default_mode()), old_nid, cx.graph:node_result_port(old_nid),
         close_nid, cx.graph:node_available_port(close_nid))
       cx.graph:add_edge(
-        flow.edge.Write {}, close_nid, cx.graph:node_result_port(close_nid),
+        flow.edge.Write(flow.default_mode()), close_nid, cx.graph:node_result_port(close_nid),
         closed_nid, cx.graph:node_available_port(closed_nid))
     end
   end
@@ -1376,16 +1376,16 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
 
   for field_path, closed_nid in closed_nids[region_type]:items() do
     cx.graph:add_edge(
-      flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
+      flow.edge.Read(flow.default_mode()), closed_nid, cx.graph:node_result_port(closed_nid),
       copy_nid, 1)
   end
   for field_path, name_nid in name_nids:items() do
     local new_nid = new_nids[field_path]
     cx.graph:add_edge(
-      flow.edge.Read {}, name_nid, cx.graph:node_result_port(name_nid),
+      flow.edge.Read(flow.default_mode()), name_nid, cx.graph:node_result_port(name_nid),
       copy_nid, 2)
     cx.graph:add_edge(
-      flow.edge.Write {}, copy_nid, 2,
+      flow.edge.Write(flow.default_mode()), copy_nid, 2,
       new_nid, cx.graph:node_result_port(new_nid))
   end
 end
@@ -1412,10 +1412,10 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
     local open_nid = cx.graph:add_node(flow.node.Open {})
     open_nids[field_path] = open_nid
     cx.graph:add_edge(
-      flow.edge.Read {}, closed_nid, cx.graph:node_result_port(closed_nid),
+      flow.edge.Read(flow.default_mode()), closed_nid, cx.graph:node_result_port(closed_nid),
       open_nid, cx.graph:node_available_port(open_nid))
     cx.graph:add_edge(
-      flow.edge.Write {}, open_nid, cx.graph:node_result_port(open_nid),
+      flow.edge.Write(flow.default_mode()), open_nid, cx.graph:node_result_port(open_nid),
       opened_nid, cx.graph:node_available_port(opened_nid))
   end
 
@@ -1455,27 +1455,27 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
   local original_bound1_nid = cx.graph:add_node(original_bounds[1])
   local original_bound2_nid = cx.graph:add_node(original_bounds[2])
   cx.graph:add_edge(
-    flow.edge.Read {}, original_bound1_nid,
+    flow.edge.Read(flow.default_mode()), original_bound1_nid,
     cx.graph:node_result_port(original_bound1_nid),
     copy_loop_nid, 1)
   cx.graph:add_edge(
-    flow.edge.Read {}, original_bound2_nid,
+    flow.edge.Read(flow.default_mode()), original_bound2_nid,
     cx.graph:node_result_port(original_bound2_nid),
     copy_loop_nid, 2)
   local copy_loop_new_port = cx.graph:node_available_port(copy_loop_nid)
   for field_path, new_nid in new_nids:items() do
     cx.graph:add_edge(
-      flow.edge.Read {}, new_nid, cx.graph:node_result_port(new_nid),
+      flow.edge.Read(flow.default_mode()), new_nid, cx.graph:node_result_port(new_nid),
       copy_loop_nid, copy_loop_new_port)
   end
   local copy_loop_opened_port = cx.graph:node_available_port(copy_loop_nid)
   for field_path, opened_nid in opened_nids:items() do
     local target_nid = target_nids[field_path]
     cx.graph:add_edge(
-      flow.edge.Read {}, opened_nid, cx.graph:node_result_port(opened_nid),
+      flow.edge.Read(flow.default_mode()), opened_nid, cx.graph:node_result_port(opened_nid),
       copy_loop_nid, copy_loop_opened_port)
     cx.graph:add_edge(
-      flow.edge.Write {}, copy_loop_nid, copy_loop_opened_port,
+      flow.edge.Write(flow.default_mode()), copy_loop_nid, copy_loop_opened_port,
       target_nid, cx.graph:node_available_port(target_nid))
   end
 
@@ -1485,10 +1485,10 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
     if target_nid ~= old_nid then
       local close_nid = cx.graph:add_node(flow.node.Close {})
       cx.graph:add_edge(
-        flow.edge.Read {}, target_nid, cx.graph:node_result_port(target_nid),
+        flow.edge.Read(flow.default_mode()), target_nid, cx.graph:node_result_port(target_nid),
         close_nid, cx.graph:node_available_port(close_nid))
       cx.graph:add_edge(
-        flow.edge.Write {}, close_nid, cx.graph:node_available_port(close_nid),
+        flow.edge.Write(flow.default_mode()), close_nid, cx.graph:node_available_port(close_nid),
         old_nid, cx.graph:node_available_port(old_nid))
     end
   end
@@ -1545,12 +1545,12 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
     })
   for field_path, block_new_nid in block_new_nids:items() do
     block_cx.graph:add_edge(
-      flow.edge.None {},
+      flow.edge.None(flow.default_mode()),
       block_new_nid, block_cx.graph:node_result_port(block_new_nid),
       block_index_new_nid, 1)
   end
   block_cx.graph:add_edge(
-    flow.edge.Read {},
+    flow.edge.Read(flow.default_mode()),
     index_nid, block_cx.graph:node_result_port(index_nid),
     block_index_new_nid, 2)
   for field_path, block_new_i_nid in block_new_i_nids:items() do
@@ -1569,12 +1569,12 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
     })
   for field_path, block_opened_nid in block_opened_nids:items() do
     block_cx.graph:add_edge(
-      flow.edge.None {},
+      flow.edge.None(flow.default_mode()),
       block_opened_nid, block_cx.graph:node_result_port(block_opened_nid),
       block_index_opened_nid, 1)
   end
   block_cx.graph:add_edge(
-    flow.edge.Read {},
+    flow.edge.Read(flow.default_mode()),
     index_nid, block_cx.graph:node_result_port(index_nid),
     block_index_opened_nid, 2)
   for field_path, block_opened_i_before_nid in
@@ -1600,7 +1600,7 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
   local block_copy_nid = block_cx.graph:add_node(block_copy)
   for field_path, block_new_i_nid in block_new_i_nids:items() do
     block_cx.graph:add_edge(
-      flow.edge.Read {},
+      flow.edge.Read(flow.default_mode()),
       block_new_i_nid, block_cx.graph:node_result_port(block_new_i_nid),
       block_copy_nid, 1)
   end
@@ -1609,12 +1609,12 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
   do
     local block_opened_i_after_nid = block_opened_i_after_nids[field_path]
     block_cx.graph:add_edge(
-      flow.edge.Read {},
+      flow.edge.Read(flow.default_mode()),
       block_opened_i_before_nid,
       block_cx.graph:node_result_port(block_opened_i_before_nid),
       block_copy_nid, 2)
     block_cx.graph:add_edge(
-      flow.edge.Write {}, block_copy_nid, 2,
+      flow.edge.Write(flow.default_mode()), block_copy_nid, 2,
       block_opened_i_after_nid,
       block_cx.graph:node_result_port(block_opened_i_after_nid))
   end
@@ -1649,10 +1649,10 @@ local function issue_intersection_creation(cx, intersection_nids,
   }
   local cross_product_nid = cx.graph:add_node(cross_product)
   cx.graph:add_edge(
-    flow.edge.None {}, lhs_nid, cx.graph:node_result_port(lhs_nid),
+    flow.edge.None(flow.default_mode()), lhs_nid, cx.graph:node_result_port(lhs_nid),
     cross_product_nid, cx.graph:node_available_port(cross_product_nid))
   cx.graph:add_edge(
-    flow.edge.None {}, rhs_nid, cx.graph:node_result_port(rhs_nid),
+    flow.edge.None(flow.default_mode()), rhs_nid, cx.graph:node_result_port(rhs_nid),
     cross_product_nid, cx.graph:node_available_port(cross_product_nid))
   for _, intersection_nid in ipairs(intersection_nids) do
     cx.graph:add_edge(
@@ -1691,7 +1691,7 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
   }
   local list_barriers_nid = cx.graph:add_node(list_barriers)
   cx.graph:add_edge(
-    flow.edge.None {}, intersection_nid, cx.graph:node_result_port(intersection_nid),
+    flow.edge.None(flow.default_mode()), intersection_nid, cx.graph:node_result_port(intersection_nid),
     list_barriers_nid, cx.graph:node_available_port(list_barriers_nid))
   cx.graph:add_edge(
     flow.edge.HappensBefore {},
@@ -1722,13 +1722,13 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
   }
   local list_invert_nid = cx.graph:add_node(list_invert)
   cx.graph:add_edge(
-    flow.edge.None {}, rhs_nid, cx.graph:node_result_port(rhs_nid),
+    flow.edge.None(flow.default_mode()), rhs_nid, cx.graph:node_result_port(rhs_nid),
     list_invert_nid, cx.graph:node_available_port(list_invert_nid))
   cx.graph:add_edge(
-    flow.edge.None {}, intersection_nid, cx.graph:node_result_port(intersection_nid),
+    flow.edge.None(flow.default_mode()), intersection_nid, cx.graph:node_result_port(intersection_nid),
     list_invert_nid, cx.graph:node_available_port(list_invert_nid))
   cx.graph:add_edge(
-    flow.edge.Read {}, barrier_in_nid, cx.graph:node_result_port(barrier_in_nid),
+    flow.edge.Read(flow.default_mode()), barrier_in_nid, cx.graph:node_result_port(barrier_in_nid),
     list_invert_nid, cx.graph:node_available_port(list_invert_nid))
   cx.graph:add_edge(
     flow.edge.HappensBefore {},

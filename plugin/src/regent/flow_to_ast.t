@@ -78,7 +78,7 @@ local function split_reduction_edges_at_node(cx, nid)
 
     for _, edge in ipairs(reductions) do
       cx.graph:add_edge(
-        flow.edge.None {}, nid_input, cx.graph:node_result_port(nid_input),
+        flow.edge.None(flow.default_mode()), nid_input, cx.graph:node_result_port(nid_input),
         edge.from_node, edge.from_port)
       cx.graph:add_edge(
         edge.label, edge.from_node, edge.from_port, nid_output, edge.to_port)

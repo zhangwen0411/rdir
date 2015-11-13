@@ -118,9 +118,9 @@ local function summarize_subgraph(cx, nid, mapping)
 
       local read_edge_label
       if privilege == "none" then
-        read_edge_label = flow.edge.None {}
+        read_edge_label = flow.edge.None(flow.default_mode())
       elseif privilege == "reads" or privilege == "reads_writes" then
-        read_edge_label = flow.edge.Read {}
+        read_edge_label = flow.edge.Read(flow.default_mode())
       elseif std.is_reduction_op(privilege) then
         -- Skip
       else
@@ -138,7 +138,7 @@ local function summarize_subgraph(cx, nid, mapping)
       if privilege == "none" or privilege == "reads" then
         -- Skip
       elseif privilege == "reads_writes" then
-        write_edge_label = flow.edge.Write {}
+        write_edge_label = flow.edge.Write(flow.default_mode())
       elseif std.is_reduction_op(privilege) then
         write_edge_label = flow.edge.Reduce {
           op = std.reduction_op(privilege),

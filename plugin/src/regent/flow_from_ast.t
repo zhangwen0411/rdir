@@ -331,9 +331,9 @@ local function add_input_edge(cx, from_nid, to_nid, to_port, privilege)
   assert(to_port > 0)
   local label
   if privilege == "none" then
-    label = flow.edge.None {}
+    label = flow.edge.None(flow.default_mode())
   elseif privilege == "reads" or privilege == "reads_writes" then
-    label = flow.edge.Read {}
+    label = flow.edge.Read(flow.default_mode())
   else
     assert(false)
   end
@@ -347,9 +347,13 @@ local function add_output_edge(cx, from_nid, from_port, to_nid, privilege)
   assert(from_port > 0)
   local label
   if privilege == "reads_writes" then
-    label = flow.edge.Write {}
+    label = flow.edge.Write(flow.default_mode())
   elseif std.is_reduction_op(privilege) then
-    label = flow.edge.Reduce { op = std.get_reduction_op(privilege) }
+    label = flow.edge.Reduce {
+      coherence = flow.default_coherence(),
+      flag = flow.default_flag(),
+      op = std.get_reduction_op(privilege)
+    }
   else
     assert(false)
   end
@@ -402,7 +406,7 @@ local function add_result(cx, from_nid, expr_type, options, span)
   if flow_region_tree.is_region(expr_type) then
     edge_label = flow.edge.Name {}
   else
-    edge_label = flow.edge.Write {}
+    edge_label = flow.edge.Write(flow.default_mode())
   end
   cx.graph:add_edge(
     edge_label,
