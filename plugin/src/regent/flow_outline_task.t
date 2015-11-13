@@ -159,6 +159,38 @@ local function privilege_kind(label)
   end
 end
 
+local function coherence_kind(label)
+  if label:is(flow.edge.None) or label:is(flow.edge.Read) or
+    label:is(flow.edge.Write) or label:is(flow.edge.Reduce)
+  then
+    if label.coherence:is(flow.coherence_kind.Exclusive) then
+      return std.exclusive
+    elseif label.coherence:is(flow.coherence_kind.Atomic) then
+      return std.atomic
+    elseif label.coherence:is(flow.coherence_kind.Simultaneous) then
+      return std.simultaneous
+    elseif label.coherence:is(flow.coherence_kind.Relaxed) then
+      return std.relaxed
+    else
+      assert(false)
+    end
+  end
+end
+
+local function flag_kind(label)
+  if label:is(flow.edge.None) or label:is(flow.edge.Read) or
+    label:is(flow.edge.Write) or label:is(flow.edge.Reduce)
+  then
+    if label.flag:is(flow.flag_kind.NoFlag) then
+      return
+    elseif label.flag:is(flow.flag_kind.NoAccessFlag) then
+      return std.no_access_flag
+    else
+      assert(false)
+    end
+  end
+end
+
 local function summarize_privileges(cx, nid)
   local result = terralib.newlist()
   local inputs = cx.graph:incoming_edges(nid)
@@ -198,13 +230,77 @@ local function summarize_privileges(cx, nid)
   return terralib.newlist({result})
 end
 
+local function summarize_coherence(cx, nid)
+  local result = data.new_recursive_map(1)
+  local inputs = cx.graph:incoming_edges(nid)
+  local outputs = cx.graph:outgoing_edges(nid)
+  for _, edge in ipairs(inputs) do
+    local label = cx.graph:node_label(edge.from_node)
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.region_type
+    end
+    local coherence = coherence_kind(edge.label)
+    if region and coherence then
+      if result[region][label.field_path] then
+        assert(result[region][label.field_path] == coherence)
+      end
+      result[region][label.field_path] = coherence
+    end
+  end
+  for _, edge in ipairs(outputs) do
+    local label = cx.graph:node_label(edge.to_node)
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.region_type
+    end
+    local coherence = coherence_kind(edge.label)
+    if region and coherence then
+      if result[region][label.field_path] then
+        assert(result[region][label.field_path] == coherence)
+      end
+      result[region][label.field_path] = coherence
+    end
+  end
+  return result
+end
+
+local function summarize_flags(cx, nid)
+  local result = data.new_recursive_map(2)
+  local inputs = cx.graph:incoming_edges(nid)
+  local outputs = cx.graph:outgoing_edges(nid)
+  for _, edge in ipairs(inputs) do
+    local label = cx.graph:node_label(edge.from_node)
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.region_type
+    end
+    local flag = flag_kind(edge.label)
+    if region and flag then
+      result[region][label.field_path][flag] = true
+    end
+  end
+  for _, edge in ipairs(outputs) do
+    local label = cx.graph:node_label(edge.to_node)
+    local region
+    if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
+      region = label.region_type
+    end
+    local flag = flag_kind(edge.label)
+    if region and flag then
+      result[region][label.field_path][flag] = true
+    end
+  end
+  return result
+end
+
 local function extract_task(cx, nid)
   local label = cx.graph:node_label(nid)
   local params = gather_params(cx, nid)
   local return_type = terralib.types.unit
   local privileges = summarize_privileges(cx, nid)
-  local coherence_modes = data.newmap() -- FIXME: Need coherence.
-  local flags = data.newmap() -- FIXME: Need flags.
+  local coherence_modes = summarize_coherence(cx, nid)
+  local flags = summarize_flags(cx, nid)
   local conditions = {} -- FIXME: Need conditions.
   -- FIXME: Need to scope constraints to regions used by task body.
   local constraints = false -- summarize_constraints(cx, nid)

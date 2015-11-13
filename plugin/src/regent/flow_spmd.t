@@ -522,7 +522,7 @@ local function rewrite_shard_partitions(cx)
         if not mapping[region_type] then
           mapping[region_type] = make_fresh_type(region_type, label.value.span)
           symbols[region_type] = terralib.newsymbol(
-            mapping[region_type], label.value.value.displayname)
+            mapping[region_type], "shard_" .. tostring(label.value.value))
         end
         assert(not std.is_partition(mapping[region_type]))
 
@@ -1093,6 +1093,53 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
 
   return index_label, stride_label, slice_mapping,
     parent_intersections, parent_barriers
+end
+
+local function make_simultaneous_coherence(from_nid, from_port, from_label,
+                                           to_nid, to_port, to_label, edge_label)
+  local from_type = from_label:is(flow.node.data) and from_label.region_type
+  local to_type = to_label:is(flow.node.data) and to_label.region_type
+  if edge_label:is(flow.edge.None) or edge_label:is(flow.edge.Read) or
+    edge_label:is(flow.edge.Write) or edge_label:is(flow.edge.Reduce)
+  then
+    if (from_type and std.is_list_of_regions(from_type)) or
+      (to_type and std.is_list_of_regions(to_type))
+    then
+      -- Lists are simlutaneous.
+      local coherence = flow.coherence_kind.Simultaneous {}
+      local flag = flow.flag_kind.NoFlag {}
+      if (from_type and from_type:list_depth() > 1) or
+        (to_type and to_type:list_depth() > 1)
+      then
+        -- Intersections are no access.
+        flag = flow.flag_kind.NoAccessFlag {}
+      end
+      return edge_label {
+        coherence = coherence,
+        flag = flag,
+      }
+    end
+  end
+end
+
+local function make_exclusive_coherence(from_nid, from_port, from_label,
+                                           to_nid, to_port, to_label, edge_label)
+  if edge_label:is(flow.edge.None) or edge_label:is(flow.edge.Read) or
+    edge_label:is(flow.edge.Write) or edge_label:is(flow.edge.Reduce)
+  then
+    return edge_label {
+      coherence = flow.coherence_kind.Exclusive {},
+      flag = flow.flag_kind.NoFlag {},
+    }
+  end
+end
+
+local function upgrade_simultaneous_coherence(cx)
+  cx.graph:map_edges(make_simultaneous_coherence)
+end
+
+local function downgrade_simultaneous_coherence(cx)
+  cx.graph:map_edges(make_exclusive_coherence)
 end
 
 local function make_distribution_loop(cx, block, shard_index, shard_stride,
@@ -1985,12 +2032,15 @@ local function spmdize(cx, loop)
   --  2. Normalize communication graph (remove opens).
   --  3. Rewrite shard partitions as lists.
   --  4. Rewrite communication graph (change closes to copies).
-  --  4. Rewrite shard loop bounds.
-  --  5. Outline shard into a task.
-  --  6. Compute shard bounds and list slices.
-  --  7. Wrap that in a distribution loop.
-  --  8. Wrap that in a must epoch.
-  --  9. Rewrite inputs/outputs.
+  --  5. Rewrite shard loop bounds.
+  --  6. Upgrade everything to simultaneous coherence (and no_access_flag).
+  --  7. Outline shard into a task.
+  --  8. Compute shard bounds and list slices.
+  --  9. Wrap that in a distribution loop.
+  -- 10. Downgrade everything back to exclusive.
+  -- 11. Wrap that in a must epoch.
+  -- 12. Outline that into a task.
+  -- 13. Rewrite inputs/outputs.
 
   local span = cx.graph:node_label(loop).span
 
@@ -2002,6 +2052,7 @@ local function spmdize(cx, loop)
   local intersections, barriers = rewrite_communication(shard_cx, shard_loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
+  upgrade_simultaneous_coherence(shard_cx)
   local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
@@ -2011,6 +2062,7 @@ local function spmdize(cx, loop)
   local dist_loop = make_distribution_loop(
     dist_cx, shard_cx.graph, shard_index, shard_stride, original_bounds,
     slice_mapping, span)
+  downgrade_simultaneous_coherence(dist_cx)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
   local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)

@@ -62,6 +62,62 @@ local function privilege_kind(label)
   end
 end
 
+local function coherence_kind(label)
+  if label:is(flow.edge.None) or label:is(flow.edge.Read) or
+    label:is(flow.edge.Write) or label:is(flow.edge.Reduce)
+  then
+    if label.coherence:is(flow.coherence_kind.Exclusive) then
+      return "exclusive"
+    elseif label.coherence:is(flow.coherence_kind.Atomic) then
+      return "atomic"
+    elseif label.coherence:is(flow.coherence_kind.Simultaneous) then
+      return "simultaneous"
+    elseif label.coherence:is(flow.coherence_kind.Relaxed) then
+      return "relaxed"
+    else
+      assert(false)
+    end
+  end
+end
+
+local function flag_kind(label)
+  if label:is(flow.edge.None) or label:is(flow.edge.Read) or
+    label:is(flow.edge.Write) or label:is(flow.edge.Reduce)
+  then
+    if label.flag:is(flow.flag_kind.NoFlag) then
+      return "no_flag"
+    elseif label.flag:is(flow.flag_kind.NoAccessFlag) then
+      return "no_access_flag"
+    else
+      assert(false)
+    end
+  end
+end
+
+local function coherence_kind_label(kind)
+  if kind == "exclusive" then
+    return flow.coherence_kind.Exclusive {}
+  elseif kind == "atomic" then
+    return flow.coherence_kind.Atomic {}
+  elseif kind == "simultaneous" then
+    return flow.coherence_kind.Simultaneous {}
+  elseif kind == "relaxed" then
+    return flow.coherence_kind.Relaxed {}
+  else
+    assert(false)
+  end
+end
+
+local function flag_kind_label(kind)
+  if not kind or kind == "no_flag" then
+    return flow.flag_kind.NoFlag {}
+  elseif kind == "no_access_flag" then
+    return flow.flag_kind.NoAccessFlag {}
+  else
+    assert(false)
+  end
+end
+
 local function summarize_subgraph(cx, nid, mapping)
   local label = cx.graph:node_label(nid)
   assert(label:is(flow.node.WhileLoop) or label:is(flow.node.ForNum) or
@@ -97,10 +153,17 @@ local function summarize_subgraph(cx, nid, mapping)
         for _, edges in ipairs({inputs, outputs}) do
           for _, edge in ipairs(edges) do
             local privilege = privilege_kind(edge.label)
+            local coherence = coherence_kind(edge.label)
+            local flag = flag_kind(edge.label)
             if privilege then
+              assert(coherence and flag)
+              local old_privilege, old_coherence, old_flag = usage_modes[region_type][field_path] and
+                unpack(usage_modes[region_type][field_path])
+              local new_privilege = std.meet_privilege(privilege, old_privilege)
+              local new_coherence = std.meet_coherence(coherence, old_coherence)
+              local new_flag = std.meet_flag(flag, old_flag)
               usage_modes[region_type][field_path] =
-                std.meet_privilege(privilege,
-                                   usage_modes[region_type][field_path])
+                data.newtuple(new_privilege, new_coherence, new_flag)
 
               if not labels[region_type][field_path] then
                 labels[region_type][field_path] = label
@@ -111,16 +174,23 @@ local function summarize_subgraph(cx, nid, mapping)
       end
     end)
 
-  for region_type, privileges in usage_modes:items() do
+  for region_type, modes in usage_modes:items() do
     local port
-    for field_path, privilege in privileges:items() do
+    for field_path, mode in modes:items() do
+      local privilege, coherence, flag = unpack(mode)
       local label = labels[region_type][field_path]
 
       local read_edge_label
       if privilege == "none" then
-        read_edge_label = flow.edge.None(flow.default_mode())
+        read_edge_label = flow.edge.None {
+          coherence = coherence_kind_label(coherence),
+          flag = flag_kind_label(flag),
+        }
       elseif privilege == "reads" or privilege == "reads_writes" then
-        read_edge_label = flow.edge.Read(flow.default_mode())
+        read_edge_label = flow.edge.Read {
+          coherence = coherence_kind_label(coherence),
+          flag = flag_kind_label(flag),
+        }
       elseif std.is_reduction_op(privilege) then
         -- Skip
       else
@@ -138,9 +208,14 @@ local function summarize_subgraph(cx, nid, mapping)
       if privilege == "none" or privilege == "reads" then
         -- Skip
       elseif privilege == "reads_writes" then
-        write_edge_label = flow.edge.Write(flow.default_mode())
+        write_edge_label = flow.edge.Write {
+          coherence = coherence_kind_label(coherence),
+          flag = flag_kind_label(flag),
+        }
       elseif std.is_reduction_op(privilege) then
         write_edge_label = flow.edge.Reduce {
+          coherence = coherence_kind_label(coherence),
+          flag = flag_kind_label(flag),
           op = std.reduction_op(privilege),
         }
       else

@@ -270,6 +270,26 @@ function graph:remove_edge(from_node, from_port, to_node, to_port)
   end
 end
 
+function graph:set_edge_label(label, from_node, from_port, to_node, to_port)
+  if rawget(self.edges, from_node) and rawget(self.edges[from_node], to_node)
+  then
+    for _, edge in ipairs(self.edges[from_node][to_node]) do
+      if edge.from_port == from_port or edge.to_port == to_port then
+        edge.label = label
+      end
+    end
+  end
+  if rawget(self.backedges, to_node) and
+    rawget(self.backedges[to_node], from_node)
+  then
+    for _, edge in ipairs(self.backedges[to_node][from_node]) do
+      if edge.from_port == from_port or edge.to_port == to_port then
+        edge.label = label
+      end
+    end
+  end
+end
+
 function graph:copy_edges(node, old_node, new_node, new_port)
   for _, edge in ipairs(self:incoming_edges(node)) do
     if edge.from_node == old_node then
@@ -367,9 +387,27 @@ function graph:traverse_edges(fn)
   for from, to_list in pairs(self.edges) do
     for to, edge_list in pairs(to_list) do
       for _, edge in pairs(edge_list) do
-        fn(from, edge.from_port, self.nodes[from],
-           to, edge.to_port, self.nodes[to],
+        fn(from, edge.from_port, self:node_label(from),
+           to, edge.to_port, self:node_label(to),
            edge.label)
+      end
+    end
+  end
+end
+
+function graph:map_edges(fn)
+  for from, to_list in pairs(self.edges) do
+    for to, edge_list in pairs(to_list) do
+      for _, edge in pairs(edge_list) do
+        local result = fn(
+          from, edge.from_port, self:node_label(from),
+          to, edge.to_port, self:node_label(to),
+          edge.label)
+        if result ~= nil then
+          assert(result:is(flow.edge))
+          self:set_edge_label(
+            result, from, edge.from_port, to, edge.to_port)
+        end
       end
     end
   end
@@ -745,6 +783,17 @@ function graph:printpretty()
       local label = tostring(edge:type()):gsub("[^.]+[.]", ""):lower()
       if edge:is(flow.edge.Reduce) then
         label = label .. " " .. tostring(edge.op)
+      end
+      if edge:is(flow.edge.None) or edge:is(flow.edge.Read) or
+        edge:is(flow.edge.Discard) or edge:is(flow.edge.Write) or
+        edge:is(flow.edge.Reduce)
+      then
+        if not edge.coherence:is(flow.coherence_kind.Exclusive) then
+          label = label .. " " .. tostring(edge.coherence:type()):gsub("[^.]+[.]", ""):lower()
+        end
+        if not edge.flag:is(flow.flag_kind.NoFlag) then
+          label = label .. " " .. tostring(edge.flag:type()):gsub("[^.]+[.]", ""):lower()
+        end
       end
       local style = "solid"
       if edge:is(flow.edge.HappensBefore) then
