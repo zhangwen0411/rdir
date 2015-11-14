@@ -294,7 +294,7 @@ local function summarize_flags(cx, nid)
   return result
 end
 
-local function extract_task(cx, nid)
+local function extract_task(cx, nid, prefix)
   local label = cx.graph:node_label(nid)
   local params = gather_params(cx, nid)
   local return_type = terralib.types.unit
@@ -307,6 +307,7 @@ local function extract_task(cx, nid)
   local body = flow_extract_subgraph.entry(cx.graph, nid)
 
   local name = tostring(terralib.newsymbol())
+  if prefix then name = prefix .. "_" .. name end
   local prototype = std.newtask(name)
   local task_type = terralib.types.functype(
     params:map(function(param) return param.param_type end), return_type, false)
@@ -442,18 +443,18 @@ local function issue_call(cx, nid, task)
   return call_nid
 end
 
-local function outline(cx, nid)
-  local task = extract_task(cx, nid)
+local function outline(cx, nid, prefix)
+  local task = extract_task(cx, nid, prefix)
   return issue_call(cx, nid, task)
 end
 
 local flow_outline_task = {}
 
-function flow_outline_task.entry(graph, nid)
+function flow_outline_task.entry(graph, nid, prefix)
   assert(flow.is_graph(graph) and flow.is_valid_node(nid))
   local cx = context.new_global_scope():new_graph_scope(graph)
   assert(can_outline(cx, nid))
-  local result_nid = outline(cx, nid)
+  local result_nid = outline(cx, nid, prefix)
   cx.graph:remove_node(nid)
   return result_nid
 end

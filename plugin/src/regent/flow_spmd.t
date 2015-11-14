@@ -2053,7 +2053,8 @@ local function spmdize(cx, loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   upgrade_simultaneous_coherence(shard_cx)
-  local shard_task = flow_outline_task.entry(shard_cx.graph, shard_loop)
+  local shard_task = flow_outline_task.entry(
+    shard_cx.graph, shard_loop, "shard")
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
     shard_cx, bounds, lists, intersections, barriers, mapping)
@@ -2065,7 +2066,7 @@ local function spmdize(cx, loop)
   downgrade_simultaneous_coherence(dist_cx)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
-  local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop)
+  local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop, "dist")
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
   rewrite_inputs(cx, loop, epoch_task, original_partitions, original_bounds,
