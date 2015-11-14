@@ -39,7 +39,13 @@ local data = require("regent/data")
 local flow = require("regent/flow")
 local flow_extract_subgraph = require("regent/flow_extract_subgraph")
 local flow_to_ast = require("regent/flow_to_ast")
+local optimize_config_options = require("regent/optimize_config_options")
+local optimize_divergence = require("regent/optimize_divergence")
+local optimize_futures = require("regent/optimize_futures")
+local optimize_inlines = require("regent/optimize_inlines")
+local optimize_loops = require("regent/optimize_loops")
 local std = require("regent/std")
+local vectorize_loops = require("regent/vectorize_loops")
 
 local context = {}
 context.__index = context
@@ -343,7 +349,16 @@ local function extract_task(cx, nid, prefix)
     span = label.span,
   }
   ast = flow_to_ast.entry(ast)
+  -- Hack: Can't include passes here, because that would create a
+  -- cyclic dependence. Name each optimization individually.
+
   -- passes.optimize(ast)
+  if std.config["index-launches"] then ast = optimize_loops.entry(ast) end
+  if std.config["futures"] then ast = optimize_futures.entry(ast) end
+  -- if std.config["inlines"] then ast = optimize_inlines.entry(ast) end
+  if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
+  if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
+  if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
   ast = codegen.entry(ast)
   return ast
 end
