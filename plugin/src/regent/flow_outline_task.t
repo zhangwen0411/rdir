@@ -314,6 +314,7 @@ local function extract_task(cx, nid, prefix)
 
   local name = tostring(terralib.newsymbol())
   if prefix then name = prefix .. "_" .. name end
+  name = data.newtuple(name)
   local prototype = std.newtask(name)
   local task_type = terralib.types.functype(
     params:map(function(param) return param.param_type end), return_type, false)
