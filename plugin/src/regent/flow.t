@@ -106,6 +106,7 @@ end
 function graph:node_minimum_port(node)
   local label = self:node_label(node)
   if label:is(flow.node.Opaque) or
+    label:is(flow.node.Task) or
     label:is(flow.node.Copy) or
     label:is(flow.node.Fill) or
     label:is(flow.node.Open) or

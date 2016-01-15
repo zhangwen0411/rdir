@@ -1909,7 +1909,7 @@ function flow_from_ast.expr_method_call(cx, node, privilege_map)
     cx,
     node {
       value = as_ast(cx, value),
-      index = args:map(function(arg) return as_ast(cx, arg) end),
+      args = args:map(function(arg) return as_ast(cx, arg) end),
     },
     inputs, privilege_map)
 end

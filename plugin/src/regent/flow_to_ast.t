@@ -345,18 +345,48 @@ function flow_to_ast.node_task(cx, nid)
 
   local fn = cx.ast[get_arg_node(inputs, 1, false)]
 
+  local nparams
   if std.is_task(fn.value) then
-    assert(maxport-1 == #fn.value:gettype().parameters)
+    nparams = #fn.value:gettype().parameters
+    assert(maxport >= nparams + 1)
+  else
+    nparams = maxport - 1
   end
 
   local args = terralib.newlist()
-  for i = 2, maxport do
+  for i = 2, nparams + 1 do
     args:insert(cx.ast[get_arg_node(inputs, i, true)])
+  end
+  local conditions = terralib.newlist()
+  for i = nparams + 2, maxport do
+    local value = cx.ast[get_arg_node(inputs, i, false)]
+    local edge_label = get_arg_edge(inputs, i, false).label
+    if edge_label:is(flow.edge.None) then
+       edge_label = get_arg_edge(outputs, i, false).label
+    end
+
+    local condition
+    if edge_label:is(flow.edge.Arrive) then
+      condition = std.arrives
+    elseif edge_label:is(flow.edge.Await) then
+      condition = std.awaits
+    else
+      assert(false)
+    end
+    conditions:insert(
+      ast.typed.expr.Condition {
+        conditions = terralib.newlist({condition}),
+        value = value,
+        expr_type = std.as_read(value.expr_type),
+        options = ast.default_options(),
+        span = label.span,
+    })
   end
 
   local action = ast.typed.expr.Call {
     fn = fn,
     args = args,
+    conditions = conditions,
     expr_type = label.expr_type,
     options = label.options,
     span = label.span,

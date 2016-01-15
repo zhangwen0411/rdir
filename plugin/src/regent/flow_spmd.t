@@ -651,6 +651,69 @@ local function issue_barrier_advance(cx, v0_nid)
   return v1_nid
 end
 
+local issue_barrier_arrive_loop
+local function issue_barrier_arrive(cx, bar_nid, use_nid)
+  cx.graph:add_edge(
+    flow.edge.Arrive {}, use_nid, cx.graph:node_available_port(use_nid),
+    bar_nid, cx.graph:node_available_port(bar_nid))
+  if cx.graph:node_label(use_nid):is(flow.node.ForNum) then
+    issue_barrier_arrive_loop(cx, bar_nid, use_nid)
+  elseif not (cx.graph:node_label(use_nid):is(flow.node.Task) or
+              cx.graph:node_label(use_nid):is(flow.node.Copy))
+  then
+    print("FIXME: Issued arrive on non-loop, non-task, non-copy")
+  end
+end
+
+function issue_barrier_arrive_loop(cx, bar_nid, use_nid)
+  local block_cx = cx:new_graph_scope(cx.graph:node_label(use_nid).block)
+
+  local block_bar_nid = block_cx.graph:add_node(cx.graph:node_label(bar_nid))
+
+  -- Hack: The proper way to do this is probably to compute the
+  -- frontier of operations at the end of the loop (or better,
+  -- producers for the region we're protecting with the barrier, but
+  -- that might be hard).
+  local block_compute_nids = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.Task) end)
+  assert(#block_compute_nids == 1)
+  local block_compute_nid = block_compute_nids[1]
+
+  issue_barrier_arrive(block_cx, block_bar_nid, block_compute_nid)
+end
+
+local issue_barrier_await_loop
+local function issue_barrier_await(cx, bar_nid, use_nid)
+  cx.graph:add_edge(
+    flow.edge.Await {},
+    bar_nid, cx.graph:node_available_port(bar_nid),
+    use_nid, cx.graph:node_available_port(use_nid))
+  if cx.graph:node_label(use_nid):is(flow.node.ForNum) then
+    issue_barrier_await_loop(cx, bar_nid, use_nid)
+  elseif not (cx.graph:node_label(use_nid):is(flow.node.Task) or
+              cx.graph:node_label(use_nid):is(flow.node.Copy))
+  then
+    print("FIXME: Issued arrive on non-loop, non-task, non-copy")
+  end
+end
+
+function issue_barrier_await_loop(cx, bar_nid, use_nid)
+  local block_cx = cx:new_graph_scope(cx.graph:node_label(use_nid).block)
+
+  local block_bar_nid = block_cx.graph:add_node(cx.graph:node_label(bar_nid))
+
+  -- Hack: The proper way to do this is probably to compute the
+  -- frontier of operations at the start of the loop (or better,
+  -- consumers for the region we're protecting with the barrier, but
+  -- that might be hard).
+  local block_compute_nids = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.Task) end)
+  assert(#block_compute_nids == 1)
+  local block_compute_nid = block_compute_nids[1]
+
+  issue_barrier_await(block_cx, block_bar_nid, block_compute_nid)
+end
+
 local function issue_intersection_copy_synchronization(
     cx, src_nid, dst_in_nid, dst_out_nid, copy_nid, barriers)
   local src_label = cx.graph:node_label(src_nid)
@@ -658,6 +721,18 @@ local function issue_intersection_copy_synchronization(
   local dst_label = cx.graph:node_label(dst_in_nid)
   local dst_type = dst_label.region_type
   assert(src_label.field_path == dst_label.field_path)
+
+  -- The phase barriers here are labeled full/empty * in/out * v0/v1.
+  --
+  --   * Full means that the producer has finished writing, and the
+  --     data is now ready to be read by the consumer.
+  --   * Empty means that the consumer has finished reading the data,
+  --     and the producer can start writing the buffer with the next
+  --     set of data.
+  --
+  --   * Out refers to the producer and in refers to the consumer.
+  --
+  --   * v0 refers to the current phase and v1 refers to the next.
 
   local empty_in, empty_out, full_in, full_out
   local bars = barriers[src_type][dst_type][src_label.field_path]
@@ -700,20 +775,12 @@ local function issue_intersection_copy_synchronization(
   local full_in_v1_nid = issue_barrier_advance(cx, full_in_v0_nid)
   local full_out_v1_nid = issue_barrier_advance(cx, full_out_v0_nid)
 
-  cx.graph:add_edge(
-    flow.edge.Await {},
-    empty_out_v0_nid, cx.graph:node_available_port(empty_out_v0_nid),
-    copy_nid, cx.graph:node_available_port(copy_nid))
-  cx.graph:add_edge(
-    flow.edge.Arrive {}, copy_nid, cx.graph:node_available_port(copy_nid),
-    full_out_v0_nid, cx.graph:node_available_port(full_out_v0_nid))
+  issue_barrier_await(cx, empty_out_v0_nid, copy_nid)
+  issue_barrier_arrive(cx, full_out_v0_nid, copy_nid)
 
   local consumer_nids = cx.graph:immediate_successors(dst_out_nid)
   for _, consumer_nid in ipairs(consumer_nids) do
-    cx.graph:add_edge(
-      flow.edge.Await {},
-      full_in_v1_nid, cx.graph:node_available_port(full_in_v1_nid),
-      consumer_nid, cx.graph:node_available_port(consumer_nid))
+    issue_barrier_await(cx, full_in_v1_nid, consumer_nid)
   end
 
   local producer_nids = cx.graph:immediate_predecessors(dst_in_nid)
@@ -730,12 +797,7 @@ local function issue_intersection_copy_synchronization(
   -- the expected arrival count.
   assert(#producer_nids == 1)
   local producer_nid = producer_nids[1]
-  cx.graph:add_edge(
-    flow.edge.Arrive {},
-    producer_nid, cx.graph:node_available_port(producer_nid),
-    empty_in_v0_nid, cx.graph:node_available_port(empty_in_v0_nid))
-
-  print("FIXME: need to push phase barriers down into loops")
+  issue_barrier_arrive(cx, empty_in_v0_nid, producer_nid)
 end
 
 local function rewrite_communication(cx, shard_loop)
