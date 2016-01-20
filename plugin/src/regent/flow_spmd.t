@@ -651,6 +651,50 @@ local function issue_barrier_advance(cx, v0_nid)
   return v1_nid
 end
 
+local function index_phase_barriers(cx, loop_label, bar_list_label)
+  -- Find the loop index for this loop.
+  local index_nids = cx.graph:filter_nodes(
+    function(_, label)
+      return label:is(flow.node.data.Scalar) and
+        label.value.value == loop_label.symbol
+    end)
+  assert(#index_nids == 1)
+  local index_nid = index_nids[1]
+
+  -- Select the barriers for this iteration.
+  local bar_list_type = std.as_read(bar_list_label.value.expr_type)
+  assert(std.is_list_of_phase_barriers(bar_list_type))
+  local bar_type = bar_list_type.element_type
+  local block_bar_list_nid = cx.graph:add_node(bar_list_label)
+
+  local bar_symbol = terralib.newsymbol(bar_type)
+  local bar_label = make_variable_label(
+    cx, bar_symbol, bar_type, bar_list_label.value.span)
+  local block_bar_nid = cx.graph:add_node(bar_label)
+
+  local block_index_bar_nid = cx.graph:add_node(
+    flow.node.IndexAccess {
+      expr_type = bar_type,
+      options = ast.default_options(),
+      span = bar_list_label.value.span,
+    })
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    block_bar_list_nid, cx.graph:node_result_port(block_bar_list_nid),
+    block_index_bar_nid, 1)
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    index_nid, cx.graph:node_result_port(index_nid),
+    block_index_bar_nid, 2)
+  cx.graph:add_edge(
+    flow.edge.Write(flow.default_mode()),
+    block_index_bar_nid,
+    cx.graph:node_result_port(block_index_bar_nid),
+    block_bar_nid, cx.graph:node_available_port(block_bar_nid))
+
+  return block_bar_nid
+end
+
 local issue_barrier_arrive_loop
 local function issue_barrier_arrive(cx, bar_nid, use_nid)
   cx.graph:add_edge(
@@ -665,10 +709,12 @@ local function issue_barrier_arrive(cx, bar_nid, use_nid)
   end
 end
 
-function issue_barrier_arrive_loop(cx, bar_nid, use_nid)
-  local block_cx = cx:new_graph_scope(cx.graph:node_label(use_nid).block)
+function issue_barrier_arrive_loop(cx, bar_list_nid, use_nid)
+  local use_label = cx.graph:node_label(use_nid)
+  local block_cx = cx:new_graph_scope(use_label.block)
 
-  local block_bar_nid = block_cx.graph:add_node(cx.graph:node_label(bar_nid))
+  local bar_list_label = cx.graph:node_label(bar_list_nid)
+  local block_bar_nid = index_phase_barriers(block_cx, use_label, bar_list_label)
 
   -- Hack: The proper way to do this is probably to compute the
   -- frontier of operations at the end of the loop (or better,
@@ -697,10 +743,12 @@ local function issue_barrier_await(cx, bar_nid, use_nid)
   end
 end
 
-function issue_barrier_await_loop(cx, bar_nid, use_nid)
-  local block_cx = cx:new_graph_scope(cx.graph:node_label(use_nid).block)
+function issue_barrier_await_loop(cx, bar_list_nid, use_nid)
+  local use_label = cx.graph:node_label(use_nid)
+  local block_cx = cx:new_graph_scope(use_label.block)
 
-  local block_bar_nid = block_cx.graph:add_node(cx.graph:node_label(bar_nid))
+  local bar_list_label = cx.graph:node_label(bar_list_nid)
+  local block_bar_nid = index_phase_barriers(block_cx, use_label, bar_list_label)
 
   -- Hack: The proper way to do this is probably to compute the
   -- frontier of operations at the start of the loop (or better,
@@ -712,6 +760,8 @@ function issue_barrier_await_loop(cx, bar_nid, use_nid)
   local block_compute_nid = block_compute_nids[1]
 
   issue_barrier_await(block_cx, block_bar_nid, block_compute_nid)
+
+  use_label:printpretty(true)
 end
 
 local function issue_intersection_copy_synchronization(
