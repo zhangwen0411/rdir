@@ -176,6 +176,12 @@ local function get_arg_node(inputs, port, allow_fields)
   return edges[1].from_node
 end
 
+local function get_result_node(outputs, port, allow_fields)
+  local edges = outputs[port]
+  assert(edges and ((allow_fields and #edges >= 1) or #edges == 1))
+  return edges[1].to_node
+end
+
 function flow_to_ast.node_opaque(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -250,6 +256,37 @@ function flow_to_ast.node_opaque(cx, nid)
   end
 end
 
+function make_expr_result(cx, nid, action)
+  local outputs = cx.graph:outgoing_edges_by_port(nid)
+  local result_nid = get_result_node(
+    outputs, cx.graph:node_result_port(nid), true)
+  local result_label = cx.graph:node_label(result_nid)
+
+  if not result_label:is(flow.node.data.Scalar) or result_label.fresh then
+    if cx.graph:node_result_is_used(nid) then
+      cx.ast[nid] = action
+      return terralib.newlist()
+    end
+
+    return terralib.newlist({
+        ast.typed.stat.Expr {
+          expr = action,
+          options = action.options,
+          span = action.span,
+        },
+    })
+  else
+    return terralib.newlist({
+        ast.typed.stat.Assignment {
+          lhs = terralib.newlist({result_label.value}),
+          rhs = terralib.newlist({action}),
+          options = action.options,
+          span = action.span,
+        },
+    })
+  end
+end
+
 function flow_to_ast.node_index_access(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -265,18 +302,7 @@ function flow_to_ast.node_index_access(cx, nid)
     span = label.span,
   }
 
-  if cx.graph:node_result_is_used(nid) then
-    cx.ast[nid] = action
-    return terralib.newlist()
-  end
-
-  return terralib.newlist({
-      ast.typed.stat.Expr {
-        expr = action,
-        options = action.options,
-        span = action.span,
-      },
-  })
+  return make_expr_result(cx, nid, action)
 end
 
 function flow_to_ast.node_deref(cx, nid)
@@ -292,18 +318,23 @@ function flow_to_ast.node_deref(cx, nid)
     span = label.span,
   }
 
-  if cx.graph:node_result_is_used(nid) then
-    cx.ast[nid] = action
-    return terralib.newlist()
-  end
+  return make_expr_result(cx, nid, action)
+end
 
-  return terralib.newlist({
-      ast.typed.stat.Expr {
-        expr = action,
-        options = action.options,
-        span = action.span,
-      },
-  })
+function flow_to_ast.node_advance(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+
+  local value = cx.ast[get_arg_node(inputs, 1, true)]
+
+  local action = ast.typed.expr.Advance {
+    value = value,
+    expr_type = label.expr_type,
+    options = label.options,
+    span = label.span,
+  }
+
+  return make_expr_result(cx, nid, action)
 end
 
 function flow_to_ast.node_reduce(cx, nid)
@@ -677,6 +708,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Deref) then
     return flow_to_ast.node_deref(cx, nid)
+
+  elseif label:is(flow.node.Advance) then
+    return flow_to_ast.node_advance(cx, nid)
 
   elseif label:is(flow.node.Reduce) then
     return flow_to_ast.node_reduce(cx, nid)

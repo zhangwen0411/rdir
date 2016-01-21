@@ -759,10 +759,12 @@ function graph:printpretty()
       label = label .. " " .. tostring(node.op)
     end
     local shape
-    if node:is(flow.node.Opaque) or node:is(flow.node.Deref) or
+    if node:is(flow.node.Opaque) or
+      node:is(flow.node.IndexAccess) or
+      node:is(flow.node.Deref) or
+      node:is(flow.node.Advance) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
       node:is(flow.node.Copy) or node:is(flow.node.Fill) or
-      node:is(flow.node.IndexAccess) or
       node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
       node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
       node:is(flow.node.MustEpoch)
@@ -814,6 +816,7 @@ flow.node:leaf("Opaque", {"action"})
 
 flow.node:leaf("IndexAccess", {"expr_type", "options", "span"})
 flow.node:leaf("Deref", {"expr_type", "options", "span"})
+flow.node:leaf("Advance", {"expr_type", "options", "span"})
 flow.node:leaf("Reduce", {"op", "options", "span"})
 flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
 flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",

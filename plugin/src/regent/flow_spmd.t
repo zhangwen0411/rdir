@@ -616,7 +616,7 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
     copy_nid, 2)
   cx.graph:add_edge(
     flow.edge.Write(flow.default_mode()), copy_nid, 2,
-    intersection_out_nid, cx.graph:node_result_port(intersection_out_nid))
+    intersection_out_nid, cx.graph:node_available_port(intersection_out_nid))
 
   return copy_nid
 end
@@ -625,29 +625,19 @@ local function issue_barrier_advance(cx, v0_nid)
   local v0 = cx.graph:node_label(v0_nid)
   local v1_nid = cx.graph:add_node(v0)
 
-  local advance = flow.node.Opaque {
-    action = ast.typed.stat.Assignment {
-      lhs = terralib.newlist({v0.value}),
-      rhs = terralib.newlist({
-          ast.typed.expr.Advance {
-            value = v0.value,
-            expr_type = std.as_read(v0.value.expr_type),
-            options = ast.default_options(),
-            span = v0.value.span,
-          },
-      }),
-      options = ast.default_options(),
-      span = v0.value.span,
-    },
+  local advance = flow.node.Advance {
+    expr_type = std.as_read(v0.value.expr_type),
+    options = ast.default_options(),
+    span = v0.value.span,
   }
   local advance_nid = cx.graph:add_node(advance)
   cx.graph:add_edge(
-    flow.edge.HappensBefore {}, v0_nid, cx.graph:node_sync_port(v0_nid),
-    advance_nid, cx.graph:node_sync_port(advance_nid))
+    flow.edge.Read(flow.default_mode()), v0_nid, cx.graph:node_result_port(v0_nid),
+    advance_nid, 1)
   cx.graph:add_edge(
-    flow.edge.HappensBefore {},
-    advance_nid, cx.graph:node_sync_port(advance_nid),
-    v1_nid, cx.graph:node_sync_port(v1_nid))
+    flow.edge.Write(flow.default_mode()),
+    advance_nid, cx.graph:node_result_port(advance_nid),
+    v1_nid, cx.graph:node_available_port(v1_nid))
   return v1_nid
 end
 
@@ -660,6 +650,7 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
     end)
   assert(#index_nids == 1)
   local index_nid = index_nids[1]
+  local index_label = cx.graph:node_label(index_nid)
 
   -- Select the barriers for this iteration.
   local bar_list_type = std.as_read(bar_list_label.value.expr_type)
@@ -667,16 +658,28 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
   local bar_type = bar_list_type.element_type
   local block_bar_list_nid = cx.graph:add_node(bar_list_label)
 
-  local bar_symbol = terralib.newsymbol(bar_type)
+  local bar_symbol = terralib.newsymbol(bar_type, "bar_" .. tostring(bar_list_label.value.value))
   local bar_label = make_variable_label(
     cx, bar_symbol, bar_type, bar_list_label.value.span)
   local block_bar_nid = cx.graph:add_node(bar_label)
 
   local block_index_bar_nid = cx.graph:add_node(
-    flow.node.IndexAccess {
-      expr_type = bar_type,
-      options = ast.default_options(),
-      span = bar_list_label.value.span,
+    flow.node.Opaque {
+      action = ast.typed.stat.Var {
+        symbols = terralib.newlist({bar_symbol}),
+        types = terralib.newlist({bar_type}),
+        values = terralib.newlist({
+            ast.typed.expr.IndexAccess {
+              value = bar_list_label.value,
+              index = index_label.value,
+              expr_type = bar_type,
+              options = ast.default_options(),
+              span = bar_list_label.value.span,
+            },
+        }),
+        options = ast.default_options(),
+        span = bar_label.value.span,
+      }
     })
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
@@ -686,25 +689,26 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
     flow.edge.Read(flow.default_mode()),
     index_nid, cx.graph:node_result_port(index_nid),
     block_index_bar_nid, 2)
+
   cx.graph:add_edge(
-    flow.edge.Write(flow.default_mode()),
+    flow.edge.HappensBefore {},
     block_index_bar_nid,
-    cx.graph:node_result_port(block_index_bar_nid),
-    block_bar_nid, cx.graph:node_available_port(block_bar_nid))
+    cx.graph:node_sync_port(block_index_bar_nid),
+    block_bar_nid, cx.graph:node_sync_port(block_bar_nid))
 
   return block_bar_nid
 end
 
 local issue_barrier_arrive_loop
 local function issue_barrier_arrive(cx, bar_nid, use_nid)
+  local use_label = cx.graph:node_label(use_nid)
+
   cx.graph:add_edge(
     flow.edge.Arrive {}, use_nid, cx.graph:node_available_port(use_nid),
     bar_nid, cx.graph:node_available_port(bar_nid))
-  if cx.graph:node_label(use_nid):is(flow.node.ForNum) then
+  if use_label:is(flow.node.ForNum) then
     issue_barrier_arrive_loop(cx, bar_nid, use_nid)
-  elseif not (cx.graph:node_label(use_nid):is(flow.node.Task) or
-              cx.graph:node_label(use_nid):is(flow.node.Copy))
-  then
+  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy)) then
     print("FIXME: Issued arrive on non-loop, non-task, non-copy")
   end
 end
@@ -730,15 +734,15 @@ end
 
 local issue_barrier_await_loop
 local function issue_barrier_await(cx, bar_nid, use_nid)
+  local use_label = cx.graph:node_label(use_nid)
+
   cx.graph:add_edge(
     flow.edge.Await {},
     bar_nid, cx.graph:node_available_port(bar_nid),
     use_nid, cx.graph:node_available_port(use_nid))
-  if cx.graph:node_label(use_nid):is(flow.node.ForNum) then
+  if use_label:is(flow.node.ForNum) then
     issue_barrier_await_loop(cx, bar_nid, use_nid)
-  elseif not (cx.graph:node_label(use_nid):is(flow.node.Task) or
-              cx.graph:node_label(use_nid):is(flow.node.Copy))
-  then
+  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy)) then
     print("FIXME: Issued arrive on non-loop, non-task, non-copy")
   end
 end
@@ -760,8 +764,6 @@ function issue_barrier_await_loop(cx, bar_list_nid, use_nid)
   local block_compute_nid = block_compute_nids[1]
 
   issue_barrier_await(block_cx, block_bar_nid, block_compute_nid)
-
-  use_label:printpretty(true)
 end
 
 local function issue_intersection_copy_synchronization(
