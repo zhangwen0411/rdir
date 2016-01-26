@@ -1320,6 +1320,32 @@ local function apply_mapping(old, new)
   return result
 end
 
+local function find_match_incoming(cx, predicate, nid)
+  local edges = cx.graph:incoming_edges(nid)
+  for _, edge in ipairs(edges) do
+    if not edge.label:is(flow.edge.HappensBefore) then
+      local other_nid = edge.from_node
+      local label = cx.graph:node_label(other_nid)
+      if predicate(other_nid, label) then
+        return other_nid
+      end
+    end
+  end
+end
+
+local function find_match_outgoing(cx, predicate, nid)
+  local edges = cx.graph:outgoing_edges(nid)
+  for _, edge in ipairs(edges) do
+    if not edge.label:is(flow.edge.HappensBefore) then
+      local other_nid = edge.to_node
+      local label = cx.graph:node_label(other_nid)
+      if predicate(other_nid, label) then
+        return other_nid
+      end
+    end
+  end
+end
+
 local function find_nid_mapping(cx, old_loop, new_loop,
                                 intersection_types,
                                 barriers_empty_in, barriers_empty_out,
@@ -1348,8 +1374,8 @@ local function find_nid_mapping(cx, old_loop, new_loop,
     local new_input_nid = edge.from_node
     local new_input = cx.graph:node_label(new_input_nid)
     if new_input:is(flow.node.data) then
-      local old_input_nid = cx.graph:find_immediate_predecessor(
-        matches(new_input), old_loop)
+      local old_input_nid = find_match_incoming(
+        cx, matches(new_input), old_loop)
       if not old_input_nid then
         assert(intersection_types[new_input.region_type] or
                  barriers_empty_in[new_input.region_type] or
@@ -1369,8 +1395,8 @@ local function find_nid_mapping(cx, old_loop, new_loop,
     local new_output_nid = edge.to_node
     local new_output = cx.graph:node_label(new_output_nid)
     if new_output:is(flow.node.data) then
-      local old_output_nid = cx.graph:find_immediate_successor(
-        matches(new_output), old_loop)
+      local old_output_nid = find_match_outgoing(
+        cx, matches(new_output), old_loop)
       if not old_output_nid then
         assert(intersection_types[new_output.region_type] or
                  barriers_empty_in[new_output.region_type] or
