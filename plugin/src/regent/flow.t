@@ -414,85 +414,83 @@ function graph:map_edges(fn)
   end
 end
 
-function graph:incoming_edges(node)
+local function pack_edge(from_node, to_node, edge)
+  return {
+    from_node = from_node,
+    from_port = edge.from_port,
+    to_node = to_node,
+    to_port = edge.to_port,
+    label = edge.label,
+  }
+end
+
+function graph:traverse_incoming_edges(fn, node)
   assert(self:has_node(node))
-  local result = terralib.newlist()
   if rawget(self.backedges, node) then
     for from_node, edges in pairs(self.backedges[node]) do
       for _, edge in pairs(edges) do
-        result:insert(
-          {
-            from_node = from_node,
-            from_port = edge.from_port,
-            to_node = node,
-            to_port = edge.to_port,
-            label = edge.label,
-        })
+        fn(from_node, node, edge)
       end
     end
   end
+end
+
+function graph:incoming_edges(node)
+  local result = terralib.newlist()
+  self:traverse_incoming_edges(
+    function(from_node, to_node, edge)
+      result:insert(pack_edge(from_node, to_node, edge))
+    end,
+    node)
   return result
 end
 
 function graph:incoming_edges_by_port(node)
-  assert(self:has_node(node))
   local result = {}
-  for from_node, edges in pairs(self.backedges[node]) do
-    for _, edge in pairs(edges) do
+  self:traverse_incoming_edges(
+    function(from_node, to_node, edge)
       if not rawget(result, edge.to_port) then
         result[edge.to_port] = terralib.newlist()
       end
-      result[edge.to_port]:insert(
-        {
-          from_node = from_node,
-          from_port = edge.from_port,
-          to_node = node,
-          to_port = edge.to_port,
-          label = edge.label,
-      })
+      result[edge.to_port]:insert(pack_edge(from_node, to_node, edge))
+    end,
+    node)
+  return result
+end
+
+function graph:traverse_outgoing_edges(fn, node)
+  assert(self:has_node(node))
+  local result = terralib.newlist()
+  if rawget(self.edges, node) then
+    for to_node, edges in pairs(self.edges[node]) do
+      for _, edge in pairs(edges) do
+        fn(node, to_node, edge)
+      end
     end
   end
   return result
 end
 
 function graph:outgoing_edges(node)
-  assert(self:has_node(node))
   local result = terralib.newlist()
-  if rawget(self.edges, node) then
-    for to_node, edges in pairs(self.edges[node]) do
-      for _, edge in pairs(edges) do
-        result:insert(
-          {
-            from_node = node,
-            from_port = edge.from_port,
-            to_node = to_node,
-            to_port = edge.to_port,
-            label = edge.label,
-        })
-      end
-    end
-  end
+  self:traverse_outgoing_edges(
+    function(from_node, to_node, edge)
+      result:insert(pack_edge(from_node, to_node, edge))
+    end,
+    node)
   return result
 end
 
 function graph:outgoing_edges_by_port(node)
-  assert(self:has_node(node))
   local result = {}
-  for to_node, edges in pairs(self.edges[node]) do
-    for _, edge in pairs(edges) do
+  self:traverse_outgoing_edges(
+    function(from_node, to_node, edge)
       if not rawget(result, edge.from_port) then
         result[edge.from_port] = terralib.newlist()
       end
-      result[edge.from_port]:insert(
-        {
-          from_node = node,
-          from_port = edge.from_port,
-          to_node = to_node,
-          to_port = edge.to_port,
-          label = edge.label,
-      })
-    end
-  end
+      result[edge.from_port]:insert(pack_edge(from_node, to_node, edge))
+    end,
+    node)
   return result
 end
 
@@ -568,6 +566,38 @@ function graph:filter_immediate_predecessors(fn, node)
   return result
 end
 
+function graph:filter_immediate_predecessors_by_edges(fn, node)
+  assert(self:has_node(node))
+  local result = terralib.newlist()
+  if rawget(self.backedges, node) then
+    for from_node, edges in pairs(self.backedges[node]) do
+      for _, edge in pairs(edges) do
+        if fn(pack_edge(from_node, node, edge)) then
+          result:insert(from_node)
+          break
+        end
+      end
+    end
+  end
+  return result
+end
+
+function graph:filter_immediate_successors_by_edges(fn, node)
+  assert(self:has_node(node))
+  local result = terralib.newlist()
+  if rawget(self.edges, node) then
+    for to_node, edges in pairs(self.edges[node]) do
+      for _, edge in pairs(edges) do
+        if fn(pack_edge(node, to_node, edge)) then
+          result:insert(to_node)
+          break
+        end
+      end
+    end
+  end
+  return result
+end
+
 function graph:incoming_read_set(node)
   local result = terralib.newlist()
   for from_node, edges in pairs(self.backedges[node]) do
@@ -582,55 +612,25 @@ function graph:incoming_read_set(node)
 end
 
 function graph:incoming_write_set(node)
-  local result = terralib.newlist()
-  for from_node, edges in pairs(self.backedges[node]) do
-    for _, edge in pairs(edges) do
-      if edge.label:is(flow.edge.Write) then
-        result:insert(from_node)
-        break
-      end
-    end
-  end
-  return result
+  return self:filter_immediate_predecessors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Write) end, node)
 end
 
 function graph:outgoing_read_set(node)
-  local result = terralib.newlist()
-  for to_node, edges in pairs(self.edges[node]) do
-    for _, edge in pairs(edges) do
-      if edge.label:is(flow.edge.Read) then
-        result:insert(to_node)
-        break
-      end
-    end
-  end
-  return result
+  return self:filter_immediate_successors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Read) end, node)
 end
 
 function graph:outgoing_use_set(node)
-  local result = terralib.newlist()
-  for to_node, edges in pairs(self.edges[node]) do
-    for _, edge in pairs(edges) do
-      if edge.label:is(flow.edge.None) or edge.label:is(flow.edge.Read) then
-        result:insert(to_node)
-        break
-      end
-    end
-  end
-  return result
+  return self:filter_immediate_successors_by_edges(
+    function(edge)
+      return edge.label:is(flow.edge.None) or edge.label:is(flow.edge.Read) end,
+    node)
 end
 
 function graph:outgoing_write_set(node)
-  local result = terralib.newlist()
-  for to_node, edges in pairs(self.edges[node]) do
-    for _, edge in pairs(edges) do
-      if edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Name) then
-        result:insert(to_node)
-        break
-      end
-    end
-  end
-  return result
+  return self:filter_immediate_successors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Write) end, node)
 end
 
 function graph:node_result_is_used(node)

@@ -322,9 +322,11 @@ local function normalize_communication(cx, shard_loop)
   -- the resulting graph represent locations where explicit copies are
   -- required.
   --
-  --  1. Normalize close inputs.
-  --  2. Remove opens.
-  --  3. Normalize versioning.
+  --  1. Normalize close inputs (to ensure all partitions exist at version 0).
+  --  2. Remove opens (and regions used as intermediates).
+  --  3. Normalize close outputs (to ensure consistent versioning bumps).
+  --  3. Normalize final state (to ensure consistent final versions).
+  --  4. Fix up outer context to avoid naming intermediate regions.
 
   local shard_label = cx.graph:node_label(shard_loop)
   local block_cx = cx:new_graph_scope(shard_label.block)
@@ -384,7 +386,7 @@ local function normalize_communication(cx, shard_loop)
     block_cx.graph:remove_node(open_nid)
   end
 
-  -- Normalize versioning.
+  -- Normalize close outputs.
   local versions = compute_version_numbers(block_cx)
   for _, close_nid in ipairs(close_nids) do
     local result_nids = block_cx.graph:immediate_successors(close_nid)
@@ -403,6 +405,69 @@ local function normalize_communication(cx, shard_loop)
         end
         block_cx.graph:remove_node(result_nid)
       end
+    end
+  end
+
+  -- Normalize final state.
+
+  -- This is the step that captures loop-carried dependencies. Any
+  -- data which is not up-to-date with any data it aliases is
+  -- forceably updated at the end of the loop to ensure that the final
+  -- state is consistent.
+
+  -- Compute the most recent versions for each region.
+  local data_nids = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.data) end)
+  local region_nids = data.newmap()
+  local region_versions = data.newmap()
+  for _, data_nid in ipairs(data_nids) do
+    local region_type = block_cx.graph:node_label(data_nid).region_type
+    if not region_versions[region_type] or
+      versions[data_nid] > region_versions[region_type]
+    then
+      region_nids:put(region_type, data_nid)
+      region_versions:put(region_type, versions[data_nid])
+    end
+  end
+
+  -- Check for and update out-of-date data.
+  for _, region_type in region_nids:keys() do
+    local field_path = block_cx.graph:node_label(
+      region_nids[region_type]).field_path
+    local newer_regions = terralib.newlist()
+    for _, other_region_type in region_nids:keys() do
+      local other_field_path = block_cx.graph:node_label(
+        region_nids[other_region_type]).field_path
+      if not std.type_eq(region_type, other_region_type) and
+        block_cx.tree:can_alias(region_type, other_region_type) and
+        field_path == other_field_path and
+        region_versions[region_type] < region_versions[other_region_type]
+      then
+        newer_regions:insert(other_region_type)
+      end
+    end
+    newer_regions:sort(
+      function(a, b) return region_versions[a] < region_versions[b] end)
+    for _, newer_region_type in ipairs(newer_regions) do
+      local close_nid = block_cx.graph:add_node(flow.node.Close {})
+      local current_nid = region_nids[region_type]
+      local next_nid = block_cx.graph:add_node(
+        block_cx.graph:node_label(current_nid))
+      local newer_region_nid = region_nids[newer_region_type]
+
+      block_cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()),
+        current_nid, block_cx.graph:node_result_port(current_nid),
+        close_nid, 1)
+      block_cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()),
+        newer_region_nid, block_cx.graph:node_result_port(newer_region_nid),
+        close_nid, 2)
+
+      block_cx.graph:add_edge(
+        flow.edge.Write(flow.default_mode()),
+        close_nid, 1,
+        next_nid, block_cx.graph:node_available_port(next_nid))
     end
   end
 
@@ -835,14 +900,14 @@ local function issue_intersection_copy_synchronization(
     issue_barrier_await(cx, full_in_v1_nid, consumer_nid)
   end
 
-  local producer_nids = cx.graph:immediate_predecessors(dst_in_nid)
+  local producer_nids = cx.graph:incoming_write_set(dst_in_nid)
   if #producer_nids == 0 then
     local final_nid = find_last_instance(cx, dst_label)
-    local final_succ_nids = cx.graph:immediate_successors(final_nid)
+    local final_succ_nids = cx.graph:outgoing_read_set(final_nid)
     if #final_succ_nids > 0 then
       producer_nids = final_succ_nids
     else
-      producer_nids = cx.graph:immediate_predecessors(final_nid)
+      producer_nids = cx.graph:incoming_write_set(final_nid)
     end
   end
   -- If there were more than one of these, we would need to increase
@@ -850,6 +915,11 @@ local function issue_intersection_copy_synchronization(
   assert(#producer_nids == 1)
   local producer_nid = producer_nids[1]
   issue_barrier_arrive(cx, empty_in_v0_nid, producer_nid)
+end
+
+local function only(list)
+  assert(#list == 1)
+  return list[1]
 end
 
 local function rewrite_communication(cx, shard_loop)
@@ -861,13 +931,13 @@ local function rewrite_communication(cx, shard_loop)
   local intersections = data.new_recursive_map(1)
   local barriers = data.new_recursive_map(2)
   for _, close_nid in ipairs(close_nids) do
-    local dst_out_nid = block_cx.graph:immediate_successor(close_nid)
+    local dst_out_nid = only(block_cx.graph:outgoing_write_set(close_nid))
     local dst_out_label = block_cx.graph:node_label(dst_out_nid)
     local dst_in_nid = find_matching_input(
       block_cx, close_nid, dst_out_label.region_type, dst_out_label.field_path)
     local src_nids = data.filter(
       function(nid) return nid ~= dst_in_nid end,
-      block_cx.graph:immediate_predecessors(close_nid))
+      block_cx.graph:incoming_read_set(close_nid))
     assert(#src_nids == 1)
     local src_nid = src_nids[1]
     local copy_nid = issue_intersection_copy(
