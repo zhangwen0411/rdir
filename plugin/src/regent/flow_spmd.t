@@ -281,6 +281,20 @@ local function make_constant(value, value_type, span)
   }
 end
 
+local function find_first_instance(cx, value_label)
+  local nids = cx.graph:toposort()
+  for _, nid in ipairs(nids) do
+    local label = cx.graph:node_label(nid)
+    if label:is(flow.node.data) and
+      label.region_type == value_label.region_type and
+      label.field_path == value_label.field_path
+    then
+      return nid
+    end
+  end
+  assert(false)
+end
+
 local function find_last_instance(cx, value_label)
   local nids = cx.graph:inverse_toposort()
   for _, nid in ipairs(nids) do
@@ -892,29 +906,59 @@ local function issue_intersection_copy_synchronization(
   local full_in_v1_nid = issue_barrier_advance(cx, full_in_v0_nid)
   local full_out_v1_nid = issue_barrier_advance(cx, full_out_v0_nid)
 
-  issue_barrier_await(cx, empty_out_v0_nid, copy_nid)
-  issue_barrier_arrive(cx, full_out_v0_nid, copy_nid)
-
-  local consumer_nids = cx.graph:immediate_successors(dst_out_nid)
-  for _, consumer_nid in ipairs(consumer_nids) do
-    issue_barrier_await(cx, full_in_v1_nid, consumer_nid)
+  -- Ensure that the consumer doesn't run until the copy completes.
+  local consumer_wrapped = false
+  local consumer_nids = cx.graph:outgoing_read_set(dst_out_nid)
+  if #consumer_nids == 0 then
+    -- Wrap around to top of graph.
+    consumer_wrapped = true
+    local initial_nid = find_first_instance(cx, dst_label)
+    local initial_succ_nids = cx.graph:outgoing_read_set(initial_nid)
+    if #initial_succ_nids > 0 then
+      consumer_nids = initial_succ_nids
+    else
+      consumer_nids = cx.graph:incoming_write_set(initial_nid)
+    end
   end
+  assert(#consumer_nids > 0)
 
-  local producer_nids = cx.graph:incoming_write_set(dst_in_nid)
-  if #producer_nids == 0 then
+  -- Ensure that the copy doesn't start until the previous consumer
+  -- has finished.
+  local prev_consumer_wrapped = false
+  local prev_consumer_nids = data.filter(
+    function(nid) return not cx.graph:node_label(nid):is(flow.node.Close) end,
+    cx.graph:outgoing_read_set(dst_in_nid))
+  if #prev_consumer_nids == 0 then
+    prev_consumer_nids = cx.graph:incoming_write_set(dst_in_nid)
+  end
+  if #prev_consumer_nids == 0 then
+    -- Wrap around to top of graph.
+    prev_consumer_wrapped = true
     local final_nid = find_last_instance(cx, dst_label)
     local final_succ_nids = cx.graph:outgoing_read_set(final_nid)
     if #final_succ_nids > 0 then
-      producer_nids = final_succ_nids
+      prev_consumer_nids = final_succ_nids
     else
-      producer_nids = cx.graph:incoming_write_set(final_nid)
+      prev_consumer_nids = cx.graph:incoming_write_set(final_nid)
     end
   end
   -- If there were more than one of these, we would need to increase
   -- the expected arrival count.
-  assert(#producer_nids == 1)
-  local producer_nid = producer_nids[1]
-  issue_barrier_arrive(cx, empty_in_v0_nid, producer_nid)
+  assert(#prev_consumer_nids == 1)
+  local prev_consumer_nid = prev_consumer_nids[1]
+
+  local empty_in_nid = empty_in_v0_nid
+  local empty_out_nid = (prev_consumer_wrapped and empty_out_v0_nid) or empty_out_v1_nid
+  local full_in_nid = (consumer_wrapped and full_in_v0_nid) or full_in_v1_nid
+  local full_out_nid = full_out_v0_nid
+
+  issue_barrier_await(cx, empty_out_nid, copy_nid)
+  issue_barrier_arrive(cx, full_out_nid, copy_nid)
+
+  for _, consumer_nid in ipairs(consumer_nids) do
+    issue_barrier_await(cx, full_in_nid, consumer_nid)
+  end
+  issue_barrier_arrive(cx, empty_in_nid, prev_consumer_nid)
 end
 
 local function only(list)
