@@ -1023,8 +1023,11 @@ local function privilege_summary_region(cx, usage, strip)
           if ancestor and
             not (privilege == "reads" and other_privilege == "reads")
           then
-            assert(not rawget(next_summary, ancestor))
-            next_summary[ancestor] = std.meet_privilege(privilege, other_privilege)
+            next_summary[ancestor] = std.meet_privilege(
+              privilege,
+              std.meet_privilege(
+                other_privilege,
+                rawget(next_summary, ancestor)))
             recorded = true
           else
             assert(not rawget(next_summary, other))
