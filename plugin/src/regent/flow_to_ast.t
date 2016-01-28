@@ -611,12 +611,18 @@ function flow_to_ast.node_for_num(cx, nid)
 
   local block = flow_to_ast.graph(cx, label.block)
 
+  local options = label.options
+  if #block.stats > 1 and options.parallel:is(ast.options.Demand) then
+    print("FIXME: downgrading __demand(parallel) because RDIR failed to collapse the loop")
+    options = options { parallel = ast.options.Allow { value = false } }
+  end
+
   return terralib.newlist({
       ast.typed.stat.ForNum {
         symbol = label.symbol,
         values = values,
         block = block,
-        options = label.options,
+        options = options,
         span = label.span,
       },
   })
