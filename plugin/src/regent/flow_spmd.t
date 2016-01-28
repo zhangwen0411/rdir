@@ -323,7 +323,9 @@ local function compute_version_numbers(cx)
       then
         contribute = 1
       end
-      version = data.max(version, versions[edge.from_node] + contribute)
+      if not edge.label:is(flow.edge.HappensBefore) then
+        version = data.max(version, versions[edge.from_node] + contribute)
+      end
     end
     versions[nid] = version
   end
@@ -787,8 +789,10 @@ local function issue_barrier_arrive(cx, bar_nid, use_nid)
     bar_nid, cx.graph:node_available_port(bar_nid))
   if use_label:is(flow.node.ForNum) then
     issue_barrier_arrive_loop(cx, bar_nid, use_nid)
-  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy)) then
-    print("FIXME: Issued arrive on non-loop, non-task, non-copy")
+  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
+                use_label:is(flow.node.Close))
+  then
+    print("FIXME: Issued arrive on " .. tostring(use_label:type()))
   end
 end
 
@@ -817,12 +821,14 @@ local function issue_barrier_await(cx, bar_nid, use_nid)
 
   cx.graph:add_edge(
     flow.edge.Await {},
-    bar_nid, cx.graph:node_available_port(bar_nid),
+    bar_nid, cx.graph:node_result_port(bar_nid),
     use_nid, cx.graph:node_available_port(use_nid))
   if use_label:is(flow.node.ForNum) then
     issue_barrier_await_loop(cx, bar_nid, use_nid)
-  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy)) then
-    print("FIXME: Issued arrive on non-loop, non-task, non-copy")
+  elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
+                use_label:is(flow.node.Close))
+  then
+    print("FIXME: Issued arrive on " .. tostring(use_label:type()))
   end
 end
 
@@ -853,7 +859,7 @@ local function issue_intersection_copy_synchronization(
   local dst_type = dst_label.region_type
   assert(src_label.field_path == dst_label.field_path)
 
-  -- The phase barriers here are labeled full/empty * in/out * v0/v1.
+  -- The phase barriers here are labeled full/empty * in/out * v0/vi/vi1
   --
   --   * Full means that the producer has finished writing, and the
   --     data is now ready to be read by the consumer.
@@ -863,13 +869,15 @@ local function issue_intersection_copy_synchronization(
   --
   --   * Out refers to the producer and in refers to the consumer.
   --
-  --   * v0 refers to the current phase and v1 refers to the next.
+  --   * Versions are determined as follows:
+  --       * v0 is the first occurance of the barrier (phase 0)
+  --       * vi is the current occurance (phase i)
+  --       * vi1 is the next occurance (phase i+1)
 
   local empty_in, empty_out, full_in, full_out
   local bars = barriers[src_type][dst_type][src_label.field_path]
   if bars then
     empty_in, empty_out, full_in, full_out = unpack(bars)
-    assert(false) -- if this happens, need to advance the barrier
   else
     local bar_type = std.list(std.list(std.phase_barrier))
 
@@ -897,16 +905,7 @@ local function issue_intersection_copy_synchronization(
       empty_in, empty_out, full_in, full_out)
   end
 
-  local empty_in_v0_nid = cx.graph:add_node(empty_in)
-  local empty_out_v0_nid = cx.graph:add_node(empty_out)
-  local full_in_v0_nid = cx.graph:add_node(full_in)
-  local full_out_v0_nid = cx.graph:add_node(full_out)
-  local empty_in_v1_nid = issue_barrier_advance(cx, empty_in_v0_nid)
-  local empty_out_v1_nid = issue_barrier_advance(cx, empty_out_v0_nid)
-  local full_in_v1_nid = issue_barrier_advance(cx, full_in_v0_nid)
-  local full_out_v1_nid = issue_barrier_advance(cx, full_out_v0_nid)
-
-  -- Ensure that the consumer doesn't run until the copy completes.
+  -- Find the consumer for the data.
   local consumer_wrapped = false
   local consumer_nids = cx.graph:outgoing_read_set(dst_out_nid)
   if #consumer_nids == 0 then
@@ -922,8 +921,7 @@ local function issue_intersection_copy_synchronization(
   end
   assert(#consumer_nids > 0)
 
-  -- Ensure that the copy doesn't start until the previous consumer
-  -- has finished.
+  -- Find the previous consumer for the data.
   local prev_consumer_wrapped = false
   local prev_consumer_nids = data.filter(
     function(nid) return not cx.graph:node_label(nid):is(flow.node.Close) end,
@@ -947,10 +945,34 @@ local function issue_intersection_copy_synchronization(
   assert(#prev_consumer_nids == 1)
   local prev_consumer_nid = prev_consumer_nids[1]
 
-  local empty_in_nid = empty_in_v0_nid
-  local empty_out_nid = (prev_consumer_wrapped and empty_out_v0_nid) or empty_out_v1_nid
-  local full_in_nid = (consumer_wrapped and full_in_v0_nid) or full_in_v1_nid
-  local full_out_nid = full_out_v0_nid
+  local function get_current_instance(cx, label)
+    if bars then return find_last_instance(cx, label) end
+    return cx.graph:add_node(label)
+  end
+
+  -- Get the current phase.
+  local empty_in_vi_nid = get_current_instance(cx, empty_in)
+  local empty_out_vi_nid = get_current_instance(cx, empty_out)
+  local full_in_vi_nid = get_current_instance(cx, full_in)
+  local full_out_vi_nid = get_current_instance(cx, full_out)
+
+  -- Get the next phase.
+  local empty_in_vi1_nid = issue_barrier_advance(cx, empty_in_vi_nid)
+  local empty_out_vi1_nid = issue_barrier_advance(cx, empty_out_vi_nid)
+  local full_in_vi1_nid = issue_barrier_advance(cx, full_in_vi_nid)
+  local full_out_vi1_nid = issue_barrier_advance(cx, full_out_vi_nid)
+
+  -- Get the first phase (for wrap-around).
+  local empty_in_v0_nid = find_first_instance(cx, empty_in)
+  local empty_out_v0_nid = find_first_instance(cx, empty_out)
+  local full_in_v0_nid = find_first_instance(cx, full_in)
+  local full_out_v0_nid = find_first_instance(cx, full_out)
+
+
+  local empty_in_nid = empty_in_vi_nid
+  local empty_out_nid = (prev_consumer_wrapped and empty_out_v0_nid) or empty_out_vi1_nid
+  local full_in_nid = (consumer_wrapped and full_in_v0_nid) or full_in_vi1_nid
+  local full_out_nid = full_out_vi_nid
 
   issue_barrier_await(cx, empty_out_nid, copy_nid)
   issue_barrier_arrive(cx, full_out_nid, copy_nid)
@@ -970,8 +992,9 @@ local function rewrite_communication(cx, shard_loop)
   local shard_label = cx.graph:node_label(shard_loop)
   local block_cx = cx:new_graph_scope(shard_label.block)
 
-  local close_nids = block_cx.graph:filter_nodes(
-    function(_, label) return label:is(flow.node.Close) end)
+  local close_nids = data.filter(
+    function(nid) return block_cx.graph:node_label(nid):is(flow.node.Close) end,
+    block_cx.graph:toposort())
   local intersections = data.new_recursive_map(1)
   local barriers = data.new_recursive_map(2)
   for _, close_nid in ipairs(close_nids) do

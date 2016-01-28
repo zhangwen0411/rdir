@@ -134,8 +134,11 @@ end
 function graph:node_available_port(node)
   local i = self:node_minimum_port(node)
   local inputs = self:incoming_edges_by_port(node)
+  local outputs = self:outgoing_edges_by_port(node)
   while true do
-    if not rawget(inputs, i) or #inputs[i] == 0 then
+    if (not rawget(inputs, i) or #inputs[i] == 0) and
+      (not rawget(outputs, i) or #outputs[i] == 0)
+    then
       return i
     end
     i = i + 1
@@ -738,7 +741,7 @@ function graph:inverse_toposort()
   return reverse(sort)
 end
 
-function graph:printpretty()
+function graph:printpretty(ids, metadata)
   print("digraph {")
   print("rankdir = LR;")
   print("node [ margin = \"0.055,0.0275\" ];")
@@ -758,6 +761,8 @@ function graph:printpretty()
     elseif node:is(flow.node.Reduce) then
       label = label .. " " .. tostring(node.op)
     end
+    if ids then label = label .. " " .. tostring(i) end
+    if metadata then label = label .. " " .. tostring(metadata[i]) end
     local shape
     if node:is(flow.node.Opaque) or
       node:is(flow.node.IndexAccess) or
@@ -798,6 +803,7 @@ function graph:printpretty()
           label = label .. " " .. tostring(edge.flag:type()):gsub("[^.]+[.]", ""):lower()
         end
       end
+      if ids then label = tostring(from_port) .. " " .. label .. " " .. tostring(to_port) end
       local style = "solid"
       if edge:is(flow.edge.HappensBefore) then
         style = "dotted"
