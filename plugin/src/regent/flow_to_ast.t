@@ -675,12 +675,26 @@ function flow_to_ast.node_data(cx, nid)
   for _, edges in pairs(inputs) do
     for _, edge in ipairs(edges) do
       if edge.label:is(flow.edge.Name) then
-        if not cx.region_ast[label.region_type] then
-          cx.ast[nid] = cx.ast[edge.from_node]
-          cx.region_ast[label.region_type] = cx.ast[edge.from_node]
-        else
-          cx.ast[nid] = cx.region_ast[label.region_type]
-        end
+        -- FIXME: We can't reuse cached regions. The problem is with
+        -- default partitions: there are multiple ways to name a
+        -- region (and only some will provide the partition). So it's
+        -- important to actually use the original name.
+
+        -- As if that wasn't bad enough, opaque nodes currently look
+        -- up region values through the cache. So we need to forceably
+        -- set the region type too. (And hope for the best, since it's
+        -- not at all guarranteed that we'll be processing nodes in
+        -- the right order.)
+
+        cx.ast[nid] = cx.ast[edge.from_node]
+        cx.region_ast[label.region_type] = cx.ast[edge.from_node]
+
+        -- if not cx.region_ast[label.region_type] then
+        --   cx.ast[nid] = cx.ast[edge.from_node]
+        --   cx.region_ast[label.region_type] = cx.ast[edge.from_node]
+        -- else
+        --   cx.ast[nid] = cx.region_ast[label.region_type]
+        -- end
         return terralib.newlist()
       end
     end
