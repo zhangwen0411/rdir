@@ -1591,6 +1591,33 @@ local function find_partition_nids(cx, region_type, need_copy, partitions,
   return old_nids, new_nids, partition_nids, first_partition_label, first_new_label
 end
 
+local function find_root_region(cx, nid)
+  local label = cx.graph:node_label(nid)
+  while not label:is(flow.node.data.Region) do
+    local writers = cx.graph:incoming_write_set(nid)
+    assert(#writers == 1)
+    local writer = writers[1]
+
+    local reads = cx.graph:filter_immediate_predecessors_by_edges(
+      function(edge)
+        local from_label = cx.graph:node_label(edge.from_node)
+        return from_label:is(flow.node.data) and
+          cx.tree:lowest_common_ancestor(
+            from_label.region_type, label.region_type) ==
+          from_label.region_type and
+          from_label.field_path == label.field_path and
+          edge.label:is(flow.edge.Read)
+      end,
+      writer)
+    assert(#reads == 1)
+    local read = reads[1]
+
+    nid = read
+    label = cx.graph:node_label(nid)
+  end
+  return nid
+end
+
 local function issue_input_copies(cx, region_type, need_copy, partitions,
                                   original_bounds, closed_nids, copy_nids)
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
@@ -1613,10 +1640,7 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
     if old_label:is(flow.node.data.Region) then
       closed_nids[region_type][field_path] = old_nid
     else
-      local region_nid = cx.graph:immediate_predecessor(
-        cx.graph:find_immediate_predecessor(
-          function(nid, label) return label:is(flow.node.Open) end,
-          old_nid))
+      local region_nid = find_root_region(cx, old_nid)
       local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
       closed_nids[region_type][field_path] = closed_nid
     end
@@ -1731,8 +1755,10 @@ local function issue_output_copies(cx, region_type, need_copy, partitions,
 
   -- Open the partition so that it can be copied.
   local open_nids = data.newmap()
-  for field_path, closed_nid in closed_nids[region_type]:items() do
+  for field_path, old_nid in old_nids:items() do
+    local closed_nid = closed_nids[region_type][field_path]
     local opened_nid = opened_nids[field_path]
+    assert(closed_nid and opened_nid)
     local open_nid = cx.graph:add_node(flow.node.Open {})
     open_nids[field_path] = open_nid
     cx.graph:add_edge(

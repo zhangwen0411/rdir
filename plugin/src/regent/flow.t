@@ -602,16 +602,8 @@ function graph:filter_immediate_successors_by_edges(fn, node)
 end
 
 function graph:incoming_read_set(node)
-  local result = terralib.newlist()
-  for from_node, edges in pairs(self.backedges[node]) do
-    for _, edge in pairs(edges) do
-      if edge.label:is(flow.edge.Read) then
-        result:insert(from_node)
-        break
-      end
-    end
-  end
-  return result
+  return self:filter_immediate_predecessors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Read) end, node)
 end
 
 function graph:incoming_write_set(node)
@@ -750,7 +742,7 @@ function graph:printpretty(ids, metadata)
     if node:is(flow.node.data) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
-      local name = tostring(node.value.value)
+      local name = tostring(node.value.value):gsub("\n", "\\n")
       if terralib.isfunction(node.value.value) then
         name = tostring(node.value.value.name)
       end
