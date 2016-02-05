@@ -1204,6 +1204,8 @@ function analyze_privileges.expr_call(cx, node, privilege_map)
     local param_privilege_map
     if std.is_task(node.fn.value) and std.type_supports_privileges(param_type) then
       param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
+    elseif flow_region_tree.is_region(param_type) then
+      param_privilege_map = none
     else
       param_privilege_map = reads
     end
@@ -1925,6 +1927,8 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
     local param_privilege_map
     if std.is_task(node.fn.value) and std.type_supports_privileges(param_type) then
       param_privilege_map = get_privilege_field_map(node.fn.value, param_type)
+    elseif flow_region_tree.is_region(param_type) then
+      param_privilege_map = none
     else
       param_privilege_map = reads
     end
