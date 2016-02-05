@@ -678,6 +678,12 @@ local function get_region_label(cx, region_type, field_path)
       region_type = region_type,
       field_path = field_path,
     }
+  elseif std.is_cross_product(std.as_read(expr_type)) then
+    return flow.node.data.CrossProduct {
+      value = name,
+      region_type = region_type,
+      field_path = field_path,
+    }
   elseif std.is_list_of_regions(std.as_read(expr_type)) then
     return flow.node.data.List {
       value = name,

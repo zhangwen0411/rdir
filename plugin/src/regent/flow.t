@@ -606,6 +606,11 @@ function graph:incoming_read_set(node)
     function(edge) return edge.label:is(flow.edge.Read) end, node)
 end
 
+function graph:incoming_name_set(node)
+  return self:filter_immediate_predecessors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Name) end, node)
+end
+
 function graph:incoming_write_set(node)
   return self:filter_immediate_predecessors_by_edges(
     function(edge) return edge.label:is(flow.edge.Write) end, node)
@@ -835,6 +840,7 @@ flow.node:leaf("MustEpoch", {"block", "options", "span"})
 flow.node:inner("data", {"value", "region_type", "field_path"})
 flow.node.data:leaf("Region", {})
 flow.node.data:leaf("Partition", {})
+flow.node.data:leaf("CrossProduct", {})
 flow.node.data:leaf("List", {})
 flow.node.data:leaf("Scalar", {"fresh"})
 flow.node:leaf("Constant", {"value"})
