@@ -738,7 +738,7 @@ function graph:inverse_toposort()
   return reverse(sort)
 end
 
-function graph:printpretty(ids, metadata)
+function graph:printpretty(ids, types, metadata)
   print("digraph {")
   print("rankdir = LR;")
   print("node [ margin = \"0.055,0.0275\" ];")
@@ -753,6 +753,7 @@ function graph:printpretty(ids, metadata)
       end
       label = label .. " " .. tostring(name)
       if node:is(flow.node.data) then
+        if types then label = label .. " " .. tostring(node.region_type) end
         label = label .. " " .. tostring(node.field_path)
       end
     elseif node:is(flow.node.Reduce) then

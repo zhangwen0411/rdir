@@ -37,7 +37,8 @@ local flow_region_tree = {}
 -- regions) to be regions as well.
 function flow_region_tree.is_region(region_type)
   return std.is_region(region_type) or std.is_partition(region_type) or
-    std.is_cross_product(region_type) or std.is_list_of_regions(region_type)
+    std.is_cross_product(region_type) or std.is_list_of_regions(region_type) or
+    std.is_list_of_partitions(region_type)
 end
 
 -- Region Tree

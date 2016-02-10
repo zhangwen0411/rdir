@@ -118,16 +118,19 @@ local function get_WAR_edges(cx, edges)
       local region = to_label.region_type
       for _, other in ipairs(cx.graph:immediate_predecessors(from_node)) do
         local other_label = cx.graph:node_label(other)
-        if other_label:is(flow.node.data) and
-          to_label.field_path == other_label.field_path and
-          cx.tree:can_alias(other_label.region_type, region)
-        then
-          for _, reader in ipairs(cx.graph:immediate_successors(other)) do
-            if reader ~= from_node and
-              not cx.graph:reachable(reader, from_node) and
-              not cx.graph:reachable(from_node, reader)
-            then
-              edges:insert({ from_node = reader, to_node = from_node })
+        if other_label:is(flow.node.data) then
+          local other_region = other_label.region_type
+          if to_label.field_path == other_label.field_path and
+            std.type_maybe_eq(other_region:fspace(), region:fspace()) and
+            cx.tree:can_alias(other_region, region)
+          then
+            for _, reader in ipairs(cx.graph:immediate_successors(other)) do
+              if reader ~= from_node and
+                not cx.graph:reachable(reader, from_node) and
+                not cx.graph:reachable(from_node, reader)
+              then
+                edges:insert({ from_node = reader, to_node = from_node })
+              end
             end
           end
         end

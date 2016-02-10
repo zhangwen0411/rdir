@@ -1011,38 +1011,36 @@ local function strip_indexing(cx, region_type)
   return path[last_index + 1]
 end
 
-local function privilege_summary_region(cx, usage, strip)
+local function privilege_summary_region(cx, usage, strip, skip_regions)
   local summary = {}
   if not usage then return summary end
   for region_type, privilege in pairs(usage) do
-    if privilege ~= "none" then
-      local region = region_type
+    if privilege ~= "none" or not skip_regions or not rawget(skip_regions, region_type) then
       if strip then
-        region = strip_indexing(cx, region_type)
+        region_type = strip_indexing(cx, region_type)
       end
 
       local recorded = false
       local next_summary = {}
       for other, other_privilege in pairs(summary) do
-        if other_privilege ~= "none" then
-          local ancestor = cx.tree:lowest_common_ancestor(region, other)
-          if ancestor and
-            not (privilege == "reads" and other_privilege == "reads")
-          then
-            next_summary[ancestor] = std.meet_privilege(
-              privilege,
-              std.meet_privilege(
-                other_privilege,
-                rawget(next_summary, ancestor)))
-            recorded = true
-          else
-            assert(not rawget(next_summary, other))
-            next_summary[other] = other_privilege
-          end
+        local ancestor = cx.tree:lowest_common_ancestor(region_type, other)
+        if ancestor and
+          not (privilege == "none" or
+               other_privilege == "none" or
+               (privilege == "reads" and other_privilege == "reads"))
+        then
+          next_summary[ancestor] = std.meet_privilege(
+            privilege,
+            std.meet_privilege(
+              other_privilege,
+              rawget(next_summary, ancestor)))
+          recorded = true
+        else
+          next_summary[other] = std.meet_privilege(other_privilege, rawget(next_summary, other))
         end
       end
       if not recorded then
-        next_summary[region] = privilege
+        next_summary[region_type] = std.meet_privilege(privilege, rawget(next_summary, region_type))
       end
       summary = next_summary
     end
@@ -1051,10 +1049,29 @@ local function privilege_summary_region(cx, usage, strip)
 end
 
 local function privilege_summary(cx, usage, strip)
-  local summary = new_field_map()
-  if not usage then return summary end
+  local initial = new_field_map()
+  if not usage then return initial end
   for field_path, privileges in usage:items() do
-    summary:insert(field_path, privilege_summary_region(cx, privileges, strip))
+    initial:insert(field_path, privilege_summary_region(cx, privileges, strip))
+  end
+
+  -- Hack: This process can produce more "none" privileges than we'd
+  -- like (because none on <> is redundant with reads <a> even though
+  -- those two look like different privileges). Get a list of regions
+  -- with privileges and strip any redundant regions.
+
+  local privilege_regions = {}
+  for field_path, privileges in initial:items() do
+    for region_type, privilege in pairs(privileges) do
+      if privilege ~= "none" then
+        privilege_regions[region_type] = region_type
+      end
+    end
+  end
+
+  local summary = new_field_map()
+  for field_path, privileges in usage:items() do
+    summary:insert(field_path, privilege_summary_region(cx, privileges, strip, privilege_regions))
   end
   return summary
 end
