@@ -645,8 +645,8 @@ function graph:node_result_is_used(node)
   return false
 end
 
-local function dfs(graph, node, predicate, visited)
-  if predicate(node) then
+local function dfs(graph, node, edge_filter, stop_predicate, visited)
+  if stop_predicate(node) then
     return true
   end
 
@@ -656,23 +656,36 @@ local function dfs(graph, node, predicate, visited)
   visited[node] = true
 
   for to_node, edges in pairs(graph.edges[node]) do
-    if dfs(graph, to_node, predicate, visited) then
+    local accept = false
+    if edge_filter then
+      for _, edge in ipairs(edges) do
+        if edge_filter(pack_edge(node, to_node, edge)) then
+          accept = true
+          break
+        end
+      end
+    else
+      accept = true
+    end
+
+    if accept and dfs(graph, to_node, edge_filter, stop_predicate, visited) then
       return true
     end
   end
   return false
 end
 
-function graph:reachable(src_node, dst_node)
-  return dfs(self, src_node, function(node) return node == dst_node end, {})
+function graph:reachable(src_node, dst_node, edge_filter)
+  return dfs(
+    self, src_node, edge_filter, function(node) return node == dst_node end, {})
 end
 
 function graph:between_nodes(src_node, dst_node)
   local result = terralib.newlist()
   dfs(
-    self, src_node, function(node)
+    self, src_node, false, function(node)
       if node ~= src_node and node ~= dst_node and
-        dfs(self, node, function(other) return other == dst_node end, {})
+        dfs(self, node, false, function(other) return other == dst_node end, {})
       then
         result:insert(node)
       end

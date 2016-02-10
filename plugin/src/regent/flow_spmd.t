@@ -985,8 +985,29 @@ local function issue_intersection_copy_synchronization(
     end
   end
   -- If there were more than one of these, we would need to increase
-  -- the expected arrival count.
-  assert(#prev_consumer_nids == 1)
+  -- the expected arrival count. Try to reduce the set size to one by
+  -- finding a consumer which dominates the others.
+  assert(#prev_consumer_nids > 0)
+  local prev_consumer_nid
+  for _, nid in ipairs(prev_consumer_nids) do
+    local dominates = true
+    for _, other_nid in ipairs(prev_consumer_nids) do
+      if not cx.graph:reachable(
+        other_nid, nid,
+        function(edge)
+          return edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write)
+        end)
+      then
+        dominates = false
+        break
+      end
+    end
+    if dominates then
+      prev_consumer_nid = nid
+      break
+    end
+  end
+  assert(prev_consumer_nid)
   local prev_consumer_nid = prev_consumer_nids[1]
 
   local function get_current_instance(cx, label)
