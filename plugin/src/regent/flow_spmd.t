@@ -217,27 +217,38 @@ local function find_close_results(cx, close_nid)
 end
 
 local function find_matching_input(cx, op_nid, region_type, field_path)
-  return cx.graph:find_immediate_predecessor(
-    function(nid, label)
-      return label:is(flow.node.data) and
-        label.region_type == region_type and
-        (not field_path or label.field_path == field_path)
+  local results = cx.graph:filter_immediate_predecessors_by_edges(
+    function(edge)
+      if edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write) then
+        local nid, label = edge.from_node, cx.graph:node_label(edge.from_node)
+        return label:is(flow.node.data) and
+          label.region_type == region_type and
+          (not field_path or label.field_path == field_path)
+      end
     end,
     op_nid)
+  return results[1]
 end
 
 local function find_matching_inputs(cx, op_nid, region_type, field_path)
-  return cx.graph:filter_immediate_predecessors(
-    function(nid, label)
-      return label:is(flow.node.data) and
-        label.region_type == region_type and
-        (not field_path or label.field_path == field_path)
+  return cx.graph:filter_immediate_predecessors_by_edges(
+    function(edge)
+      if edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write) then
+        local nid, label = edge.from_node, cx.graph:node_label(edge.from_node)
+        return label:is(flow.node.data) and
+          label.region_type == region_type and
+          (not field_path or label.field_path == field_path)
+      end
     end,
     op_nid)
 end
 
 local function find_predecessor_maybe(cx, nid)
-  local preds = cx.graph:immediate_predecessors(nid)
+  local preds = cx.graph:filter_immediate_predecessors_by_edges(
+    function(edge)
+      return edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write)
+    end,
+    nid)
   if #preds == 0 then
     return
   end
