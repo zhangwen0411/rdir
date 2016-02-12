@@ -1739,6 +1739,23 @@ local function find_root_region(cx, nid)
   return nid
 end
 
+local function find_close_region(cx, nid)
+  local closes = cx.graph:filter_immediate_successors_by_edges(
+    function(edge)
+      local to_label = cx.graph:node_label(edge.to_node)
+      return to_label:is(flow.node.Close) and
+        edge.label:is(flow.edge.Read)
+    end,
+    nid)
+  if #closes < 1 then return end
+  assert(#closes == 1)
+  local close = closes[1]
+
+  local writes = cx.graph:outgoing_write_set(close)
+  assert(#writes == 1)
+  return writes[1]
+end
+
 local function issue_input_copies_partition(cx, region_type, need_copy,
                                             partitions, original_bounds,
                                             closed_nids, copy_nids)
@@ -1758,14 +1775,21 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
   end
 
   -- Find the region which roots each partition and make a copy.
+  local needs_close = data.new_recursive_map(1)
   for field_path, old_nid in old_nids:items() do
     local old_label = cx.graph:node_label(old_nid)
     if old_label:is(flow.node.data.Region) then
       closed_nids[region_type][field_path] = old_nid
     else
-      local region_nid = find_root_region(cx, old_nid)
-      local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
-      closed_nids[region_type][field_path] = closed_nid
+      local old_closed_nid = find_close_region(cx, old_nid)
+      if old_closed_nid then
+        closed_nids[region_type][field_path] = old_closed_nid
+      else
+        local region_nid = find_root_region(cx, old_nid)
+        local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
+        closed_nids[region_type][field_path] = closed_nid
+        needs_close[region_type][field_path] = true
+      end
     end
   end
 
@@ -1822,7 +1846,7 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
   -- Close each partition so that it can be copied.
   for field_path, closed_nid in closed_nids[region_type]:items() do
     local old_nid = old_nids[field_path]
-    if not cx.graph:node_label(old_nid):is(flow.node.data.Region) then
+    if needs_close[region_type][field_path] then
       local close_nid = cx.graph:add_node(flow.node.Close {})
       cx.graph:add_edge(
         flow.edge.Read(flow.default_mode()), old_nid, cx.graph:node_result_port(old_nid),

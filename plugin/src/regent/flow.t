@@ -695,7 +695,7 @@ end
 
 local function toposort_node(graph, node, visited, path, sort)
   if rawget(path, node) then
-    error("cycle in toposort")
+    error("cycle in toposort at " .. tostring(node))
   end
   if not rawget(visited, node) then
     path[node] = true
@@ -710,7 +710,7 @@ end
 
 local function inverse_toposort_node(graph, node, visited, path, sort)
   if rawget(path, node) then
-    error("cycle in inverse_toposort")
+    error("cycle in inverse_toposort at " .. tostring(node))
   end
   if not rawget(visited, node) then
     path[node] = true
