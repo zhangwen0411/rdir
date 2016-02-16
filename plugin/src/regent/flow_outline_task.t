@@ -147,7 +147,7 @@ local function gather_params(cx, nid)
   return result
 end
 
-local function privilege_kind(label)
+local function privilege_kind(label, force_read_write)
   if label:is(flow.edge.HappensBefore) then
     -- Skip
   elseif label:is(flow.edge.Name) then
@@ -155,7 +155,11 @@ local function privilege_kind(label)
   elseif label:is(flow.edge.None) then
     -- Skip
   elseif label:is(flow.edge.Read) then
-    return std.reads
+    if force_read_write then
+      return std.writes
+    else
+      return std.reads
+    end
   elseif label:is(flow.edge.Write) then
     return std.writes
   elseif label:is(flow.edge.Reduce) then
@@ -197,7 +201,7 @@ local function flag_kind(label)
   end
 end
 
-local function summarize_privileges(cx, nid)
+local function summarize_privileges(cx, nid, force_read_write)
   local result = terralib.newlist()
   local inputs = cx.graph:incoming_edges(nid)
   local outputs = cx.graph:outgoing_edges(nid)
@@ -207,7 +211,7 @@ local function summarize_privileges(cx, nid)
     if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
       region = label.value.value
     end
-    local privilege = privilege_kind(edge.label)
+    local privilege = privilege_kind(edge.label, force_read_write)
     if region and privilege then
       result:insert(data.map_from_table {
           node_type = "privilege",
@@ -223,7 +227,7 @@ local function summarize_privileges(cx, nid)
     if label:is(flow.node.data.Region) or label:is(flow.node.data.List) then
       region = label.value.value
     end
-    local privilege = privilege_kind(edge.label)
+    local privilege = privilege_kind(edge.label, force_read_write)
     if region and privilege then
       result:insert(data.map_from_table {
           node_type = "privilege",
@@ -300,11 +304,11 @@ local function summarize_flags(cx, nid)
   return result
 end
 
-local function extract_task(cx, nid, prefix)
+local function extract_task(cx, nid, prefix, force_read_write)
   local label = cx.graph:node_label(nid)
   local params = gather_params(cx, nid)
   local return_type = terralib.types.unit
-  local privileges = summarize_privileges(cx, nid)
+  local privileges = summarize_privileges(cx, nid, force_read_write)
   local coherence_modes = summarize_coherence(cx, nid)
   local flags = summarize_flags(cx, nid)
   local conditions = {} -- FIXME: Need conditions.
@@ -460,18 +464,18 @@ local function issue_call(cx, nid, task)
   return call_nid
 end
 
-local function outline(cx, nid, prefix)
-  local task = extract_task(cx, nid, prefix)
+local function outline(cx, nid, prefix, force_read_write)
+  local task = extract_task(cx, nid, prefix, force_read_write)
   return issue_call(cx, nid, task)
 end
 
 local flow_outline_task = {}
 
-function flow_outline_task.entry(graph, nid, prefix)
+function flow_outline_task.entry(graph, nid, prefix, force_read_write)
   assert(flow.is_graph(graph) and flow.is_valid_node(nid))
   local cx = context.new_global_scope():new_graph_scope(graph)
   assert(can_outline(cx, nid))
-  local result_nid = outline(cx, nid, prefix)
+  local result_nid = outline(cx, nid, prefix, force_read_write)
   cx.graph:remove_node(nid)
   return result_nid
 end

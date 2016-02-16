@@ -1739,7 +1739,7 @@ local function find_root_region(cx, nid)
   return nid
 end
 
-local function find_close_region(cx, nid)
+local function find_close_region(cx, nid, loop)
   local closes = cx.graph:filter_immediate_successors_by_edges(
     function(edge)
       local to_label = cx.graph:node_label(edge.to_node)
@@ -1747,9 +1747,15 @@ local function find_close_region(cx, nid)
         edge.label:is(flow.edge.Read)
     end,
     nid)
-  if #closes < 1 then return end
+  if #closes < 1 then
+    return
+  end
   assert(#closes == 1)
   local close = closes[1]
+
+  if cx.graph:reachable(loop, close) then
+    return
+  end
 
   local writes = cx.graph:outgoing_write_set(close)
   assert(#writes == 1)
@@ -1757,7 +1763,7 @@ local function find_close_region(cx, nid)
 end
 
 local function issue_input_copies_partition(cx, region_type, need_copy,
-                                            partitions, original_bounds,
+                                            partitions, old_loop, original_bounds,
                                             closed_nids, copy_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
@@ -1781,11 +1787,11 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
     if old_label:is(flow.node.data.Region) then
       closed_nids[region_type][field_path] = old_nid
     else
-      local old_closed_nid = find_close_region(cx, old_nid)
+      local old_closed_nid = find_close_region(cx, old_nid, old_loop)
       if old_closed_nid then
         closed_nids[region_type][field_path] = old_closed_nid
       else
-        local region_nid = find_root_region(cx, old_nid)
+        local region_nid = find_root_region(cx, old_nid, old_loop)
         local closed_nid = cx.graph:add_node(cx.graph:node_label(region_nid))
         closed_nids[region_type][field_path] = closed_nid
         needs_close[region_type][field_path] = true
@@ -1886,7 +1892,7 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
 end
 
 local function issue_input_copies_cross_product(cx, region_type, need_copy,
-                                                partitions, original_bounds,
+                                                partitions, old_loop, original_bounds,
                                                 closed_nids, copy_nids)
   assert(std.is_list_of_partitions(region_type))
   local old_nids, new_nids, product_nids, first_product_label, first_new_label =
@@ -1946,13 +1952,16 @@ local function issue_input_copies_cross_product(cx, region_type, need_copy,
 end
 
 local function issue_input_copies(cx, region_type, need_copy, partitions,
-                                  original_bounds, closed_nids, copy_nids)
+                                  old_loop, original_bounds,
+                                  closed_nids, copy_nids)
   if std.is_list_of_regions(region_type) then
     issue_input_copies_partition(cx, region_type, need_copy, partitions,
-                                 original_bounds, closed_nids, copy_nids)
+                                 old_loop, original_bounds,
+                                 closed_nids, copy_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_input_copies_cross_product(cx, region_type, need_copy, partitions,
-                                     original_bounds, closed_nids, copy_nids)
+                                     old_loop, original_bounds,
+                                     closed_nids, copy_nids)
   else
     assert(false)
   end
@@ -2472,7 +2481,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     end
     if not need_copy:is_empty() then
       issue_input_copies(
-        cx, region_type, need_copy, partitions, original_bounds,
+        cx, region_type, need_copy, partitions, old_loop, original_bounds,
         closed_nids, copy_nids)
     end
   end
@@ -2601,7 +2610,7 @@ local function spmdize(cx, loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
   upgrade_simultaneous_coherence(shard_cx)
   local shard_task = flow_outline_task.entry(
-    shard_cx.graph, shard_loop, "shard")
+    shard_cx.graph, shard_loop, "shard", true)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
     shard_cx, bounds, lists, intersections, barriers, mapping)
@@ -2613,7 +2622,7 @@ local function spmdize(cx, loop)
   downgrade_simultaneous_coherence(dist_cx)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
-  local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop, "dist")
+  local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop, "dist", true)
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
   rewrite_inputs(cx, loop, epoch_task, original_partitions, original_bounds,
