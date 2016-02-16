@@ -937,22 +937,22 @@ local function issue_intersection_copy_synchronization(
     local bar_type = std.list(std.list(std.phase_barrier))
 
     local empty_in_symbol = terralib.newsymbol(
-      bar_type, "empty_in_" .. tostring(dst_label.value.value))
+      bar_type, "empty_in_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
     empty_in = make_variable_label(
       cx, empty_in_symbol, bar_type, dst_label.value.span)
 
     local empty_out_symbol = terralib.newsymbol(
-      bar_type, "empty_out_" .. tostring(dst_label.value.value))
+      bar_type, "empty_out_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
     empty_out = make_variable_label(
       cx, empty_out_symbol, bar_type, dst_label.value.span)
 
     local full_in_symbol = terralib.newsymbol(
-      bar_type, "full_in_" .. tostring(dst_label.value.value))
+      bar_type, "full_in_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
     full_in = make_variable_label(
       cx, full_in_symbol, bar_type, dst_label.value.span)
 
     local full_out_symbol = terralib.newsymbol(
-      bar_type, "full_out_" .. tostring(dst_label.value.value))
+      bar_type, "full_out_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
     full_out = make_variable_label(
       cx, full_out_symbol, bar_type, dst_label.value.span)
 
