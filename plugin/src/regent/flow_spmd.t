@@ -445,59 +445,61 @@ local function normalize_communication(cx, shard_loop)
   -- Compute the most recent versions for each region.
   local data_nids = block_cx.graph:filter_nodes(
     function(_, label) return label:is(flow.node.data) end)
-  local region_nids = data.newmap()
-  local region_versions = data.newmap()
+  local region_nids = data.new_recursive_map(1)
+  local region_versions = data.new_recursive_map(1)
   for _, data_nid in ipairs(data_nids) do
-    local region_type = block_cx.graph:node_label(data_nid).region_type
-    if not region_versions[region_type] or
-      versions[data_nid] > region_versions[region_type]
+    local label = block_cx.graph:node_label(data_nid)
+    local region_type = label.region_type
+    local field_path = label.field_path
+    if not region_versions[region_type][field_path] or
+      versions[data_nid] > region_versions[region_type][field_path]
     then
-      region_nids[region_type] = data_nid
-      region_versions[region_type] = versions[data_nid]
+      region_nids[region_type][field_path] = data_nid
+      region_versions[region_type][field_path] = versions[data_nid]
     end
   end
 
   -- Check for and update out-of-date data.
-  for _, region_type in region_nids:keys() do
-    local field_path = block_cx.graph:node_label(
-      region_nids[region_type]).field_path
-    local newer_regions = terralib.newlist()
-    if #block_cx.graph:outgoing_read_set(region_nids[region_type]) > 0 then
-      for _, other_region_type in region_nids:keys() do
-        local other_field_path = block_cx.graph:node_label(
-          region_nids[other_region_type]).field_path
-        if not std.type_eq(region_type, other_region_type) and
-          std.type_maybe_eq(region_type:fspace(), other_region_type:fspace()) and
-          block_cx.tree:can_alias(region_type, other_region_type) and
-          field_path == other_field_path and
-          region_versions[region_type] < region_versions[other_region_type]
-        then
-          newer_regions:insert(other_region_type)
+  for region_type, r1 in region_nids:items() do
+    for field_path, _ in r1:items() do
+      local newer_regions = terralib.newlist()
+      if #block_cx.graph:outgoing_read_set(region_nids[region_type][field_path]) > 0 then
+        for other_region_type, r2 in region_nids:items() do
+          for other_field_path, _ in r2:items() do
+            if not std.type_eq(region_type, other_region_type) and
+              std.type_maybe_eq(region_type:fspace(), other_region_type:fspace()) and
+              block_cx.tree:can_alias(region_type, other_region_type) and
+              field_path == other_field_path and
+              region_versions[region_type][field_path] < region_versions[other_region_type][field_path]
+            then
+              newer_regions:insert(other_region_type)
+            end
+          end
         end
       end
-    end
-    newer_regions:sort(
-      function(a, b) return region_versions[a] < region_versions[b] end)
-    for _, newer_region_type in ipairs(newer_regions) do
-      local close_nid = block_cx.graph:add_node(flow.node.Close {})
-      local current_nid = region_nids[region_type]
-      local next_nid = block_cx.graph:add_node(
-        block_cx.graph:node_label(current_nid))
-      local newer_region_nid = region_nids[newer_region_type]
+      newer_regions:sort(
+        function(a, b) return region_versions[a] < region_versions[b] end)
+      for _, newer_region_type in ipairs(newer_regions) do
+        local close_nid = block_cx.graph:add_node(flow.node.Close {})
+        local current_nid = region_nids[region_type][field_path]
+        local next_nid = block_cx.graph:add_node(
+          block_cx.graph:node_label(current_nid))
+        local newer_region_nid = region_nids[newer_region_type][field_path]
 
-      block_cx.graph:add_edge(
-        flow.edge.Read(flow.default_mode()),
-        current_nid, block_cx.graph:node_result_port(current_nid),
-        close_nid, 1)
-      block_cx.graph:add_edge(
-        flow.edge.Read(flow.default_mode()),
-        newer_region_nid, block_cx.graph:node_result_port(newer_region_nid),
-        close_nid, 2)
+        block_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          current_nid, block_cx.graph:node_result_port(current_nid),
+          close_nid, 1)
+        block_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          newer_region_nid, block_cx.graph:node_result_port(newer_region_nid),
+          close_nid, 2)
 
-      block_cx.graph:add_edge(
-        flow.edge.Write(flow.default_mode()),
-        close_nid, 1,
-        next_nid, block_cx.graph:node_available_port(next_nid))
+        block_cx.graph:add_edge(
+          flow.edge.Write(flow.default_mode()),
+          close_nid, 1,
+          next_nid, block_cx.graph:node_available_port(next_nid))
+      end
     end
   end
 
@@ -697,26 +699,33 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
   local dst_label = cx.graph:node_label(dst_in_nid)
   local dst_type = dst_label.region_type
   assert(src_label.field_path == dst_label.field_path)
+  local field_path = src_label.field_path
 
   local intersection_label
-  if intersections[src_type][dst_type] then
-    intersection_label = intersections[src_type][dst_type]
+  if intersections[src_type][dst_type][field_path] then
+    intersection_label = intersections[src_type][dst_type][field_path]
   else
-    local intersection_type = std.list(
-      std.list(dst_type:subregion_dynamic(), nil, 1), nil, 1)
-    local intersection_symbol = terralib.newsymbol(
-      intersection_type,
-      "intersection_" .. tostring(src_label.value.value) .. "_" ..
-        tostring(dst_label.value.value))
-    intersection_label = dst_label {
-      value = dst_label.value {
-        value = intersection_symbol,
-        expr_type = std.type_sub(dst_label.value.expr_type,
-                                 {[dst_type] = intersection_type}),
-      },
-      region_type = intersection_type,
-    }
-    intersections[src_type][dst_type] = intersection_label
+    for _, label in intersections[src_type][dst_type]:items() do
+      intersection_label = label { field_path = field_path }
+      break
+    end
+    if not intersection_label then
+      local intersection_type = std.list(
+        std.list(dst_type:subregion_dynamic(), nil, 1), nil, 1)
+      local intersection_symbol = terralib.newsymbol(
+        intersection_type,
+        "intersection_" .. tostring(src_label.value.value) .. "_" ..
+          tostring(dst_label.value.value))
+      intersection_label = dst_label {
+        value = dst_label.value {
+          value = intersection_symbol,
+          expr_type = std.type_sub(dst_label.value.expr_type,
+                                   {[dst_type] = intersection_type}),
+        },
+        region_type = intersection_type,
+      }
+    end
+    intersections[src_type][dst_type][field_path] = intersection_label
   end
   local intersection_in_nid = cx.graph:add_node(intersection_label)
   local intersection_out_nid = cx.graph:add_node(intersection_label)
@@ -733,7 +742,7 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid,
     dst_out_nid, cx.graph:node_sync_port(dst_out_nid))
 
   -- Add the copy.
-  local field_paths = terralib.newlist({src_label.field_path})
+  local field_paths = terralib.newlist({field_path})
   local copy = flow.node.Copy {
     src_field_paths = field_paths,
     dst_field_paths = field_paths,
@@ -937,22 +946,22 @@ local function issue_intersection_copy_synchronization(
     local bar_type = std.list(std.list(std.phase_barrier))
 
     local empty_in_symbol = terralib.newsymbol(
-      bar_type, "empty_in_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
+      bar_type, "empty_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(src_label.field_path))
     empty_in = make_variable_label(
       cx, empty_in_symbol, bar_type, dst_label.value.span)
 
     local empty_out_symbol = terralib.newsymbol(
-      bar_type, "empty_out_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
+      bar_type, "empty_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(src_label.field_path))
     empty_out = make_variable_label(
       cx, empty_out_symbol, bar_type, dst_label.value.span)
 
     local full_in_symbol = terralib.newsymbol(
-      bar_type, "full_in_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
+      bar_type, "full_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(src_label.field_path))
     full_in = make_variable_label(
       cx, full_in_symbol, bar_type, dst_label.value.span)
 
     local full_out_symbol = terralib.newsymbol(
-      bar_type, "full_out_" .. tostring(dst_label.value.value) .. tostring(terralib.newsymbol()))
+      bar_type, "full_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(src_label.field_path))
     full_out = make_variable_label(
       cx, full_out_symbol, bar_type, dst_label.value.span)
 
@@ -1071,7 +1080,7 @@ local function rewrite_communication(cx, shard_loop)
   local close_nids = data.filter(
     function(nid) return block_cx.graph:node_label(nid):is(flow.node.Close) end,
     block_cx.graph:toposort())
-  local intersections = data.new_recursive_map(1)
+  local intersections = data.new_recursive_map(2)
   local barriers = data.new_recursive_map(2)
   for _, close_nid in ipairs(close_nids) do
     local dst_out_nid = only(block_cx.graph:outgoing_write_set(close_nid))
@@ -1092,16 +1101,18 @@ local function rewrite_communication(cx, shard_loop)
 
   -- Raise intersections as arguments to loop.
   for _, i1 in intersections:items() do
-    for _, list in i1:items() do
-      local in_nid = cx.graph:add_node(list)
-      local out_nid = cx.graph:add_node(list)
+    for _, i2 in i1:items() do
       local port = cx.graph:node_available_port(shard_loop)
-      cx.graph:add_edge(
-        flow.edge.Read(flow.default_mode()), in_nid, cx.graph:node_result_port(in_nid),
-        shard_loop, port)
-      cx.graph:add_edge(
-        flow.edge.Write(flow.default_mode()), shard_loop, port,
-        out_nid, cx.graph:node_available_port(out_nid))
+      for _, list in i2:items() do
+        local in_nid = cx.graph:add_node(list)
+        local out_nid = cx.graph:add_node(list)
+        cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()), in_nid, cx.graph:node_result_port(in_nid),
+          shard_loop, port)
+        cx.graph:add_edge(
+          flow.edge.Write(flow.default_mode()), shard_loop, port,
+          out_nid, cx.graph:node_available_port(out_nid))
+      end
     end
   end
 
@@ -1368,16 +1379,25 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
   end
 
   -- Build list slices for intersections.
-  local parent_intersections = data.new_recursive_map(1)
+  local parent_intersections = data.new_recursive_map(2)
   for lhs_type, i1 in intersections:items() do
-    for rhs_type, intersection_label in i1:items() do
-      local list_type = intersection_label.region_type
+    for rhs_type, i2 in i1:items() do
+      local list_type
+      for field_path, intersection_label in i2:items() do
+        list_type = intersection_label.region_type
+        break
+      end
+      assert(list_type)
+
       local parent = build_slice(
         cx, list_type, list_type, index_nid, index_label,
         stride_nid, stride_label, bounds_type, slice_mapping)
       assert(parent)
-      parent_intersections[slice_mapping[lhs_type]][slice_mapping[rhs_type]] =
-        parent
+
+      for field_path, intersection_label in i2:items() do
+        parent_intersections[slice_mapping[lhs_type]][slice_mapping[rhs_type]][field_path] =
+          parent
+      end
     end
   end
 
@@ -2425,9 +2445,11 @@ local function rewrite_inputs(cx, old_loop, new_loop,
 
   local intersection_types = data.newmap()
   for lhs_type, i1 in intersections:items() do
-    for rhs_type, intersection_label in i1:items() do
-      intersection_types[intersection_label.region_type] = data.newtuple(
-        lhs_type, rhs_type)
+    for rhs_type, i2 in i1:items() do
+      for field_path, intersection_label in i2:items() do
+        intersection_types[intersection_label.region_type] = data.newtuple(
+          lhs_type, rhs_type)
+      end
     end
   end
 
@@ -2530,11 +2552,11 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       for field_path, barrier_labels in b2:items() do
         local empty_in, empty_out, full_in, full_out = unpack(barrier_labels)
 
-        local rhs_nid = find_matching_input(cx, new_loop, rhs_type)
+        local rhs_nid = find_matching_input(cx, new_loop, rhs_type, field_path)
 
-        local intersection_type = intersections[lhs_type][rhs_type].region_type
+        local intersection_type = intersections[lhs_type][rhs_type][field_path].region_type
         local intersection_nid = find_matching_input(
-          cx, new_loop, intersection_type)
+          cx, new_loop, intersection_type, field_path)
 
         local empty_in_nid = find_matching_input(
           cx, new_loop, empty_in.region_type)
