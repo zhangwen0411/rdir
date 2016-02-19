@@ -41,6 +41,13 @@ local flow_to_ast = require("regent/flow_to_ast")
 local log = require("regent/log")
 local std = require("regent/std")
 
+-- Configuration Variables
+
+-- Setting this flag configures the number of SPMD tasks assigned to
+-- each shard. Generally speaking, this should be approximately equal
+-- to the number of tasks per node.
+local shard_size = std.config["flow-spmd-shardsize"]
+
 local context = {}
 context.__index = context
 
@@ -1395,7 +1402,7 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
 
   -- Build shard stride (i.e. size of each shard). Currently constant.
   local stride_label = flow.node.Constant {
-    value = make_constant(1, bounds_type, index_label.value.span),
+    value = make_constant(shard_size, bounds_type, index_label.value.span),
   }
   local stride_nid = cx.graph:add_node(stride_label)
 
