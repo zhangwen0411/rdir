@@ -144,7 +144,18 @@ local function gather_params(cx, nid)
       end
     end
   end
-  return result
+
+  -- Hack: Sort parameters to ensure the order is deterministic. This
+  -- wouldn't necessary in a world with task generators.
+  local mapping = data.range(1, #result + 1)
+  mapping:sort(function(i1, i2) return tostring(result[i1].symbol) < tostring(result[i2].symbol) end)
+  local sorted = mapping:map(function(i) return result[i] end)
+  local inverse_mapping = {}
+  for i2, i1 in ipairs(mapping) do
+    inverse_mapping[i1] = i2
+  end
+
+  return sorted, inverse_mapping
 end
 
 local function privilege_kind(label, force_read_write)
@@ -306,7 +317,7 @@ end
 
 local function extract_task(cx, nid, prefix, force_read_write)
   local label = cx.graph:node_label(nid)
-  local params = gather_params(cx, nid)
+  local params, param_mapping = gather_params(cx, nid)
   local return_type = terralib.types.unit
   local privileges = summarize_privileges(cx, nid, force_read_write)
   local coherence_modes = summarize_coherence(cx, nid)
@@ -366,7 +377,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
   if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
   if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
   ast = codegen.entry(ast)
-  return ast
+  return ast, param_mapping
 end
 
 local function add_call_node(cx, nid)
@@ -395,7 +406,7 @@ local function add_task_arg(cx, call_nid, task)
     flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid), call_nid, 1)
 end
 
-local function copy_args(cx, original_nid, call_nid)
+local function copy_args(cx, original_nid, call_nid, param_mapping)
   local inputs = cx.graph:incoming_edges_by_port(original_nid)
   local outputs = cx.graph:outgoing_edges_by_port(original_nid)
 
@@ -434,8 +445,10 @@ local function copy_args(cx, original_nid, call_nid)
         local label = cx.graph:node_label(edge.from_node)
         if not (label:is(flow.node.Constant) or label:is(flow.node.Function))
         then
+          -- Hack: Reorder inputs according to the param mapping.
+          local port = param_mapping[next_port - 1] + 1 -- next_port
           cx.graph:add_edge(
-            edge.label, edge.from_node, edge.from_port, call_nid, next_port)
+            edge.label, edge.from_node, edge.from_port, call_nid, port)
           used_port = true
         end
       end
@@ -445,8 +458,10 @@ local function copy_args(cx, original_nid, call_nid)
         local label = cx.graph:node_label(edge.from_node)
         if not (label:is(flow.node.Constant) or label:is(flow.node.Function))
         then
+          -- Hack: Reorder inputs according to the param mapping.
+          local port = param_mapping[next_port - 1] + 1 -- next_port
           cx.graph:add_edge(
-            edge.label, call_nid, next_port, edge.to_node, edge.to_port)
+            edge.label, call_nid, port, edge.to_node, edge.to_port)
           used_port = true
         end
       end
@@ -457,16 +472,16 @@ local function copy_args(cx, original_nid, call_nid)
   end
 end
 
-local function issue_call(cx, nid, task)
+local function issue_call(cx, nid, task, param_mapping)
   local call_nid = add_call_node(cx, nid)
   add_task_arg(cx, call_nid, task)
-  copy_args(cx, nid, call_nid)
+  copy_args(cx, nid, call_nid, param_mapping)
   return call_nid
 end
 
 local function outline(cx, nid, prefix, force_read_write)
-  local task = extract_task(cx, nid, prefix, force_read_write)
-  return issue_call(cx, nid, task)
+  local task, param_mapping = extract_task(cx, nid, prefix, force_read_write)
+  return issue_call(cx, nid, task, param_mapping)
 end
 
 local flow_outline_task = {}
