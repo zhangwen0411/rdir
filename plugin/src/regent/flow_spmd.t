@@ -429,6 +429,7 @@ local function normalize_communication(cx, shard_loop)
       local result_label = block_cx.graph:node_label(result_nid)
       local input_nid = find_matching_input(
         block_cx, close_nid, result_label.region_type, result_label.field_path)
+      assert(input_nid)
       if versions[result_nid] > versions[input_nid] then
         versions_changed = versions_changed + 1
         assert(versions_changed <= 1)
