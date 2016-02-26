@@ -199,6 +199,11 @@ local function can_spmdize(cx, loop)
     loops_are_compatible(cx, loop)
 end
 
+local function only(list)
+  assert(#list == 1)
+  return list[1]
+end
+
 local function find_close_results(cx, close_nid)
   local result_nids = terralib.newlist()
   cx.graph:traverse_immediate_successors(
@@ -424,22 +429,25 @@ local function normalize_communication(cx, shard_loop)
   local versions = compute_version_numbers(block_cx)
   for _, close_nid in ipairs(close_nids) do
     local result_nids = block_cx.graph:immediate_successors(close_nid)
-    local versions_changed = 0
-    for _, result_nid in ipairs(result_nids) do
-      local result_label = block_cx.graph:node_label(result_nid)
-      local input_nid = find_matching_input(
-        block_cx, close_nid, result_label.region_type, result_label.field_path)
-      assert(input_nid)
-      if versions[result_nid] > versions[input_nid] then
-        versions_changed = versions_changed + 1
-        assert(versions_changed <= 1)
-      else
-        local user_nids = block_cx.graph:immediate_successors(result_nid)
-        for _, user_nid in ipairs(user_nids) do
-          block_cx.graph:replace_edges(user_nid, result_nid, input_nid)
+    if #result_nids > 1 then
+      local versions_changed = 0
+      for _, result_nid in ipairs(result_nids) do
+        local result_label = block_cx.graph:node_label(result_nid)
+        local input_nid = find_matching_input(
+          block_cx, close_nid, result_label.region_type, result_label.field_path)
+        assert(input_nid)
+        if versions[result_nid] > versions[input_nid] then
+          versions_changed = versions_changed + 1
+          assert(versions_changed <= 1)
+        else
+          local user_nids = block_cx.graph:immediate_successors(result_nid)
+          for _, user_nid in ipairs(user_nids) do
+            block_cx.graph:replace_edges(user_nid, result_nid, input_nid)
+          end
+          block_cx.graph:remove_node(result_nid)
         end
-        block_cx.graph:remove_node(result_nid)
       end
+      assert(versions_changed > 0)
     end
   end
 
@@ -573,6 +581,167 @@ local function normalize_communication(cx, shard_loop)
 
   assert(not block_cx.graph:find_node(
            function(_, label) return label:is(flow.node.data.Region) end))
+end
+
+local function rewrite_reduction_fields(cx, shard_loop)
+  local make_fresh_type = function(cx, value_type, span)
+    if std.is_partition(value_type) then
+      local region_type = value_type:parent_region()
+      local expr_type = std.region(
+        terralib.newsymbol(region_type:ispace()),
+        region_type:fspace())
+      cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+      return expr_type
+    else
+      assert(false)
+    end
+  end
+
+  local shard_label = cx.graph:node_label(shard_loop)
+  local block_cx = cx:new_graph_scope(shard_label.block)
+
+  local mapping = {}
+  local scratch_regions = data.new_recursive_map(1)
+  local scratch_fields = data.new_recursive_map(1)
+  local close_nids = block_cx.graph:filter_nodes(
+    function(nid, label) return label:is(flow.node.Close) end)
+  for _, close_nid in ipairs(close_nids) do
+    local write_nid = only(block_cx.graph:outgoing_write_set(close_nid))
+    local write_label = block_cx.graph:node_label(write_nid)
+    local write_type = write_label.region_type
+
+    local read_nids = block_cx.graph:incoming_read_set(close_nid)
+    print("close", close_nid)
+    for _, read_nid in ipairs(read_nids) do
+      local read_label = block_cx.graph:node_label(read_nid)
+      local read_type = read_label.region_type
+
+      print("  read", read_nid)
+      -- Is this input a reduction---and is it on the communication path?
+      local reduce = false
+      if not std.type_eq(read_type, write_type) then
+        block_cx.graph:traverse_incoming_edges(
+          function(_, _, edge)
+            if edge.label:is(flow.edge.Reduce) then
+              reduce = true
+            end
+          end,
+          read_nid)
+      end
+
+      -- Transform this input into a reduction on a scratch field.
+      if reduce then
+        print("    reduction")
+        local old_nid, old_label, old_type = read_nid, read_label, read_type
+        local field_path = old_label.field_path
+
+        local new_label, new_nid_cleared, new_nid_reduced, fid_label, fid_nid
+        if scratch_regions[old_type][field_path] then
+          assert(false) -- FIXME: Handle multiple reductions
+        else
+          -- Replicate the input.
+          local new_type = make_fresh_type(block_cx, old_type, old_label.value.span)
+          local new_symbol = terralib.newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
+          mapping[old_type] = new_type
+
+          new_label = old_label {
+            value = old_label.value {
+              value = new_symbol,
+              expr_type = std.type_sub(old_label.value.expr_type, mapping),
+            },
+            region_type = new_type
+          }
+          new_nid_cleared = block_cx.graph:add_node(new_label)
+          new_nid_reduced = block_cx.graph:add_node(new_label)
+
+          -- Create scratch fields.
+          local fid_type = std.c.legion_field_id_t[1]
+          local fid_symbol = terralib.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
+          fid_label = make_variable_label(block_cx, fid_symbol, fid_type, old_label.value.span)
+          fid_nid = block_cx.graph:add_node(fid_label)
+
+          -- Name the new input (apply scratch fields).
+          local name_label = flow.node.Opaque {
+            action = ast.typed.stat.Var {
+              symbols = terralib.newlist({new_symbol}),
+              types = terralib.newlist({new_type}),
+              values = terralib.newlist({
+                  ast.typed.expr.WithScratchFields {
+                    region = old_label.value,
+                    field_ids = fid_label.value,
+                    expr_type = fid_type,
+                    options = ast.default_options(),
+                    span = old_label.value.span,
+                  },
+              }),
+              options = ast.default_options(),
+              span = old_label.value.span,
+            }
+          }
+          local name_nid = block_cx.graph:add_node(name_label)
+          print("old_nid", old_nid)
+          print("name_nid", name_nid)
+          block_cx.graph:add_edge(
+            flow.edge.None(flow.default_mode()),
+            old_nid, block_cx.graph:node_result_port(old_nid),
+            name_nid, 1)
+          block_cx.graph:add_edge(
+            flow.edge.Read(flow.default_mode()),
+            fid_nid, block_cx.graph:node_result_port(fid_nid),
+            name_nid, 2)
+          block_cx.graph:add_edge(
+            flow.edge.Name {},
+            name_nid, block_cx.graph:node_result_port(name_nid),
+            new_nid_cleared, 0)
+        end
+
+        -- Fill the new input.
+        print("FIXME: Reduction fill initializes to 0 (assumes +/-)")
+        local init_label = flow.node.Constant {
+          value = make_constant(0, old_type:fspace(), old_label.value.span),
+        }
+        local init_nid = block_cx.graph:add_node(init_label)
+        local fill_label = flow.node.Fill {
+          dst_field_paths = terralib.newlist({field_path}),
+          options = ast.default_options(),
+          span = old_label.value.span,
+        }
+        local fill_nid = block_cx.graph:add_node(fill_label)
+        block_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          new_nid_cleared, block_cx.graph:node_result_port(new_nid_cleared),
+          fill_nid, 1)
+        block_cx.graph:add_edge(
+          flow.edge.Write(flow.default_mode()), fill_nid, 1,
+          new_nid_reduced, 0)
+        block_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()), init_nid, block_cx.graph:node_result_port(init_nid),
+          fill_nid, 2)
+
+        -- Move reduction edges over to the new input.
+        local edges = data.filter(
+          function(edge)
+            return edge.label:is(flow.edge.Reduce)
+          end,
+          block_cx.graph:incoming_edges(read_nid))
+        for _, edge in ipairs(edges) do
+          block_cx.graph:add_edge(
+            edge.label, edge.from_node, edge.from_port,
+            new_nid_reduced, edge.to_port)
+          block_cx.graph:remove_edge(
+            edge.from_node, edge.from_port,
+            edge.to_node, edge.to_port)
+        end
+
+        -- Add read from new input to close.
+        block_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()), new_nid_reduced, block_cx.graph:node_result_port(new_nid_reduced),
+          close_nid, block_cx.graph:node_available_port(close_nid))
+      end
+    end
+  end
+
+  return mapping
 end
 
 local function rewrite_shard_partitions(cx)
@@ -1122,11 +1291,6 @@ local function issue_intersection_copy_synchronization_backwards(
 
   issue_barrier_await(cx, empty_out_nid, copy_nid)
   issue_barrier_arrive(cx, empty_in_nid, prev_consumer_nid)
-end
-
-local function only(list)
-  assert(#list == 1)
-  return list[1]
 end
 
 local function rewrite_communication(cx, shard_loop)
@@ -2685,17 +2849,18 @@ end
 local function spmdize(cx, loop)
   --  1. Extract shard (deep copy).
   --  2. Normalize communication graph (remove opens).
-  --  3. Rewrite shard partitions as lists.
-  --  4. Rewrite communication graph (change closes to copies).
-  --  5. Rewrite shard loop bounds.
-  --  6. Upgrade everything to simultaneous coherence (and no_access_flag).
-  --  7. Outline shard into a task.
-  --  8. Compute shard bounds and list slices.
-  --  9. Wrap that in a distribution loop.
-  -- 10. Downgrade everything back to exclusive.
-  -- 11. Wrap that in a must epoch.
-  -- 12. Outline that into a task.
-  -- 13. Rewrite inputs/outputs.
+  --  3. Rewrite reductions to use temporary fields.
+  --  4. Rewrite shard partitions as lists.
+  --  5. Rewrite communication graph (change closes to copies).
+  --  6. Rewrite shard loop bounds.
+  --  7. Upgrade everything to simultaneous coherence (and no_access_flag).
+  --  8. Outline shard into a task.
+  --  9. Compute shard bounds and list slices.
+  -- 10. Wrap that in a distribution loop.
+  -- 11. Downgrade everything back to exclusive.
+  -- 12. Wrap that in a must epoch.
+  -- 13. Outline that into a task.
+  -- 14. Rewrite inputs/outputs.
 
   local span = cx.graph:node_label(loop).span
 
@@ -2703,6 +2868,7 @@ local function spmdize(cx, loop)
 
   local shard_cx = cx:new_graph_scope(shard_graph)
   normalize_communication(shard_cx, shard_loop)
+  local reductions = rewrite_reduction_fields(shard_cx, shard_loop)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
   local intersections, barriers = rewrite_communication(shard_cx, shard_loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
