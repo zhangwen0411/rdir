@@ -596,6 +596,144 @@ local function normalize_communication(cx, shard_loop)
            function(_, label) return label:is(flow.node.data.Region) end))
 end
 
+local function rewrite_shard_partitions(cx)
+  -- Every partition (accessed to obtain a region) is replaced by a
+  -- fresh list of regions, and the accessed region is replaced with a
+  -- fresh region.
+  --
+  -- Every cross-product (accessed to obtain a partition) is replaced
+  -- by a fresh list of partitions, and the accessed partition is
+  -- replaced by a fresh partition.
+  --
+  -- Note: This means that you need to look where a node comes from to
+  -- determine what it should be replaced by (a partition may or may
+  -- not be replaced by a list).
+
+  local function partition_is_cross_product_access(cx, value_type)
+    local is_access = false
+    cx.graph:traverse_nodes(
+      function(nid, label)
+        if label:is(flow.node.data) and label.region_type == value_type then
+          local names = cx.graph:incoming_name_set(nid)
+          is_access = is_access or (#names > 0)
+        end
+    end)
+    return is_access
+  end
+
+  local function get_label_type(value_type)
+    if std.is_region(value_type) then
+      return flow.node.data.Region
+    elseif std.is_partition(value_type) then
+      return flow.node.data.Partition
+    elseif std.is_list_of_regions(value_type) then
+      return flow.node.data.List
+    elseif std.is_list_of_partitions(value_type) then
+      return flow.node.data.List
+    else
+      assert(false)
+    end
+  end
+
+  local function make_fresh_type(cx, value_type, span)
+    if std.is_region(value_type) then
+      -- Hack: I'm going to cheat here and return the original region.
+      return value_type
+    elseif std.is_partition(value_type) then
+      if partition_is_cross_product_access(cx, value_type) then
+        -- Hack: I'm going to cheat here and return the original partition.
+        return value_type
+      else
+        local region_type = value_type:parent_region()
+        local expr_type = std.list(
+          std.region(
+            terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
+            region_type:fspace()),
+          value_type)
+        for other_region, _ in pairs(cx.tree.region_universe) do
+          assert(not std.type_eq(expr_type, other_region))
+          -- Only record explicit disjointness when there is possible
+          -- type-based aliasing.
+          if std.type_maybe_eq(expr_type:fspace(), other_region:fspace()) then
+            std.add_constraint(cx.tree, expr_type, other_region, "*", true)
+          end
+        end
+        cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+        return expr_type
+      end
+    elseif std.is_cross_product(value_type) then
+      local partition_type = value_type:subpartition_dynamic()
+      local expr_type = std.list(partition_type)
+      return expr_type
+    else
+      assert(false)
+    end
+  end
+
+  local mapping = {}
+  local symbols = data.newmap()
+  local old_labels = data.new_recursive_map(1)
+  local new_labels = data.new_recursive_map(1)
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local graph_cx = cx:new_graph_scope(graph)
+      if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition) or
+        label:is(flow.node.data.CrossProduct)
+      then
+        local region_type = label.region_type
+        local new_region_type
+        if not mapping[region_type] then
+          new_region_type = make_fresh_type(graph_cx, region_type, label.value.span)
+          mapping[region_type] = new_region_type
+          symbols[region_type] = terralib.newsymbol(
+            mapping[region_type], "shard_" .. tostring(label.value.value))
+        else
+          new_region_type = mapping[region_type]
+        end
+
+        if not new_labels[mapping[region_type]][label.field_path] then
+          -- Could use an AST rewriter here...
+          local label_type = get_label_type(new_region_type)
+          old_labels[region_type][label.field_path] = label
+          new_labels[mapping[region_type]][label.field_path] = label_type(label) {
+            region_type = mapping[region_type],
+            value = label.value {
+              value = symbols[region_type],
+              expr_type = std.type_sub(label.value.expr_type, mapping),
+            },
+          }
+        end
+      end
+    end)
+
+  cx.graph:map_nodes_recursive(
+    function(graph, nid, label)
+      if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition) or
+        label:is(flow.node.data.CrossProduct)
+      then
+        assert(mapping[label.region_type])
+        label = new_labels[mapping[label.region_type]][label.field_path]
+      end
+      assert(label)
+      return label
+    end)
+
+  return new_labels, old_labels, mapping
+end
+
+local function get_incoming_reduction_op(cx, nid)
+  local op = false
+  cx.graph:traverse_incoming_edges(
+    function(_, _, edge)
+      if edge.label:is(flow.edge.Reduce) then
+        assert(not op or op == edge.label.op)
+        op = edge.label.op
+      end
+    end,
+    nid)
+  return op
+end
+
 local function apply_reduction_scratch_fields(cx, shard_loop)
   local make_fresh_type = function(cx, value_type, span)
     if std.is_list_of_regions(value_type) then
@@ -794,144 +932,6 @@ local function apply_reduction_scratch_fields(cx, shard_loop)
   end
 
   return scratch_field_mapping
-end
-
-local function rewrite_shard_partitions(cx)
-  -- Every partition (accessed to obtain a region) is replaced by a
-  -- fresh list of regions, and the accessed region is replaced with a
-  -- fresh region.
-  --
-  -- Every cross-product (accessed to obtain a partition) is replaced
-  -- by a fresh list of partitions, and the accessed partition is
-  -- replaced by a fresh partition.
-  --
-  -- Note: This means that you need to look where a node comes from to
-  -- determine what it should be replaced by (a partition may or may
-  -- not be replaced by a list).
-
-  local function partition_is_cross_product_access(cx, value_type)
-    local is_access = false
-    cx.graph:traverse_nodes(
-      function(nid, label)
-        if label:is(flow.node.data) and label.region_type == value_type then
-          local names = cx.graph:incoming_name_set(nid)
-          is_access = is_access or (#names > 0)
-        end
-    end)
-    return is_access
-  end
-
-  local function get_label_type(value_type)
-    if std.is_region(value_type) then
-      return flow.node.data.Region
-    elseif std.is_partition(value_type) then
-      return flow.node.data.Partition
-    elseif std.is_list_of_regions(value_type) then
-      return flow.node.data.List
-    elseif std.is_list_of_partitions(value_type) then
-      return flow.node.data.List
-    else
-      assert(false)
-    end
-  end
-
-  local function make_fresh_type(cx, value_type, span)
-    if std.is_region(value_type) then
-      -- Hack: I'm going to cheat here and return the original region.
-      return value_type
-    elseif std.is_partition(value_type) then
-      if partition_is_cross_product_access(cx, value_type) then
-        -- Hack: I'm going to cheat here and return the original partition.
-        return value_type
-      else
-        local region_type = value_type:parent_region()
-        local expr_type = std.list(
-          std.region(
-            terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
-            region_type:fspace()),
-          value_type)
-        for other_region, _ in pairs(cx.tree.region_universe) do
-          assert(not std.type_eq(expr_type, other_region))
-          -- Only record explicit disjointness when there is possible
-          -- type-based aliasing.
-          if std.type_maybe_eq(expr_type:fspace(), other_region:fspace()) then
-            std.add_constraint(cx.tree, expr_type, other_region, "*", true)
-          end
-        end
-        cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
-        return expr_type
-      end
-    elseif std.is_cross_product(value_type) then
-      local partition_type = value_type:subpartition_dynamic()
-      local expr_type = std.list(partition_type)
-      return expr_type
-    else
-      assert(false)
-    end
-  end
-
-  local mapping = {}
-  local symbols = data.newmap()
-  local old_labels = data.new_recursive_map(1)
-  local new_labels = data.new_recursive_map(1)
-  cx.graph:traverse_nodes_recursive(
-    function(graph, nid, label)
-      local graph_cx = cx:new_graph_scope(graph)
-      if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition) or
-        label:is(flow.node.data.CrossProduct)
-      then
-        local region_type = label.region_type
-        local new_region_type
-        if not mapping[region_type] then
-          new_region_type = make_fresh_type(graph_cx, region_type, label.value.span)
-          mapping[region_type] = new_region_type
-          symbols[region_type] = terralib.newsymbol(
-            mapping[region_type], "shard_" .. tostring(label.value.value))
-        else
-          new_region_type = mapping[region_type]
-        end
-
-        if not new_labels[mapping[region_type]][label.field_path] then
-          -- Could use an AST rewriter here...
-          local label_type = get_label_type(new_region_type)
-          old_labels[region_type][label.field_path] = label
-          new_labels[mapping[region_type]][label.field_path] = label_type(label) {
-            region_type = mapping[region_type],
-            value = label.value {
-              value = symbols[region_type],
-              expr_type = std.type_sub(label.value.expr_type, mapping),
-            },
-          }
-        end
-      end
-    end)
-
-  cx.graph:map_nodes_recursive(
-    function(graph, nid, label)
-      if label:is(flow.node.data.Region) or label:is(flow.node.data.Partition) or
-        label:is(flow.node.data.CrossProduct)
-      then
-        assert(mapping[label.region_type])
-        label = new_labels[mapping[label.region_type]][label.field_path]
-      end
-      assert(label)
-      return label
-    end)
-
-  return new_labels, old_labels, mapping
-end
-
-local function get_incoming_reduction_op(cx, nid)
-  local op = false
-  cx.graph:traverse_incoming_edges(
-    function(_, _, edge)
-      if edge.label:is(flow.edge.Reduce) then
-        assert(not op or op == edge.label.op)
-        op = edge.label.op
-      end
-    end,
-    nid)
-  return op
 end
 
 local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid, op,
