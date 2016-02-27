@@ -113,6 +113,8 @@ function graph:node_minimum_port(node)
     label:is(flow.node.Close)
   then
     return 1
+  elseif label:is(flow.node.Block) then
+    return 1
   elseif label:is(flow.node.WhileLoop) then
     return 2
   elseif label:is(flow.node.ForNum) then
@@ -781,6 +783,7 @@ function graph:printpretty(ids, types, metadata)
       node:is(flow.node.Advance) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
       node:is(flow.node.Copy) or node:is(flow.node.Fill) or
+      node:is(flow.node.Block) or
       node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
       node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
       node:is(flow.node.MustEpoch)
@@ -844,6 +847,7 @@ flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})
 
 -- Control
+flow.node:leaf("Block", {"block", "options", "span"})
 flow.node:leaf("WhileLoop", {"block", "options", "span"})
 flow.node:leaf("WhileBody", {"block", "options", "span"})
 flow.node:leaf("ForNum", {"symbol", "block", "options", "span"})

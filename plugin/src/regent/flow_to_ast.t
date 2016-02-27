@@ -558,6 +558,19 @@ function flow_to_ast.node_fill(cx, nid)
   })
 end
 
+function flow_to_ast.node_block(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local block = flow_to_ast.graph(cx, label.block)
+
+  return terralib.newlist({
+      ast.typed.stat.Block {
+        block = block,
+        options = label.options,
+        span = label.span,
+      },
+  })
+end
+
 function flow_to_ast.node_while_loop(cx, nid)
   local label = cx.graph:node_label(nid)
   local stats = flow_to_ast.graph(cx, label.block).stats
@@ -752,6 +765,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Close) then
     return
+
+  elseif label:is(flow.node.Block) then
+    return flow_to_ast.node_block(cx, nid)
 
   elseif label:is(flow.node.WhileLoop) then
     return flow_to_ast.node_while_loop(cx, nid)
