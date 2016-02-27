@@ -734,7 +734,7 @@ local function get_incoming_reduction_op(cx, nid)
   return op
 end
 
-local function apply_reduction_scratch_fields(cx, shard_loop)
+local function rewrite_reduction_scratch_fields(cx, shard_loop)
   local make_fresh_type = function(cx, value_type, span)
     if std.is_list_of_regions(value_type) then
       local expr_type = value_type:slice()
@@ -2329,6 +2329,181 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
   end
 end
 
+local function issue_zipped_copy_partition(cx, bounds,
+                                           src_nids, dst_in_nids, dst_out_nids,
+                                           src_type, dst_type, span)
+  -- Build the copy loop.
+  local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
+
+  local index_type = std.rawref(&int)
+  local index_symbol = terralib.newsymbol(int, "index")
+  local index_label = make_variable_label(
+    block_cx, index_symbol, int, span)
+  local index_nid = block_cx.graph:add_node(index_label)
+
+  -- Exterior of the loop:
+  local copy_loop = flow.node.ForNum {
+    symbol = index_symbol,
+    block = block_cx.graph,
+    options = ast.default_options(),
+    span = span,
+  }
+  local copy_loop_nid = cx.graph:add_node(copy_loop)
+  local bound1_nid = cx.graph:add_node(bounds[1])
+  local bound2_nid = cx.graph:add_node(bounds[2])
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    bound1_nid, cx.graph:node_result_port(bound1_nid),
+    copy_loop_nid, 1)
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    bound2_nid, cx.graph:node_result_port(bound2_nid),
+    copy_loop_nid, 2)
+  local copy_loop_src_port = cx.graph:node_available_port(copy_loop_nid)
+  for field_path, src_nid in src_nids:items() do
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), src_nid, cx.graph:node_result_port(src_nid),
+      copy_loop_nid, copy_loop_src_port)
+  end
+  local copy_loop_dst_port = cx.graph:node_available_port(copy_loop_nid)
+  for field_path, dst_in_nid in dst_in_nids:items() do
+    local dst_out_nid = dst_out_nids[field_path]
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), dst_in_nid, cx.graph:node_result_port(dst_in_nid),
+      copy_loop_nid, copy_loop_dst_port)
+    cx.graph:add_edge(
+      flow.edge.Write(flow.default_mode()), copy_loop_nid, copy_loop_dst_port,
+      dst_out_nid, cx.graph:node_available_port(dst_out_nid))
+  end
+
+  -- Interior of the loop:
+  local block_src_i_type = src_type:subregion_dynamic()
+
+  local block_src_nids = data.newmap()
+  local block_src_i_nids = data.newmap()
+  for field_path, src_nid in src_nids:items() do
+    local src_label = cx.graph:node_label(src_nid)
+    block_src_nids[field_path] = block_cx.graph:add_node(src_label)
+    block_src_i_nids[field_path] = block_cx.graph:add_node(
+      src_label {
+        value = src_label.value {
+          value = terralib.newsymbol(block_src_i_type),
+          expr_type = block_src_i_type,
+        },
+      })
+  end
+
+  local block_dst_in_i_type = dst_type:subregion_dynamic()
+  std.add_constraint(
+    cx.tree, dst_type, dst_type:parent_region(), "<=", false)
+  std.add_constraint(
+    cx.tree, block_dst_in_i_type, dst_type, "<=", false)
+  cx.tree.region_universe[block_dst_in_i_type] = true
+
+  local block_dst_in_nids = data.newmap()
+  local block_dst_in_i_before_nids = data.newmap()
+  local block_dst_in_i_after_nids = data.newmap()
+  for field_path, dst_in_nid in dst_in_nids:items() do
+    local dst_in_label = cx.graph:node_label(dst_in_nid)
+    block_dst_in_nids[field_path] = block_cx.graph:add_node(dst_in_label)
+
+    local block_dst_in_i = flow.node.data.Region(dst_in_label) {
+      value = dst_in_label.value {
+        value = terralib.newsymbol(block_dst_in_i_type),
+        expr_type = block_dst_in_i_type,
+      },
+    }
+    block_dst_in_i_before_nids[field_path] = block_cx.graph:add_node(
+      block_dst_in_i)
+    block_dst_in_i_after_nids[field_path] = block_cx.graph:add_node(
+      block_dst_in_i)
+  end
+
+  local block_index_src_nid = block_cx.graph:add_node(
+    flow.node.IndexAccess {
+      expr_type = block_src_i_type,
+      options = ast.default_options(),
+      span = span,
+    })
+  for field_path, block_src_nid in block_src_nids:items() do
+    block_cx.graph:add_edge(
+      flow.edge.None(flow.default_mode()),
+      block_src_nid, block_cx.graph:node_result_port(block_src_nid),
+      block_index_src_nid, 1)
+  end
+  block_cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    index_nid, block_cx.graph:node_result_port(index_nid),
+    block_index_src_nid, 2)
+  for field_path, block_src_i_nid in block_src_i_nids:items() do
+    block_cx.graph:add_edge(
+      flow.edge.Name {},
+      block_index_src_nid,
+      block_cx.graph:node_result_port(block_index_src_nid),
+      block_src_i_nid, block_cx.graph:node_available_port(block_src_i_nid))
+  end
+
+  local block_index_dst_in_nid = block_cx.graph:add_node(
+    flow.node.IndexAccess {
+      expr_type = block_dst_in_i_type,
+      options = ast.default_options(),
+      span = span,
+    })
+  for field_path, block_dst_in_nid in block_dst_in_nids:items() do
+    block_cx.graph:add_edge(
+      flow.edge.None(flow.default_mode()),
+      block_dst_in_nid, block_cx.graph:node_result_port(block_dst_in_nid),
+      block_index_dst_in_nid, 1)
+  end
+  block_cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    index_nid, block_cx.graph:node_result_port(index_nid),
+    block_index_dst_in_nid, 2)
+  for field_path, block_dst_in_i_before_nid in
+    block_dst_in_i_before_nids:items()
+  do
+    block_cx.graph:add_edge(
+      flow.edge.Name {},
+      block_index_dst_in_nid,
+      block_cx.graph:node_result_port(block_index_dst_in_nid),
+      block_dst_in_i_before_nid,
+      block_cx.graph:node_available_port(block_dst_in_i_before_nid))
+  end
+
+  -- Copy data to the opened partition.
+  local field_paths = src_nids:map_list(function(k) return k end)
+  local block_copy = flow.node.Copy {
+    src_field_paths = field_paths,
+    dst_field_paths = field_paths,
+    op = false,
+    options = ast.default_options(),
+    span = span,
+  }
+  local block_copy_nid = block_cx.graph:add_node(block_copy)
+  for field_path, block_src_i_nid in block_src_i_nids:items() do
+    block_cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      block_src_i_nid, block_cx.graph:node_result_port(block_src_i_nid),
+      block_copy_nid, 1)
+  end
+  for field_path, block_dst_in_i_before_nid in
+    block_dst_in_i_before_nids:items()
+  do
+    local block_dst_in_i_after_nid = block_dst_in_i_after_nids[field_path]
+    block_cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      block_dst_in_i_before_nid,
+      block_cx.graph:node_result_port(block_dst_in_i_before_nid),
+      block_copy_nid, 2)
+    block_cx.graph:add_edge(
+      flow.edge.Write(flow.default_mode()), block_copy_nid, 2,
+      block_dst_in_i_after_nid,
+      block_cx.graph:node_result_port(block_dst_in_i_after_nid))
+  end
+
+  return copy_loop_nid
+end
+
 local function issue_output_copies_partition(cx, region_type, need_copy,
                                              partitions, original_bounds,
                                              closed_nids, copy_nids)
@@ -2340,11 +2515,6 @@ local function issue_output_copies_partition(cx, region_type, need_copy,
   -- Unfortunately, this loop has to be unrolled, because the
   -- runtime only understands copies where the source dominates
   -- the destination.
-
-  local index_type = std.rawref(&int)
-  local index_symbol = terralib.newsymbol(int, "index")
-  local index_label = make_variable_label(
-    cx, index_symbol, int, first_partition_label.value.span)
 
   -- Open the partition so that it can be copied.
   local open_nids = data.newmap()
@@ -2375,53 +2545,6 @@ local function issue_output_copies_partition(cx, region_type, need_copy,
     end
   end
 
-  local copy_nid = copy_nids[region_type]
-  for field_path, open_nid in open_nids:items() do
-    cx.graph:add_edge(
-      flow.edge.HappensBefore {},
-      copy_nid, cx.graph:node_sync_port(copy_nid),
-      open_nid, cx.graph:node_sync_port(open_nid))
-  end
-
-  -- Build the copy loop.
-  local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
-  local index_nid = block_cx.graph:add_node(index_label)
-
-  -- Exterior of the loop:
-  local copy_loop = flow.node.ForNum {
-    symbol = index_symbol,
-    block = block_cx.graph,
-    options = ast.default_options(),
-    span = first_partition_label.value.span,
-  }
-  local copy_loop_nid = cx.graph:add_node(copy_loop)
-  local original_bound1_nid = cx.graph:add_node(original_bounds[1])
-  local original_bound2_nid = cx.graph:add_node(original_bounds[2])
-  cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()), original_bound1_nid,
-    cx.graph:node_result_port(original_bound1_nid),
-    copy_loop_nid, 1)
-  cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()), original_bound2_nid,
-    cx.graph:node_result_port(original_bound2_nid),
-    copy_loop_nid, 2)
-  local copy_loop_new_port = cx.graph:node_available_port(copy_loop_nid)
-  for field_path, new_nid in new_nids:items() do
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), new_nid, cx.graph:node_result_port(new_nid),
-      copy_loop_nid, copy_loop_new_port)
-  end
-  local copy_loop_opened_port = cx.graph:node_available_port(copy_loop_nid)
-  for field_path, opened_nid in opened_nids:items() do
-    local target_nid = target_nids[field_path]
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), opened_nid, cx.graph:node_result_port(opened_nid),
-      copy_loop_nid, copy_loop_opened_port)
-    cx.graph:add_edge(
-      flow.edge.Write(flow.default_mode()), copy_loop_nid, copy_loop_opened_port,
-      target_nid, cx.graph:node_available_port(target_nid))
-  end
-
   -- Issue closes for any intermediate nodes.
   for field_path, old_nid in old_nids:items() do
     local target_nid = target_nids[field_path]
@@ -2436,131 +2559,18 @@ local function issue_output_copies_partition(cx, region_type, need_copy,
     end
   end
 
-  -- Interior of the loop:
-  local block_new_i_type = region_type:subregion_dynamic()
-
-  local block_new_nids = data.newmap()
-  local block_new_i_nids = data.newmap()
-  for field_path, new_nid in new_nids:items() do
-    local new_label = cx.graph:node_label(new_nid)
-    block_new_nids[field_path] = block_cx.graph:add_node(new_label)
-    block_new_i_nids[field_path] = block_cx.graph:add_node(
-      new_label {
-        value = new_label.value {
-          value = terralib.newsymbol(block_new_i_type),
-          expr_type = block_new_i_type,
-        },
-      })
+  local copy_nid = copy_nids[region_type]
+  for field_path, open_nid in open_nids:items() do
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {},
+      copy_nid, cx.graph:node_sync_port(copy_nid),
+      open_nid, cx.graph:node_sync_port(open_nid))
   end
 
-  local first_old_type = std.as_read(first_partition_label.value.expr_type)
-  local block_opened_i_type = first_old_type:subregion_dynamic()
-  std.add_constraint(
-    cx.tree, first_old_type, first_old_type:parent_region(), "<=", false)
-  std.add_constraint(
-    cx.tree, block_opened_i_type, first_old_type, "<=", false)
-  cx.tree.region_universe[block_opened_i_type] = true
-
-  local block_opened_nids = data.newmap()
-  local block_opened_i_before_nids = data.newmap()
-  local block_opened_i_after_nids = data.newmap()
-  for field_path, opened_nid in opened_nids:items() do
-    local opened_label = cx.graph:node_label(opened_nid)
-    block_opened_nids[field_path] = block_cx.graph:add_node(opened_label)
-
-    local block_opened_i = flow.node.data.Region(opened_label) {
-      value = opened_label.value {
-        value = terralib.newsymbol(block_opened_i_type),
-        expr_type = block_opened_i_type,
-      },
-    }
-    block_opened_i_before_nids[field_path] = block_cx.graph:add_node(
-      block_opened_i)
-    block_opened_i_after_nids[field_path] = block_cx.graph:add_node(
-      block_opened_i)
-  end
-
-  local block_index_new_nid = block_cx.graph:add_node(
-    flow.node.IndexAccess {
-      expr_type = block_new_i_type,
-      options = ast.default_options(),
-      span = first_new_label.value.span,
-    })
-  for field_path, block_new_nid in block_new_nids:items() do
-    block_cx.graph:add_edge(
-      flow.edge.None(flow.default_mode()),
-      block_new_nid, block_cx.graph:node_result_port(block_new_nid),
-      block_index_new_nid, 1)
-  end
-  block_cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()),
-    index_nid, block_cx.graph:node_result_port(index_nid),
-    block_index_new_nid, 2)
-  for field_path, block_new_i_nid in block_new_i_nids:items() do
-    block_cx.graph:add_edge(
-      flow.edge.Name {},
-      block_index_new_nid,
-      block_cx.graph:node_result_port(block_index_new_nid),
-      block_new_i_nid, block_cx.graph:node_available_port(block_new_i_nid))
-  end
-
-  local block_index_opened_nid = block_cx.graph:add_node(
-    flow.node.IndexAccess {
-      expr_type = block_opened_i_type,
-      options = ast.default_options(),
-      span = first_partition_label.value.span,
-    })
-  for field_path, block_opened_nid in block_opened_nids:items() do
-    block_cx.graph:add_edge(
-      flow.edge.None(flow.default_mode()),
-      block_opened_nid, block_cx.graph:node_result_port(block_opened_nid),
-      block_index_opened_nid, 1)
-  end
-  block_cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()),
-    index_nid, block_cx.graph:node_result_port(index_nid),
-    block_index_opened_nid, 2)
-  for field_path, block_opened_i_before_nid in
-    block_opened_i_before_nids:items()
-  do
-    block_cx.graph:add_edge(
-      flow.edge.Name {},
-      block_index_opened_nid,
-      block_cx.graph:node_result_port(block_index_opened_nid),
-      block_opened_i_before_nid,
-      block_cx.graph:node_available_port(block_opened_i_before_nid))
-  end
-
-  -- Copy data to the opened partition.
-  local field_paths = new_nids:map_list(function(k) return k end)
-  local block_copy = flow.node.Copy {
-    src_field_paths = field_paths,
-    dst_field_paths = field_paths,
-    op = false,
-    options = ast.default_options(),
-    span = first_partition_label.value.span,
-  }
-  local block_copy_nid = block_cx.graph:add_node(block_copy)
-  for field_path, block_new_i_nid in block_new_i_nids:items() do
-    block_cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()),
-      block_new_i_nid, block_cx.graph:node_result_port(block_new_i_nid),
-      block_copy_nid, 1)
-  end
-  for field_path, block_opened_i_before_nid in
-    block_opened_i_before_nids:items()
-  do
-    local block_opened_i_after_nid = block_opened_i_after_nids[field_path]
-    block_cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()),
-      block_opened_i_before_nid,
-      block_cx.graph:node_result_port(block_opened_i_before_nid),
-      block_copy_nid, 2)
-    block_cx.graph:add_edge(
-      flow.edge.Write(flow.default_mode()), block_copy_nid, 2,
-      block_opened_i_after_nid,
-      block_cx.graph:node_result_port(block_opened_i_after_nid))
-  end
+  issue_zipped_copy_partition(cx, original_bounds,
+                              new_nids, opened_nids, target_nids,
+                              region_type, std.as_read(first_partition_label.value.expr_type),
+                              first_new_label.value.span)
 end
 
 local function issue_output_copies_cross_product(cx, region_type, need_copy,
@@ -2952,7 +2962,7 @@ local function spmdize(cx, loop)
   --  2. Normalize communication graph (remove opens).
   --  3. Rewrite shard partitions as lists.
   --  4. Rewrite communication graph (change closes to copies).
-  --  5. Apply reductions to temporary scratch fields.
+  --  5. Rewrite reductions to use temporary scratch fields.
   --  6. Rewrite shard loop bounds.
   --  7. Upgrade everything to simultaneous coherence (and no_access_flag).
   --  8. Outline shard into a task.
@@ -2971,7 +2981,7 @@ local function spmdize(cx, loop)
   normalize_communication(shard_cx, shard_loop)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
   local intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
-  local scratch_field_mapping = apply_reduction_scratch_fields(shard_cx, shard_loop)
+  local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
   -- FIXME: Tell to the outliner what should be simultaneous/no-access.
 
