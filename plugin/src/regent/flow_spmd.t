@@ -2941,13 +2941,12 @@ local function spmdize(cx, loop)
   downgrade_simultaneous_coherence(dist_cx)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
-  local epoch_task = flow_outline_task.entry(cx.graph, epoch_loop, "dist", true)
 
   local inputs_mapping = apply_mapping(mapping, slice_mapping)
-  rewrite_inputs(cx, loop, epoch_task, original_partitions, original_bounds,
+  rewrite_inputs(cx, loop, epoch_loop, original_partitions, original_bounds,
                  new_intersections, new_barriers, inputs_mapping)
 
-  return epoch_task
+  return epoch_loop
 end
 
 local function spmdize_eligible_loop(cx, loops)
