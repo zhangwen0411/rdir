@@ -450,6 +450,30 @@ function graph:incoming_edges(node)
   return result
 end
 
+function graph:filter_incoming_edges(fn, node)
+  local result = terralib.newlist()
+  self:traverse_incoming_edges(
+    function(from_node, to_node, edge)
+      if fn(pack_edge(from_node, to_node, edge)) then
+        result:insert(pack_edge(from_node, to_node, edge))
+      end
+    end,
+    node)
+  return result
+end
+
+function graph:copy_incoming_edges(fn, old_node, new_node, delete_old)
+  local edges = self:filter_incoming_edges(fn, old_node)
+  for _, edge in ipairs(edges) do
+    self:add_edge(
+      edge.label, edge.from_node, edge.from_port, new_node, edge.to_port)
+    if delete_old then
+      self:remove_edge(
+        edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+    end
+  end
+end
+
 function graph:incoming_edges_by_port(node)
   local result = {}
   self:traverse_incoming_edges(
@@ -484,6 +508,30 @@ function graph:outgoing_edges(node)
     end,
     node)
   return result
+end
+
+function graph:filter_outgoing_edges(fn, node)
+  local result = terralib.newlist()
+  self:traverse_outgoing_edges(
+    function(from_node, to_node, edge)
+      if fn(pack_edge(from_node, to_node, edge)) then
+        result:insert(pack_edge(from_node, to_node, edge))
+      end
+    end,
+    node)
+  return result
+end
+
+function graph:copy_outgoing_edges(fn, old_node, new_node, delete_old)
+  local edges = self:filter_outgoing_edges(fn, old_node)
+  for _, edge in ipairs(edges) do
+    self:add_edge(
+      edge.label, new_node, edge.from_port, edge.to_node, edge.to_port)
+    if delete_old then
+      self:remove_edge(
+        edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+    end
+  end
 end
 
 function graph:outgoing_edges_by_port(node)
@@ -771,7 +819,7 @@ function graph:printpretty(ids, types, metadata)
         if types then label = label .. " " .. tostring(node.region_type) end
         label = label .. " " .. tostring(node.field_path)
       end
-    elseif node:is(flow.node.Reduce) then
+    elseif (node:is(flow.node.Copy) or node:is(flow.node.Reduce)) and node.op then
       label = label .. " " .. tostring(node.op)
     end
     if ids then label = label .. " " .. tostring(i) end
