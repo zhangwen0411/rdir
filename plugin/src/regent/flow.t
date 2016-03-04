@@ -671,6 +671,11 @@ function graph:outgoing_read_set(node)
     function(edge) return edge.label:is(flow.edge.Read) end, node)
 end
 
+function graph:outgoing_name_set(node)
+  return self:filter_immediate_successors_by_edges(
+    function(edge) return edge.label:is(flow.edge.Name) end, node)
+end
+
 function graph:outgoing_use_set(node)
   return self:filter_immediate_successors_by_edges(
     function(edge)

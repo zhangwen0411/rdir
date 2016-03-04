@@ -783,20 +783,67 @@ end
 
 local function get_incoming_reduction_op(cx, nid)
   local op = false
+  local port = false
   cx.graph:traverse_incoming_edges(
     function(_, _, edge)
       if edge.label:is(flow.edge.Reduce) then
         assert(not op or op == edge.label.op)
         op = edge.label.op
+        port = edge.from_port
       end
     end,
     nid)
-  return op
+  return op, port
 end
 
-local function issue_with_scratch_fields(cx, old_nid, scratch_fields, mapping)
+local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make_fresh_type)
+  local old_nids = cx.graph:filter_nodes(
+    function(_, label)
+      return label:is(flow.node.data) and label.region_type == old_type
+    end)
+  local mapping = { [old_type] = new_type }
+  for _, old_nid in ipairs(old_nids) do
+    local old_label = cx.graph:node_label(old_nid)
+    local new_label = old_label {
+      value = old_label.value {
+        value = new_symbol,
+        expr_type = std.type_sub(old_label.value.expr_type, mapping),
+      },
+      region_type = new_type,
+    }
+    local new_nid = cx.graph:add_node(new_label)
+    cx.graph:replace_node(old_nid, new_nid)
+
+    local index_nids = cx.graph:filter_immediate_successors_by_edges(
+      function(edge)
+        local label = cx.graph:node_label(edge.to_node)
+        return edge.label:is(flow.edge.None) and label:is(flow.node.IndexAccess)
+      end,
+      new_nid)
+    for _, index_nid in ipairs(index_nids) do
+      local indexed_nids = cx.graph:outgoing_name_set(index_nid)
+      assert(#indexed_nids > 1)
+      local old_indexed_label = cx.graph:node_label(indexed_nids[1])
+      local old_indexed_type = old_indexed_label.region_type
+
+      local new_indexed_type = make_fresh_type(cx, old_indexed_type, old_indexed_label.value.span)
+      local new_indexed_symbol = terralib.newsymbol(new_indexed_type, "scratch_" .. tostring(old_indexed_label.value.value))
+      rewrite_interior_regions(cx, old_indexed_type, new_indexed_type, new_indexed_symbol, make_fresh_type)
+    end
+  end
+end
+
+local function issue_with_scratch_fields(cx, reduction_nids, other_nids,
+                                         user_nid, user_port,
+                                         scratch_fields, mapping)
   local make_fresh_type = function(cx, value_type, span)
-    if std.is_list_of_regions(value_type) then
+    if std.is_region(value_type) then
+      local expr_type = std.region(
+        terralib.newsymbol(std.ispace(value_type:ispace().index_type)),
+        value_type:fspace())
+      cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+      return expr_type
+    elseif std.is_list_of_regions(value_type) then
       local expr_type = value_type:slice()
       cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
       return expr_type
@@ -805,117 +852,172 @@ local function issue_with_scratch_fields(cx, old_nid, scratch_fields, mapping)
     end
   end
 
-  local old_label = cx.graph:node_label(old_nid)
+  local old_label = cx.graph:node_label(reduction_nids[1])
   local old_type = old_label.region_type
-  local field_path = old_label.field_path
 
-  -- Create scratch fields.
-  local fid_label, fid_nid
-  if scratch_fields[old_type][field_path] then
-    fid_label, fid_nid = unpack(scratch_fields[old_type][field_path])
-  else
-    local fid_type = std.c.legion_field_id_t[1]
-    local fid_symbol = terralib.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
-    fid_label = make_variable_label(cx, fid_symbol, fid_type, old_label.value.span)
-    fid_nid = cx.graph:add_node(fid_label)
-    scratch_fields[old_type][field_path] = data.newtuple(fid_label, fid_nid)
+  -- Apply scratch fields.
+  local name_label = old_label.value
+  local name_type = old_label.value.expr_type
+  local fid_nids = terralib.newlist()
+  for _, reduction_nid in ipairs(reduction_nids) do
+    local field_path = cx.graph:node_label(reduction_nid).field_path
+
+    local fid_label, fid_nid
+    if scratch_fields[old_type][field_path] then
+      fid_label, fid_nid = unpack(scratch_fields[old_type][field_path])
+    else
+      local fid_type = std.c.legion_field_id_t[1]
+      local fid_symbol = terralib.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
+      fid_label = make_variable_label(cx, fid_symbol, fid_type, old_label.value.span)
+      fid_nid = cx.graph:add_node(fid_label)
+      scratch_fields[old_type][field_path] = data.newtuple(fid_label, fid_nid)
+    end
+    fid_nids:insert(fid_nid)
+
+    name_type = make_fresh_type(cx, old_type, old_label.value.span)
+    name_label = ast.typed.expr.WithScratchFields {
+      region = ast.typed.expr.RegionRoot {
+        region = name_label,
+        fields = terralib.newlist({field_path}),
+        expr_type = name_label.expr_type,
+        options = old_label.value.options,
+        span = old_label.value.span,
+      },
+      field_ids = fid_label.value,
+      expr_type = name_type,
+      options = ast.default_options(),
+      span = old_label.value.span,
+    }
   end
 
-  -- Replicate the input.
-  local new_type = make_fresh_type(cx, old_type, old_label.value.span)
+  -- Name the (with scratch fields) type.
+  local new_type = name_type
   local new_symbol = terralib.newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
   mapping[old_type] = new_type
 
-  local new_label = old_label {
-    value = old_label.value {
-      value = new_symbol,
-      expr_type = std.type_sub(old_label.value.expr_type, mapping),
-    },
-    region_type = new_type
-  }
-  local new_nid_cleared = cx.graph:add_node(new_label)
-  local new_nid_reduced = cx.graph:add_node(new_label)
-
-  -- Name the new input (apply scratch fields).
-  local name_label = flow.node.Opaque {
+  name_label = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({new_symbol}),
       types = terralib.newlist({new_type}),
-      values = terralib.newlist({
-          ast.typed.expr.WithScratchFields {
-            region = ast.typed.expr.RegionRoot {
-              region = old_label.value,
-              fields = terralib.newlist({field_path}),
-              expr_type = old_label.value.expr_type,
-              options = old_label.value.options,
-              span = old_label.value.span,
-            },
-            field_ids = fid_label.value,
-            expr_type = new_type,
-            options = ast.default_options(),
-            span = old_label.value.span,
-          },
-      }),
+      values = terralib.newlist({name_label}),
       options = ast.default_options(),
       span = old_label.value.span,
     }
   }
   local name_nid = cx.graph:add_node(name_label)
-  cx.graph:add_edge(
-    flow.edge.None(flow.default_mode()), old_nid, cx.graph:node_result_port(old_nid),
-    name_nid, 1)
-  cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()), fid_nid, cx.graph:node_result_port(fid_nid),
-    name_nid, 2)
-  cx.graph:add_edge(
-    flow.edge.HappensBefore {}, name_nid, cx.graph:node_sync_port(name_nid),
-    new_nid_cleared, cx.graph:node_sync_port(new_nid_cleared))
+  for _, nid in ipairs(reduction_nids) do
+    cx.graph:add_edge(
+      flow.edge.None(flow.default_mode()), nid, cx.graph:node_result_port(nid),
+      name_nid, 1)
+  end
+  for _, nid in ipairs(other_nids) do
+    cx.graph:add_edge(
+      flow.edge.None(flow.default_mode()), nid, cx.graph:node_result_port(nid),
+      name_nid, 1)
+  end
+  for _, nid in ipairs(fid_nids) do
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid),
+      name_nid, 2)
+  end
 
-  -- Fill the new input.
-  print("FIXME: Reduction fill initializes to 0 (assumes +/-)")
-  local init_type = std.get_field_path(old_type:fspace(), field_path)
-  local init_label = flow.node.Constant {
-    value = make_constant(0, init_type, old_label.value.span),
-  }
-  local init_nid = cx.graph:add_node(init_label)
-  local fill_label = flow.node.Fill {
-    dst_field_paths = terralib.newlist({field_path}),
-    options = ast.default_options(),
-    span = old_label.value.span,
-  }
-  local fill_nid = cx.graph:add_node(fill_label)
-  cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()),
-    new_nid_cleared, cx.graph:node_result_port(new_nid_cleared),
-    fill_nid, 1)
-  cx.graph:add_edge(
-    flow.edge.Write(flow.default_mode()), fill_nid, 1, new_nid_reduced, 0)
-  cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()), init_nid, cx.graph:node_result_port(init_nid),
-    fill_nid, 2)
+  -- Replicate normal inputs.
+  for _, old_nid in ipairs(other_nids) do
+    local old_label = cx.graph:node_label(old_nid)
+    local new_label = old_label {
+      value = old_label.value {
+        value = new_symbol,
+        expr_type = std.type_sub(old_label.value.expr_type, mapping),
+      },
+      region_type = new_type
+    }
+    local new_nid = cx.graph:add_node(new_label)
 
-  -- Move reduction edges over to the new input.
-  cx.graph:copy_incoming_edges(
-    function(edge) return edge.label:is(flow.edge.Reduce) end,
-    old_nid, new_nid_reduced, true)
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {}, name_nid, cx.graph:node_sync_port(name_nid),
+      new_nid, cx.graph:node_sync_port(new_nid))
 
-  -- Move read edges over to new input.
-  local copy_edges = cx.graph:copy_outgoing_edges(
-    function(edge)
-      return edge.label:is(flow.edge.Read) and
-        cx.graph:node_label(edge.to_node):is(flow.node.Copy) and
-        #cx.graph:filter_outgoing_edges(
-          function(edge2)
-            local label = cx.graph:node_label(edge2.to_node)
-            return edge2.label:is(flow.edge.Write) and
-              label:is(flow.node.data) and
-              label.region_type == old_type and
-              label.field_path == field_path and
-              edge2.from_port == edge.to_port
-          end,
-          edge.to_node) == 0
-    end,
-    old_nid, new_nid_reduced, true)
+    -- Copy old edges.
+    cx.graph:copy_outgoing_edges(
+      function(edge)
+        return edge.label:is(flow.edge.Read) and
+          edge.to_node == user_nid and edge.to_port == user_port
+      end,
+      old_nid, new_nid, true)
+  end
+
+  -- Replicate reduction inputs.
+  for _, old_nid in ipairs(reduction_nids) do
+    local old_label = cx.graph:node_label(old_nid)
+    local field_path = old_label.field_path
+
+    local new_label = old_label {
+      value = old_label.value {
+        value = new_symbol,
+        expr_type = std.type_sub(old_label.value.expr_type, mapping),
+      },
+      region_type = new_type
+    }
+    local new_nid_cleared = cx.graph:add_node(new_label)
+    local new_nid_reduced = cx.graph:add_node(new_label)
+
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {}, name_nid, cx.graph:node_sync_port(name_nid),
+      new_nid_cleared, cx.graph:node_sync_port(new_nid_cleared))
+
+    -- Fill the new input.
+    print("FIXME: Reduction fill initializes to 0 (assumes +/-)")
+    local init_type = std.get_field_path(old_type:fspace(), field_path)
+    local init_label = flow.node.Constant {
+      value = make_constant(0, init_type, old_label.value.span),
+    }
+    local init_nid = cx.graph:add_node(init_label)
+    local fill_label = flow.node.Fill {
+      dst_field_paths = terralib.newlist({field_path}),
+      options = ast.default_options(),
+      span = old_label.value.span,
+    }
+    local fill_nid = cx.graph:add_node(fill_label)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      new_nid_cleared, cx.graph:node_result_port(new_nid_cleared),
+      fill_nid, 1)
+    cx.graph:add_edge(
+      flow.edge.Write(flow.default_mode()), fill_nid, 1, new_nid_reduced, 0)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), init_nid, cx.graph:node_result_port(init_nid),
+      fill_nid, 2)
+
+    -- Move reduction edges over to the new input.
+    cx.graph:copy_incoming_edges(
+      function(edge) return edge.label:is(flow.edge.Reduce) end,
+      old_nid, new_nid_reduced, true)
+
+    -- Move read edges over to new input.
+    local copy_edges = cx.graph:copy_outgoing_edges(
+      function(edge)
+        return edge.label:is(flow.edge.Read) and
+          cx.graph:node_label(edge.to_node):is(flow.node.Copy) and
+          #cx.graph:filter_outgoing_edges(
+            function(edge2)
+              local label = cx.graph:node_label(edge2.to_node)
+              return edge2.label:is(flow.edge.Write) and
+                label:is(flow.node.data) and
+                label.region_type == old_type and
+                label.field_path == field_path and
+                edge2.from_port == edge.to_port
+            end,
+            edge.to_node) == 0
+      end,
+      old_nid, new_nid_reduced, true)
+  end
+
+  -- Recursively apply the rewrite to nested control structures.
+  local user_label = cx.graph:node_label(user_nid)
+  if user_label:is(flow.node.ForNum) then
+    local block_cx = cx:new_graph_scope(user_label.block)
+    rewrite_interior_regions(block_cx, old_type, new_type, new_symbol, make_fresh_type)
+  end
 end
 
 local function issue_allocate_scratch_fields(cx, shard_loop, scratch_fields)
@@ -961,6 +1063,17 @@ local function issue_allocate_scratch_fields(cx, shard_loop, scratch_fields)
   end
 end
 
+local function is_reduction_communicated(cx, nid)
+  local op = get_incoming_reduction_op(cx, nid)
+  local copy_nids = cx.graph:filter_immediate_successors_by_edges(
+    function(edge)
+      return edge.label:is(flow.edge.Read) and
+        cx.graph:node_label(edge.to_node):is(flow.node.Copy)
+    end,
+    nid)
+  return op and #copy_nids > 0
+end
+
 local function rewrite_reduction_scratch_fields(cx, shard_loop)
   -- FIXME: This needs to be made field-aware. The AST generator will
   -- assume all fields are coming from the same region, so it'll pick
@@ -969,22 +1082,37 @@ local function rewrite_reduction_scratch_fields(cx, shard_loop)
   local shard_label = cx.graph:node_label(shard_loop)
   local block_cx = cx:new_graph_scope(shard_label.block)
 
-  -- Rewrite copies to use scratch fields.
+  -- Rewrite reduction copies to use scratch fields.
   local mapping = {}
   local scratch_fields = data.new_recursive_map(1)
-  local old_nids = block_cx.graph:filter_nodes(
+  local data_nids = block_cx.graph:filter_nodes(
     function(_, label) return label:is(flow.node.data) end)
-  for _, old_nid in ipairs(old_nids) do
-    local op = get_incoming_reduction_op(block_cx, old_nid)
-    local copy_nids = block_cx.graph:filter_immediate_successors_by_edges(
-      function(edge)
-        local label = block_cx.graph:node_label(edge.to_node)
-        return edge.label:is(flow.edge.Read) and
-          label:is(flow.node.Copy)
-      end,
-      old_nid)
-    if op and #copy_nids > 0 then
-      issue_with_scratch_fields(block_cx, old_nid, scratch_fields, mapping)
+  local touched_nids = {}
+  for _, data_nid in ipairs(data_nids) do
+    if not touched_nids[data_nid] and is_reduction_communicated(block_cx, data_nid) then
+      local op, port = get_incoming_reduction_op(block_cx, data_nid)
+      local user_nid = only(block_cx.graph:filter_immediate_predecessors_by_edges(
+        function(edge) return edge.label:is(flow.edge.Reduce) end,
+        data_nid))
+      local reduction_nids = block_cx.graph:filter_immediate_successors_by_edges(
+        function(edge)
+          return edge.from_port == port and
+            is_reduction_communicated(block_cx, edge.to_node)
+        end,
+        user_nid)
+      local other_nids = block_cx.graph:filter_immediate_predecessors_by_edges(
+        function(edge)
+          return edge.to_port == port and edge.label:is(flow.edge.Read)
+        end,
+        user_nid)
+
+      issue_with_scratch_fields(
+        block_cx, reduction_nids, other_nids, user_nid, port,
+        scratch_fields, mapping)
+
+      for _, reduction_nid in ipairs(reduction_nids) do
+        touched_nids[reduction_nid] = true
+      end
     end
   end
 
