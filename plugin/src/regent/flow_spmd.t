@@ -407,11 +407,11 @@ local function normalize_communication(cx, shard_loop)
           block_cx.tree:parent(result_label.region_type), result_label.field_path)
         assert(parent_nid)
         -- Try to find the region among the parent's sources, if any.
-        local open_nid = find_predecessor_maybe(block_cx, parent_nid)
-        if open_nid then
-          assert(block_cx.graph:node_label(open_nid):is(flow.node.Open))
+        local parent_close_nid = find_predecessor_maybe(block_cx, parent_nid)
+        if parent_close_nid then
+          assert(block_cx.graph:node_label(parent_close_nid):is(flow.node.Close))
           input_nid = find_matching_input(
-            block_cx, open_nid,
+            block_cx, parent_close_nid,
             result_label.region_type, result_label.field_path)
           assert(input_nid)
         else
