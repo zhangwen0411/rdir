@@ -380,9 +380,10 @@ local function normalize_communication(cx, shard_loop)
   --  1. Normalize close inputs (to ensure all partitions exist at version 0).
   --  2. Remove opens (and regions used as intermediates).
   --  3. Normalize close outputs (to ensure consistent versioning bumps).
-  --  3. Add reduction closes (for reductions involved in communication).
   --  4. Normalize final state (to ensure consistent final versions).
-  --  5. Fix up outer context to avoid naming intermediate regions.
+  --  5. Add reduction self-closes (for reductions involved in communication).
+  --  6. Prune edges from read-reduce conflicts to avoid spurious copies.
+  --  7. Fix up outer context to avoid naming intermediate regions.
 
   local shard_label = cx.graph:node_label(shard_loop)
   local block_cx = cx:new_graph_scope(shard_label.block)
@@ -468,50 +469,7 @@ local function normalize_communication(cx, shard_loop)
     end
   end
 
-  -- Add reduction closes.
-  for _, close_nid in ipairs(close_nids) do
-    local read_nids = block_cx.graph:incoming_read_set(close_nid)
-    local write_nid = only(block_cx.graph:outgoing_write_set(close_nid))
-    local write_label = block_cx.graph:node_label(write_nid)
-
-    for _, read_nid in ipairs(read_nids) do
-      local read_label = block_cx.graph:node_label(read_nid)
-      if read_label.region_type ~= write_label.region_type then
-        local reducers = block_cx.graph:filter_immediate_predecessors_by_edges(
-          function(edge) return edge.label:is(flow.edge.Reduce) end,
-          read_nid)
-        if #reducers > 0 then
-          local self_close_nid = block_cx.graph:add_node(flow.node.Close {})
-          block_cx.graph:add_edge(
-            flow.edge.HappensBefore {}, close_nid, block_cx.graph:node_sync_port(close_nid),
-            self_close_nid, block_cx.graph:node_sync_port(self_close_nid))
-
-          local final_nid = block_cx.graph:add_node(read_label)
-          block_cx.graph:add_edge(
-            flow.edge.Read(flow.default_mode()),
-            read_nid, block_cx.graph:node_result_port(read_nid),
-            self_close_nid, 1)
-          block_cx.graph:add_edge(
-            flow.edge.Write(flow.default_mode()), self_close_nid, 1,
-            final_nid, block_cx.graph:node_result_port(final_nid))
-
-          local outgoing = block_cx.graph:outgoing_edges(read_nid)
-          for _, edge in ipairs(outgoing) do
-            if edge.to_node ~= close_nid and edge.to_node ~= self_close_nid then
-              block_cx.graph:add_edge(
-                edge.label, final_nid, edge.from_port,
-                edge.to_node, edge.to_port)
-              block_cx.graph:remove_edge(
-                edge.from_node, edge.from_port, edge.to_node, edge.to_port)
-            end
-          end
-        end
-      end
-    end
-  end
-
   -- Normalize final state.
-  versions = compute_version_numbers(block_cx) -- Refresh versions.
 
   -- This is the step that captures loop-carried dependencies. Any
   -- data which is not up-to-date with any data it aliases is
@@ -589,6 +547,97 @@ local function normalize_communication(cx, shard_loop)
           print("FIXME: Skipping update of region which is not read")
         end
       end
+    end
+  end
+
+  -- Add reduction self-closes (for reductions which will be communicated).
+  close_nids = block_cx.graph:filter_nodes(
+    function(nid, label) return label:is(flow.node.Close) end)
+  for _, close_nid in ipairs(close_nids) do
+    local read_nids = block_cx.graph:incoming_read_set(close_nid)
+    local write_nid = only(block_cx.graph:outgoing_write_set(close_nid))
+    local write_label = block_cx.graph:node_label(write_nid)
+
+    for _, read_nid in ipairs(read_nids) do
+      local read_label = block_cx.graph:node_label(read_nid)
+      if read_label.region_type ~= write_label.region_type then
+        local reducers = block_cx.graph:filter_immediate_predecessors_by_edges(
+          function(edge) return edge.label:is(flow.edge.Reduce) end,
+          read_nid)
+        if #reducers > 0 then
+          local self_close_nid = block_cx.graph:add_node(flow.node.Close {})
+          block_cx.graph:add_edge(
+            flow.edge.HappensBefore {}, close_nid, block_cx.graph:node_sync_port(close_nid),
+            self_close_nid, block_cx.graph:node_sync_port(self_close_nid))
+
+          local final_nid = block_cx.graph:add_node(read_label)
+          block_cx.graph:add_edge(
+            flow.edge.Read(flow.default_mode()),
+            read_nid, block_cx.graph:node_result_port(read_nid),
+            self_close_nid, 1)
+          block_cx.graph:add_edge(
+            flow.edge.Write(flow.default_mode()), self_close_nid, 1,
+            final_nid, block_cx.graph:node_result_port(final_nid))
+
+          local outgoing = block_cx.graph:outgoing_edges(read_nid)
+          for _, edge in ipairs(outgoing) do
+            if edge.to_node ~= close_nid and edge.to_node ~= self_close_nid then
+              block_cx.graph:add_edge(
+                edge.label, final_nid, edge.from_port,
+                edge.to_node, edge.to_port)
+              block_cx.graph:remove_edge(
+                edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Prune edges from read-reduce conflicts to avoid spurious copies.
+  data_nids = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.data) end)
+  for _, data_nid in ipairs(data_nids) do
+    local close_nids = block_cx.graph:filter_immediate_successors_by_edges(
+      function(edge)
+        return edge.label:is(flow.edge.Read) and
+          block_cx.graph:node_label(edge.to_node):is(flow.node.Close)
+      end,
+    data_nid)
+    local writer_nids = block_cx.graph:filter_immediate_predecessors_by_edges(
+      function(edge)
+        return edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Reduce)
+      end,
+      data_nid)
+    if #close_nids > 1 and #writer_nids == 0 then
+      -- Look for a dominator among the close ops.
+      local dominator_nid
+      for _, nid in ipairs(close_nids) do
+        local dominates = true
+        for _, other_nid in ipairs(close_nids) do
+          if not block_cx.graph:reachable(
+            other_nid, nid,
+            function(edge)
+              return edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write)
+            end)
+          then
+            dominates = false
+            break
+          end
+        end
+        if dominates then
+          dominator_nid = nid
+          break
+        end
+      end
+
+      block_cx.graph:remove_outgoing_edges(
+        function(edge)
+          return edge.label:is(flow.edge.Read) and
+            edge.to_node ~= dominator_nid and
+            block_cx.graph:node_label(edge.to_node):is(flow.node.Close)
+        end,
+        data_nid)
     end
   end
 

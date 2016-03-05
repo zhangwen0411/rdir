@@ -474,6 +474,14 @@ function graph:copy_incoming_edges(fn, old_node, new_node, delete_old)
   end
 end
 
+function graph:remove_incoming_edges(fn, node)
+  local edges = self:filter_incoming_edges(fn, node)
+  for _, edge in ipairs(edges) do
+    self:remove_edge(
+      edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+  end
+end
+
 function graph:incoming_edges_by_port(node)
   local result = {}
   self:traverse_incoming_edges(
@@ -531,6 +539,14 @@ function graph:copy_outgoing_edges(fn, old_node, new_node, delete_old)
       self:remove_edge(
         edge.from_node, edge.from_port, edge.to_node, edge.to_port)
     end
+  end
+end
+
+function graph:remove_outgoing_edges(fn, node)
+  local edges = self:filter_outgoing_edges(fn, node)
+  for _, edge in ipairs(edges) do
+    self:remove_edge(
+      edge.from_node, edge.from_port, edge.to_node, edge.to_port)
   end
 end
 
