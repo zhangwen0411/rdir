@@ -1669,6 +1669,7 @@ local function rewrite_communication(cx, shard_loop, mapping)
     local dst_in_nid = find_matching_input(
       block_cx, close_nid, dst_label.region_type, dst_label.field_path)
 
+    local needs_removal = false
     local src_nids = block_cx.graph:incoming_read_set(close_nid)
     for _, src_nid in ipairs(src_nids) do
       local src_label = block_cx.graph:node_label(src_nid)
@@ -1700,10 +1701,14 @@ local function rewrite_communication(cx, shard_loop, mapping)
         block_cx.graph:copy_outgoing_edges(
           function(edge) return edge.label:is(flow.edge.HappensBefore) end,
           close_nid, copy_nid, false)
+
+        needs_removal = true
       end
     end
 
-    remove:insert(close_nid)
+    if needs_removal then
+      remove:insert(close_nid)
+    end
   end
 
   -- Remove obsolete closes.
