@@ -565,29 +565,37 @@ local function normalize_communication(cx, shard_loop)
           function(edge) return edge.label:is(flow.edge.Reduce) end,
           read_nid)
         if #reducers > 0 then
-          local self_close_nid = block_cx.graph:add_node(flow.node.Close {})
-          block_cx.graph:add_edge(
-            flow.edge.HappensBefore {}, close_nid, block_cx.graph:node_sync_port(close_nid),
-            self_close_nid, block_cx.graph:node_sync_port(self_close_nid))
+          local first_nid = find_first_instance(block_cx, read_label)
+          local readers = data.filter(
+            function(nid) return not block_cx.graph:node_label(nid):is(flow.node.Close) end,
+            block_cx.graph:outgoing_read_set(first_nid))
+          if #readers > 0 then
+            local self_close_nid = block_cx.graph:add_node(flow.node.Close {})
+            block_cx.graph:add_edge(
+              flow.edge.HappensBefore {}, close_nid, block_cx.graph:node_sync_port(close_nid),
+              self_close_nid, block_cx.graph:node_sync_port(self_close_nid))
 
-          local final_nid = block_cx.graph:add_node(read_label)
-          block_cx.graph:add_edge(
-            flow.edge.Read(flow.default_mode()),
-            read_nid, block_cx.graph:node_result_port(read_nid),
-            self_close_nid, 1)
-          block_cx.graph:add_edge(
-            flow.edge.Write(flow.default_mode()), self_close_nid, 1,
-            final_nid, block_cx.graph:node_result_port(final_nid))
+            local final_nid = block_cx.graph:add_node(read_label)
+            block_cx.graph:add_edge(
+              flow.edge.Read(flow.default_mode()),
+              read_nid, block_cx.graph:node_result_port(read_nid),
+              self_close_nid, 1)
+            block_cx.graph:add_edge(
+              flow.edge.Write(flow.default_mode()), self_close_nid, 1,
+              final_nid, block_cx.graph:node_result_port(final_nid))
 
-          local outgoing = block_cx.graph:outgoing_edges(read_nid)
-          for _, edge in ipairs(outgoing) do
-            if edge.to_node ~= close_nid and edge.to_node ~= self_close_nid then
-              block_cx.graph:add_edge(
-                edge.label, final_nid, edge.from_port,
-                edge.to_node, edge.to_port)
-              block_cx.graph:remove_edge(
-                edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+            local outgoing = block_cx.graph:outgoing_edges(read_nid)
+            for _, edge in ipairs(outgoing) do
+              if edge.to_node ~= close_nid and edge.to_node ~= self_close_nid then
+                block_cx.graph:add_edge(
+                  edge.label, final_nid, edge.from_port,
+                  edge.to_node, edge.to_port)
+                block_cx.graph:remove_edge(
+                  edge.from_node, edge.from_port, edge.to_node, edge.to_port)
+              end
             end
+          else
+            print("FIXME: Skipping self-copy of region which is not read")
           end
         end
       end
@@ -871,7 +879,7 @@ local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make
       new_nid)
     for _, index_nid in ipairs(index_nids) do
       local indexed_nids = cx.graph:outgoing_name_set(index_nid)
-      assert(#indexed_nids > 1)
+      assert(#indexed_nids >= 1)
       local old_indexed_label = cx.graph:node_label(indexed_nids[1])
       local old_indexed_type = old_indexed_label.region_type
 
