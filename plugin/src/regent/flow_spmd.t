@@ -2881,21 +2881,21 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
   local list_barriers = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({
-          barrier_in.value.value,
+          barrier_out.value.value,
       }),
       types = terralib.newlist({
-          std.as_read(barrier_in.value.expr_type),
+          std.as_read(barrier_out.value.expr_type),
       }),
       values = terralib.newlist({
           ast.typed.expr.ListPhaseBarriers {
             product = intersection.value,
-            expr_type = std.as_read(barrier_in.value.expr_type),
+            expr_type = std.as_read(barrier_out.value.expr_type),
             options = ast.default_options(),
-            span = barrier_in.value.span,
+            span = barrier_out.value.span,
           },
       }),
       options = ast.default_options(),
-      span = barrier_in.value.span,
+      span = barrier_out.value.span,
     }
   }
   local list_barriers_nid = cx.graph:add_node(list_barriers)
@@ -2905,28 +2905,28 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
   cx.graph:add_edge(
     flow.edge.HappensBefore {},
     list_barriers_nid, cx.graph:node_sync_port(list_barriers_nid),
-    barrier_in_nid, cx.graph:node_sync_port(barrier_in_nid))
+    barrier_out_nid, cx.graph:node_sync_port(barrier_out_nid))
 
   local list_invert = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({
-          barrier_out.value.value,
+          barrier_in.value.value,
       }),
       types = terralib.newlist({
-          std.as_read(barrier_out.value.expr_type),
+          std.as_read(barrier_in.value.expr_type),
       }),
       values = terralib.newlist({
           ast.typed.expr.ListInvert {
             rhs = rhs.value,
             product = intersection.value,
-            barriers = barrier_in.value,
-            expr_type = std.as_read(barrier_out.value.expr_type),
+            barriers = barrier_out.value,
+            expr_type = std.as_read(barrier_in.value.expr_type),
             options = ast.default_options(),
-            span = barrier_out.value.span,
+            span = barrier_in.value.span,
           },
       }),
       options = ast.default_options(),
-      span = barrier_out.value.span,
+      span = barrier_in.value.span,
     }
   }
   local list_invert_nid = cx.graph:add_node(list_invert)
@@ -2937,12 +2937,12 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
     flow.edge.None(flow.default_mode()), intersection_nid, cx.graph:node_result_port(intersection_nid),
     list_invert_nid, cx.graph:node_available_port(list_invert_nid))
   cx.graph:add_edge(
-    flow.edge.Read(flow.default_mode()), barrier_in_nid, cx.graph:node_result_port(barrier_in_nid),
+    flow.edge.Read(flow.default_mode()), barrier_out_nid, cx.graph:node_result_port(barrier_out_nid),
     list_invert_nid, cx.graph:node_available_port(list_invert_nid))
   cx.graph:add_edge(
     flow.edge.HappensBefore {},
     list_invert_nid, cx.graph:node_sync_port(list_invert_nid),
-    barrier_out_nid, cx.graph:node_sync_port(barrier_out_nid))
+    barrier_in_nid, cx.graph:node_sync_port(barrier_in_nid))
 end
 
 local function merge_open_nids(cx)
