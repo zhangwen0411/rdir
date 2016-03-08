@@ -217,7 +217,7 @@ local function summarize_subgraph(cx, nid, mapping)
         write_edge_label = flow.edge.Reduce {
           coherence = coherence_kind_label(coherence),
           flag = flag_kind_label(flag),
-          op = std.reduction_op(privilege),
+          op = std.get_reduction_op(privilege),
         }
       else
         assert(false)
