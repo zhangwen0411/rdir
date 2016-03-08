@@ -1125,11 +1125,17 @@ local function get_privilege_field_map(task, region_type)
   return result
 end
 
-local function attach_result(privilege_map, ...)
+local function attach_result(privilege_map, nid)
   assert(is_field_map(privilege_map))
   local result = new_field_map()
-  for k, v in privilege_map:items() do
-    result:insert(k, data.newtuple(v, ...))
+  for k, privilege in privilege_map:items() do
+    if privilege == "reads" then
+      result:insert(k, data.newtuple(privilege, nid))
+    elseif std.is_reduction_op(privilege) then
+      result:insert(k, data.newtuple(privilege, false, nid))
+    else
+      assert(false)
+    end
   end
   return result
 end
@@ -1569,13 +1575,13 @@ function analyze_privileges.stat_assignment(cx, node)
 end
 
 function analyze_privileges.stat_reduce(cx, node)
+  local op = get_trivial_field_map(std.reduces(node.op))
   return
     data.reduce(
       privilege_meet,
       node.lhs:map(
         function(lh)
-          return analyze_privileges.expr(cx, lh, reads_writes) or
-            new_field_map()
+          return analyze_privileges.expr(cx, lh, op) or new_field_map()
         end),
       data.reduce(
         privilege_meet,
@@ -2405,11 +2411,11 @@ function flow_from_ast.stat_assignment(cx, node)
 end
 
 function flow_from_ast.stat_reduce(cx, node)
+  local op = get_trivial_field_map(std.reduces(node.op))
   local rhs = node.rhs:map(
     function(rh) return flow_from_ast.expr(cx, rh, reads) end)
   local lhs = node.lhs:map(
-    function(lh) return flow_from_ast.expr(cx, lh, reads_writes) end)
-
+    function(lh) return flow_from_ast.expr(cx, lh, op) end)
 
   local inputs = terralib.newlist()
   inputs:insertall(lhs)
