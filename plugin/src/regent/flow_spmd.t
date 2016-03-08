@@ -415,6 +415,9 @@ local function normalize_communication(cx, shard_loop)
             block_cx, parent_close_nid,
             result_label.region_type, result_label.field_path)
           assert(input_nid)
+          block_cx.graph:add_edge(
+            flow.edge.Read(flow.default_mode()), input_nid, block_cx.graph:node_result_port(input_nid),
+            close_nid, block_cx.graph:node_available_port(close_nid))
         else
           -- Otherwise just duplicate it.
           input_nid = block_cx.graph:add_node(result_label)
@@ -1676,6 +1679,7 @@ local function rewrite_communication(cx, shard_loop, mapping)
     local dst_type = dst_label.region_type
     local dst_in_nid = find_matching_input(
       block_cx, close_nid, dst_label.region_type, dst_label.field_path)
+    assert(dst_in_nid)
 
     local needs_removal = false
     local src_nids = block_cx.graph:incoming_read_set(close_nid)
