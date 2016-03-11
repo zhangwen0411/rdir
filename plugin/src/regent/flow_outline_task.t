@@ -44,6 +44,7 @@ local optimize_divergence = require("regent/optimize_divergence")
 local optimize_futures = require("regent/optimize_futures")
 local optimize_inlines = require("regent/optimize_inlines")
 local optimize_loops = require("regent/optimize_loops")
+local pretty = require("regent/pretty")
 local std = require("regent/std")
 local vectorize_loops = require("regent/vectorize_loops")
 
@@ -376,6 +377,8 @@ local function extract_task(cx, nid, prefix, force_read_write)
   if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
   if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
   if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
+
+  if std.config["pretty"] then print(pretty.entry(ast)) end
   ast = codegen.entry(ast)
   return ast, param_mapping
 end
