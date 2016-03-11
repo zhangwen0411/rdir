@@ -2705,9 +2705,13 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
       name_nid, cx.graph:node_sync_port(name_nid))
   end
 
-  issue_zipped_copy(cx, partition_nids, name_nids, new_nids,
-                    std.as_read(first_partition_label.value.expr_type), region_type,
-                    bounds, first_new_label.value.span)
+  local copy_nid = issue_zipped_copy(
+    cx, partition_nids, name_nids, new_nids,
+    std.as_read(first_partition_label.value.expr_type), region_type,
+    bounds, first_new_label.value.span)
+  cx.graph:copy_incoming_edges(
+    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+    old_loop, copy_nid)
 end
 
 local function issue_input_copies_cross_product(cx, region_type, need_copy,
@@ -2784,7 +2788,7 @@ local function issue_input_copies(cx, region_type, need_copy, partitions,
 end
 
 local function issue_output_copies_partition(cx, region_type, need_copy,
-                                             partitions, bounds, opened_nids)
+                                             partitions, old_loop, bounds, opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
     find_partition_nids(
@@ -2809,25 +2813,29 @@ local function issue_output_copies_partition(cx, region_type, need_copy,
     end
   end
 
-  issue_zipped_copy(cx, new_nids, opened_partition_nids, partition_nids,
-                    region_type, std.as_read(first_partition_label.value.expr_type),
-                    bounds, first_new_label.value.span)
+  local copy_nid = issue_zipped_copy(
+    cx, new_nids, opened_partition_nids, partition_nids,
+    region_type, std.as_read(first_partition_label.value.expr_type),
+    bounds, first_new_label.value.span)
+  cx.graph:copy_outgoing_edges(
+    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+    old_loop, copy_nid)
 end
 
 local function issue_output_copies_cross_product(cx, region_type, need_copy,
-                                                 partitions, bounds, opened_nids)
+                                                 partitions, old_loop, bounds, opened_nids)
   assert(std.is_list_of_partitions(region_type))
   assert(false)
 end
 
 local function issue_output_copies(cx, region_type, need_copy, partitions,
-                                   bounds, opened_nids)
+                                   old_loop, bounds, opened_nids)
   if std.is_list_of_regions(region_type) then
     issue_output_copies_partition(cx, region_type, need_copy, partitions,
-                                  bounds, opened_nids)
+                                  old_loop, bounds, opened_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_output_copies_cross_product(cx, region_type, need_copy, partitions,
-                                      bounds, opened_nids)
+                                      old_loop, bounds, opened_nids)
   else
     assert(false)
   end
@@ -3121,7 +3129,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     end
     if not need_copy:is_empty() then
       issue_output_copies(
-        cx, region_type, need_copy, partitions, original_bounds,
+        cx, region_type, need_copy, partitions, old_loop, original_bounds,
         opened_nids)
     end
   end
@@ -3182,18 +3190,12 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   merge_close_nids(cx)
 
   -- Copy happens-before edges for the loop node itself.
-  for _, edge in ipairs(cx.graph:incoming_edges(old_loop)) do
-    if edge.label:is(flow.edge.HappensBefore) then
-      cx.graph:add_edge(
-        edge.label, edge.from_node, edge.from_port, new_loop, edge.to_port)
-    end
-  end
-  for _, edge in ipairs(cx.graph:outgoing_edges(old_loop)) do
-    if edge.label:is(flow.edge.HappensBefore) then
-      cx.graph:add_edge(
-        edge.label, new_loop, edge.from_port, edge.to_node, edge.to_port)
-    end
-  end
+  cx.graph:copy_incoming_edges(
+    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+    old_loop, new_loop)
+  cx.graph:copy_outgoing_edges(
+    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+    old_loop, new_loop)
 end
 
 local function spmdize(cx, loop)
