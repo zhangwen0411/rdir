@@ -130,7 +130,7 @@ function region_tree:intern_variable(expr_type, symbol, options, span)
       return self.interned_scalars[symbol]
     end
 
-    region_type = std.region(region_type)
+    region_type = std.region(terralib.types.unit)
     for other, _ in pairs(self.region_universe) do
       std.add_constraint(self, region_type, other, "*", true)
     end

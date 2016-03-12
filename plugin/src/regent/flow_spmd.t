@@ -3363,9 +3363,9 @@ end
 function flow_spmd.graph(cx, graph)
   assert(flow.is_graph(graph))
   local cx = cx:new_graph_scope(graph:copy())
-  local while_loops = cx.graph:filter_nodes(
-    function(nid, label) return label:is(flow.node.ctrl.ForNum) end)
-  spmdize_eligible_loops(cx, while_loops)
+  local loops = cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.ctrl) end)
+  spmdize_eligible_loops(cx, loops)
   return cx.graph
 end
 
