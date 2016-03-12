@@ -606,10 +606,10 @@ function flow_task_fusion.node(cx, nid)
   elseif label:is(flow.node.Close) then
     return
 
-  elseif label:is(flow.node.ForNum) then
+  elseif label:is(flow.node.ctrl.ForNum) then
     return flow_task_fusion.node_for_num(cx, nid)
 
-  elseif label:is(flow.node.ForList) then
+  elseif label:is(flow.node.ctrl.ForList) then
     return flow_task_fusion.node_for_list(cx, nid)
 
   elseif label:is(flow.node.Region) then

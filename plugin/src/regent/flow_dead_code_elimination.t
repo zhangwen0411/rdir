@@ -63,7 +63,7 @@ function remove_dead_nodes(cx)
   local nids = cx.graph:inverse_toposort()
   for _, nid in ipairs(nids) do
     local label = cx.graph:node_label(nid)
-    if label:is(flow.node.ForNum) or label:is(flow.node.ForList) then
+    if label:is(flow.node.ctrl.ForNum) or label:is(flow.node.ctrl.ForList) then
       local block_cx = cx:new_graph_scope(label.block:copy())
       remove_dead_nodes(block_cx)
       cx.graph:set_node_label(nid, label { block = block_cx.graph })

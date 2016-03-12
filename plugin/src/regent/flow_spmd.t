@@ -134,7 +134,7 @@ local function contains_only_parallel_loops(cx, loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
   local function is_bad(nid, label)
-    if label:is(flow.node.ForNum) then
+    if label:is(flow.node.ctrl.ForNum) then
       return is_parallel_loop(block_cx, nid)
     elseif label:is(flow.node.Open) or label:is(flow.node.Close) or
       label:is(flow.node.Constant) or label:is(flow.node.Function) or
@@ -160,7 +160,7 @@ local function loops_are_compatible(cx, loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
   local loops = block_cx.graph:filter_nodes(
-    function(_, label) return label:is(flow.node.ForNum) end)
+    function(_, label) return label:is(flow.node.ctrl.ForNum) end)
 
   local function equivalent(nid1, nid2)
     if nid1 == nid2 then return true end
@@ -1074,7 +1074,7 @@ local function issue_with_scratch_fields(cx, reduction_nids, other_nids,
 
   -- Recursively apply the rewrite to nested control structures.
   local user_label = cx.graph:node_label(user_nid)
-  if user_label:is(flow.node.ForNum) then
+  if user_label:is(flow.node.ctrl.ForNum) then
     local block_cx = cx:new_graph_scope(user_label.block)
     rewrite_interior_regions(block_cx, old_type, new_type, new_symbol, make_fresh_type)
   end
@@ -1388,7 +1388,7 @@ local function issue_barrier_arrive(cx, bar_nid, use_nid)
   cx.graph:add_edge(
     flow.edge.Arrive {}, use_nid, cx.graph:node_available_port(use_nid),
     bar_nid, cx.graph:node_available_port(bar_nid))
-  if use_label:is(flow.node.ForNum) then
+  if use_label:is(flow.node.ctrl.ForNum) then
     issue_barrier_arrive_loop(cx, bar_nid, use_nid)
   elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
                 use_label:is(flow.node.Close))
@@ -1424,7 +1424,7 @@ local function issue_barrier_await(cx, bar_nid, use_nid)
     flow.edge.Await {},
     bar_nid, cx.graph:node_result_port(bar_nid),
     use_nid, cx.graph:node_available_port(use_nid))
-  if use_label:is(flow.node.ForNum) then
+  if use_label:is(flow.node.ctrl.ForNum) then
     issue_barrier_await_loop(cx, bar_nid, use_nid)
   elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
                 use_label:is(flow.node.Close))
@@ -1853,7 +1853,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   local bounds_type
   block_cx.graph:traverse_nodes(
     function(nid, label)
-      if label:is(flow.node.ForNum) then
+      if label:is(flow.node.ctrl.ForNum) then
         local inputs = block_cx.graph:incoming_edges_by_port(nid)
         local value1 = block_cx.graph:node_label(get_input(inputs, 1))
         local value2 = block_cx.graph:node_label(get_input(inputs, 2))
@@ -1888,7 +1888,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   -- Replace old bounds with new.
   block_cx.graph:traverse_nodes(
     function(nid, label)
-      if label:is(flow.node.ForNum) then
+      if label:is(flow.node.ctrl.ForNum) then
         local inputs = block_cx.graph:incoming_edges_by_port(nid)
         for i = 1, 2 do
           local value_nid, edge = get_input(inputs, i)
@@ -1909,7 +1909,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   -- Rewrite bounds used for accessing lists inside of loops.
   block_cx.graph:traverse_nodes(
     function(nid, label)
-      if label:is(flow.node.ForNum) then
+      if label:is(flow.node.ctrl.ForNum) then
         rewrite_inner_loop_bounds(block_cx, nid, bounds_labels[1])
       end
     end)
@@ -2223,7 +2223,7 @@ local function downgrade_simultaneous_coherence(cx)
 end
 
 local function make_block(cx, block, mapping, span)
-  local label = flow.node.Block {
+  local label = flow.node.ctrl.Block {
     block = block,
     options = ast.default_options(),
     span = span,
@@ -2236,7 +2236,7 @@ end
 local function make_distribution_loop(cx, block, shard_index, shard_stride,
                                       original_bounds, slice_mapping, span)
   assert(#original_bounds == 2)
-  local label = flow.node.ForNum {
+  local label = flow.node.ctrl.ForNum {
     symbol = shard_index.value.value,
     block = block,
     options = ast.default_options(),
@@ -2279,7 +2279,7 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
 end
 
 local function make_must_epoch(cx, block, span)
-  local label = flow.node.MustEpoch {
+  local label = flow.node.ctrl.MustEpoch {
     block = block,
     options = ast.default_options(),
     span = span,
@@ -2558,7 +2558,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
   local index_nid = block_cx.graph:add_node(index_label)
 
   -- Exterior of the loop:
-  local copy_loop = flow.node.ForNum {
+  local copy_loop = flow.node.ctrl.ForNum {
     symbol = index_symbol,
     block = block_cx.graph,
     options = ast.default_options(),
@@ -3364,7 +3364,7 @@ function flow_spmd.graph(cx, graph)
   assert(flow.is_graph(graph))
   local cx = cx:new_graph_scope(graph:copy())
   local while_loops = cx.graph:filter_nodes(
-    function(nid, label) return label:is(flow.node.ForNum) end)
+    function(nid, label) return label:is(flow.node.ctrl.ForNum) end)
   spmdize_eligible_loops(cx, while_loops)
   return cx.graph
 end

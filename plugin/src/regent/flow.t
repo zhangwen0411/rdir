@@ -77,7 +77,7 @@ function flow.is_opaque_node(label)
   return label:is(flow.node.Opaque) or (
     label:is(flow.node.Task) and label.opaque) or
     -- FIXME: Depends on contents of subgraph.
-    label:is(flow.node.ForNum) or label:is(flow.node.ForList)
+    label:is(flow.node.ctrl.ForNum) or label:is(flow.node.ctrl.ForList)
 end
 
 function graph:has_node(node)
@@ -113,15 +113,15 @@ function graph:node_minimum_port(node)
     label:is(flow.node.Close)
   then
     return 1
-  elseif label:is(flow.node.Block) then
+  elseif label:is(flow.node.ctrl.Block) then
     return 1
-  elseif label:is(flow.node.WhileLoop) then
+  elseif label:is(flow.node.ctrl.WhileLoop) then
     return 2
-  elseif label:is(flow.node.ForNum) then
+  elseif label:is(flow.node.ctrl.ForNum) then
     return 4
-  elseif label:is(flow.node.ForList) then
+  elseif label:is(flow.node.ctrl.ForList) then
     return 2
-  elseif label:is(flow.node.MustEpoch) then
+  elseif label:is(flow.node.ctrl.MustEpoch) then
     return 1
   elseif label:is(flow.node.data) or
     label:is(flow.node.Constant) or
@@ -862,10 +862,7 @@ function graph:printpretty(ids, types, metadata)
       node:is(flow.node.Advance) or
       node:is(flow.node.Reduce) or node:is(flow.node.Task) or
       node:is(flow.node.Copy) or node:is(flow.node.Fill) or
-      node:is(flow.node.Block) or
-      node:is(flow.node.WhileLoop) or node:is(flow.node.WhileBody) or
-      node:is(flow.node.ForNum) or node:is(flow.node.ForList) or
-      node:is(flow.node.MustEpoch)
+      node:is(flow.node.ctrl)
     then
       shape = "rectangle"
     elseif node:is(flow.node.Open) or node:is(flow.node.Close) then
@@ -926,12 +923,13 @@ flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})
 
 -- Control
-flow.node:leaf("Block", {"block", "options", "span"})
-flow.node:leaf("WhileLoop", {"block", "options", "span"})
-flow.node:leaf("WhileBody", {"block", "options", "span"})
-flow.node:leaf("ForNum", {"symbol", "block", "options", "span"})
-flow.node:leaf("ForList", {"symbol", "block", "options", "span"})
-flow.node:leaf("MustEpoch", {"block", "options", "span"})
+flow.node:inner("ctrl", {"block", "options", "span"})
+flow.node.ctrl:leaf("Block", {})
+flow.node.ctrl:leaf("WhileLoop", {})
+flow.node.ctrl:leaf("WhileBody", {})
+flow.node.ctrl:leaf("ForNum", {"symbol"})
+flow.node.ctrl:leaf("ForList", {"symbol"})
+flow.node.ctrl:leaf("MustEpoch", {})
 
 -- Data
 flow.node:inner("data", {"value", "region_type", "field_path"})

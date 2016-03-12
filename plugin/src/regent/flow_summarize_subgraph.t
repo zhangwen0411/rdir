@@ -120,9 +120,7 @@ end
 
 local function summarize_subgraph(cx, nid, mapping)
   local label = cx.graph:node_label(nid)
-  assert(label:is(flow.node.Block) or
-           label:is(flow.node.WhileLoop) or label:is(flow.node.ForNum) or
-           label:is(flow.node.ForList) or label:is(flow.node.MustEpoch))
+  assert(label:is(flow.node.ctrl))
 
   local block_cx = cx:new_graph_scope(label.block)
   local usage_modes = data.new_recursive_map(1)

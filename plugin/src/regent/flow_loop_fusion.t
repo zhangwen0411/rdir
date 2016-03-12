@@ -61,7 +61,7 @@ end
 
 local function has_demand_parallel(cx, nid)
   local label = cx.graph:node_label(nid)
-  return label:is(flow.node.ForNum) and label.parallel == "demand"
+  return label:is(flow.node.ctrl.ForNum) and label.parallel == "demand"
 end
 
 local function has_compute_nodes_between(cx, nid1, nid2)
@@ -143,9 +143,9 @@ local function loop_bounds_match(cx, nid1, nid2)
   local inputs1 = cx.graph:incoming_edges_by_port(nid1)
   local inputs2 = cx.graph:incoming_edges_by_port(nid2)
   local num_values
-  if cx.graph:node_label(nid1):is(flow.node.ForNum) then
+  if cx.graph:node_label(nid1):is(flow.node.ctrl.ForNum) then
     num_values = 3
-  elseif cx.graph:node_label(nid1):is(flow.node.ForList) then
+  elseif cx.graph:node_label(nid1):is(flow.node.ctrl.ForList) then
     num_values = 1
   else
     assert(false)
@@ -299,15 +299,15 @@ local function fuse(cx, loop1, loop2)
 
   -- Create the new loop node.
   local label
-  if cx.graph:node_label(loop1):is(flow.node.ForNum) then
-    label = flow.node.ForNum {
+  if cx.graph:node_label(loop1):is(flow.node.ctrl.ForNum) then
+    label = flow.node.ctrl.ForNum {
       symbol = loop1_label.symbol,
       block = new_cx.graph,
       parallel = loop1_label.parallel,
       span = loop1_label.span,
     }
-  elseif cx.graph:node_label(loop1):is(flow.node.ForList) then
-    label = flow.node.ForList {
+  elseif cx.graph:node_label(loop1):is(flow.node.ctrl.ForList) then
+    label = flow.node.ctrl.ForList {
       symbol = loop1_label.symbol,
       block = new_cx.graph,
       vectorize = loop1_label.vectorize,
@@ -319,9 +319,9 @@ local function fuse(cx, loop1, loop2)
   local compute_nid = cx.graph:add_node(label)
 
   local num_values
-  if cx.graph:node_label(loop1):is(flow.node.ForNum) then
+  if cx.graph:node_label(loop1):is(flow.node.ctrl.ForNum) then
     num_values = 3
-  elseif cx.graph:node_label(loop1):is(flow.node.ForList) then
+  elseif cx.graph:node_label(loop1):is(flow.node.ctrl.ForList) then
     num_values = 1
   else
     assert(false)
@@ -412,10 +412,10 @@ function flow_loop_fusion.graph(cx, graph)
   assert(flow.is_graph(graph))
   local cx = cx:new_graph_scope(graph:copy())
   local for_num_loops = cx.graph:filter_nodes(
-    function(nid, label) return label:is(flow.node.ForNum) end)
+    function(nid, label) return label:is(flow.node.ctrl.ForNum) end)
   fuse_eligible_loop_pairs(cx, for_num_loops)
   local for_list_loops = cx.graph:filter_nodes(
-    function(nid, label) return label:is(flow.node.ForList) end)
+    function(nid, label) return label:is(flow.node.ctrl.ForList) end)
   fuse_eligible_loop_pairs(cx, for_list_loops)
   return cx.graph
 end

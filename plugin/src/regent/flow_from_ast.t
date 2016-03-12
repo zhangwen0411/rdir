@@ -1659,7 +1659,7 @@ local function as_opaque_stat(cx, node)
 end
 
 local function as_while_body_stat(cx, block, args, options, span)
-  return as_stat(cx, args, flow.node.WhileBody {
+  return as_stat(cx, args, flow.node.ctrl.WhileBody {
     block = block,
     options = options,
     span = span,
@@ -1667,7 +1667,7 @@ local function as_while_body_stat(cx, block, args, options, span)
 end
 
 local function as_while_loop_stat(cx, block, args, options, span)
-  return as_stat(cx, args, flow.node.WhileLoop {
+  return as_stat(cx, args, flow.node.ctrl.WhileLoop {
     block = block,
     options = options,
     span = span,
@@ -1675,7 +1675,7 @@ local function as_while_loop_stat(cx, block, args, options, span)
 end
 
 local function as_fornum_stat(cx, symbol, block, args, options, span)
-  return as_stat(cx, args, flow.node.ForNum {
+  return as_stat(cx, args, flow.node.ctrl.ForNum {
     symbol = symbol,
     block = block,
     options = options,
@@ -1684,7 +1684,7 @@ local function as_fornum_stat(cx, symbol, block, args, options, span)
 end
 
 local function as_forlist_stat(cx, symbol, block, args, options, span)
-  return as_stat(cx, args, flow.node.ForList {
+  return as_stat(cx, args, flow.node.ctrl.ForList {
     symbol = symbol,
     block = block,
     options = options,

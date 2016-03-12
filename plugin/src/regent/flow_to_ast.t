@@ -688,7 +688,7 @@ function flow_to_ast.node_data(cx, nid)
   -- control node of some sort. To work around such cases, we need to
   -- save the scalar in a variable.
   local function needs_save(nid)
-    return cx.graph:node_label(nid):is(flow.node.MustEpoch)
+    return cx.graph:node_label(nid):is(flow.node.ctrl.MustEpoch)
   end
 
   local label = cx.graph:node_label(nid)
@@ -792,22 +792,22 @@ function flow_to_ast.node(cx, nid)
   elseif label:is(flow.node.Close) then
     return
 
-  elseif label:is(flow.node.Block) then
+  elseif label:is(flow.node.ctrl.Block) then
     return flow_to_ast.node_block(cx, nid)
 
-  elseif label:is(flow.node.WhileLoop) then
+  elseif label:is(flow.node.ctrl.WhileLoop) then
     return flow_to_ast.node_while_loop(cx, nid)
 
-  elseif label:is(flow.node.WhileBody) then
+  elseif label:is(flow.node.ctrl.WhileBody) then
     return flow_to_ast.node_while_body(cx, nid)
 
-  elseif label:is(flow.node.ForNum) then
+  elseif label:is(flow.node.ctrl.ForNum) then
     return flow_to_ast.node_for_num(cx, nid)
 
-  elseif label:is(flow.node.ForList) then
+  elseif label:is(flow.node.ctrl.ForList) then
     return flow_to_ast.node_for_list(cx, nid)
 
-  elseif label:is(flow.node.MustEpoch) then
+  elseif label:is(flow.node.ctrl.MustEpoch) then
     return flow_to_ast.node_must_epoch(cx, nid)
 
   elseif label:is(flow.node.data) then
