@@ -58,6 +58,9 @@ local function extract_subgraph(cx, nid)
   for _, edge in ipairs(inputs) do
     if not edge.label:is(flow.edge.HappensBefore) then
       local input_label = cx.graph:node_label(edge.from_node)
+      if input_label:is(flow.node.data.Scalar) then
+        input_label = input_label { fresh = false }
+      end
       local input_nid = subgraph_cx.graph:add_node(input_label)
       subgraph_cx.graph:add_edge(
         edge.label, input_nid, edge.from_port, compute_nid, edge.to_port)
@@ -68,6 +71,9 @@ local function extract_subgraph(cx, nid)
   for _, edge in ipairs(outputs) do
     if not edge.label:is(flow.edge.HappensBefore) then
       local output_label = cx.graph:node_label(edge.to_node)
+      if output_label:is(flow.node.data.Scalar) then
+        output_label = output_label { fresh = false }
+      end
       local output_nid = subgraph_cx.graph:add_node(output_label)
       subgraph_cx.graph:add_edge(
         edge.label, compute_nid, edge.from_port, output_nid, edge.to_port)

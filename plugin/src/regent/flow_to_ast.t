@@ -678,12 +678,34 @@ function flow_to_ast.node_must_epoch(cx, nid)
 end
 
 function flow_to_ast.node_data(cx, nid)
+  -- Hack: Some types of nodes can't actually consume fresh
+  -- scalars. Generally, this means a transformation took some node
+  -- that was consuming a value directly, and moved it into a nested
+  -- control node of some sort. To work around such cases, we need to
+  -- save the scalar in a variable.
+  local function needs_save(nid)
+    return cx.graph:node_label(nid):is(flow.node.MustEpoch)
+  end
+
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
   if label:is(flow.node.data.Scalar) and label.fresh then
     assert(rawget(inputs, 0) and #inputs[0] == 1)
-    if #(cx.graph:outgoing_use_set(nid)) > 0 then
-      cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+    local readers = cx.graph:outgoing_use_set(nid)
+    if #readers > 0 then
+      if data.any(unpack(readers:map(needs_save))) then
+        cx.ast[nid] = label.value
+        return terralib.newlist({
+            ast.typed.stat.Var {
+              symbols = terralib.newlist({label.value.value}),
+              types = terralib.newlist({std.as_read(label.value.expr_type)}),
+              values = terralib.newlist({cx.ast[inputs[0][1].from_node]}),
+              options = ast.default_options(),
+              span = label.value.span,
+        }})
+      else
+        cx.ast[nid] = cx.ast[inputs[0][1].from_node]
+      end
     end
     return terralib.newlist()
   end
