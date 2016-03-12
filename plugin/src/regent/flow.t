@@ -682,6 +682,14 @@ function graph:incoming_write_set(node)
     function(edge) return edge.label:is(flow.edge.Write) end, node)
 end
 
+function graph:incoming_use_set(node)
+  return self:filter_immediate_predecessors_by_edges(
+    function(edge)
+      return edge.label:is(flow.edge.Reduce) or edge.label:is(flow.edge.Arrive)
+    end,
+    node)
+end
+
 function graph:outgoing_read_set(node)
   return self:filter_immediate_successors_by_edges(
     function(edge) return edge.label:is(flow.edge.Read) end, node)
@@ -695,7 +703,9 @@ end
 function graph:outgoing_use_set(node)
   return self:filter_immediate_successors_by_edges(
     function(edge)
-      return edge.label:is(flow.edge.None) or edge.label:is(flow.edge.Read) end,
+      return edge.label:is(flow.edge.None) or edge.label:is(flow.edge.Read) or
+        edge.label:is(flow.edge.Await)
+    end,
     node)
 end
 
@@ -708,7 +718,7 @@ function graph:node_result_is_used(node)
   local outputs = self:outgoing_edges_by_port(node)[self:node_result_port(node)]
   if outputs then
     for _, edge in ipairs(outputs) do
-      if #self:outgoing_use_set(edge.to_node) > 0 then
+      if #self:outgoing_use_set(edge.to_node) > 0 or #self:incoming_use_set(edge.to_node) > 0 then
         return true
       end
     end

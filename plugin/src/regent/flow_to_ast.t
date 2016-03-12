@@ -73,8 +73,12 @@ local function split_reduction_edges_at_node(cx, nid)
     local outputs = cx.graph:outgoing_edges(nid)
 
     local label = cx.graph:node_label(nid)
+    local output_label = label
+    if output_label:is(flow.node.data.Scalar) then
+      output_label = output_label { fresh = false }
+    end
     local nid_input = cx.graph:add_node(label)
-    local nid_output = cx.graph:add_node(label)
+    local nid_output = cx.graph:add_node(output_label)
 
     for _, edge in ipairs(reductions) do
       cx.graph:add_edge(
