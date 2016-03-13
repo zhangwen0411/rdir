@@ -332,29 +332,58 @@ function graph:replace_edges(node, old_node, new_node)
   end
 end
 
-function graph:find_node(fn)
+function graph:traverse_nodes(fn)
   for node, label in pairs(self.nodes) do
-    if fn(node, label) then
-      return node, label
-    end
+    local result = {fn(node, label)}
+    if result[1] ~= nil then return unpack(result) end
   end
 end
 
-function graph:traverse_nodes(fn)
-  for node, label in pairs(self.nodes) do
-    fn(node, label)
-  end
+function graph:find_node(fn)
+  return self:traverse_nodes(
+    function(node, label)
+      if fn(node, label) then
+        return node, label
+      end
+    end)
+end
+
+function graph:filter_nodes(fn)
+  local result = terralib.newlist()
+  self:traverse_nodes(
+    function(node, label)
+      if fn(node, label) then
+        result:insert(node)
+      end
+    end)
+  return result
+end
+
+function graph:any_nodes(fn)
+  return self:traverse_nodes(
+    function(node, label) return fn(node, label) or nil end) or false
 end
 
 function graph:traverse_nodes_recursive(fn)
   for node, label in pairs(self.nodes) do
     for k, v in pairs(label) do
       if flow.is_graph(v) then
-        v:traverse_nodes_recursive(fn)
+        local result = {v:traverse_nodes_recursive(fn)}
+        if result[1] ~= nil then return unpack(result) end
       end
     end
-    fn(self, node, label)
+    local result = {fn(self, node, label)}
+    if result[1] ~= nil then return unpack(result) end
   end
+end
+
+function graph:find_node_recursive(fn)
+  return self:traverse_nodes_recursive(
+    function(graph, node, label)
+      if fn(graph, node, label) then
+        return graph, node, label
+      end
+    end)
 end
 
 function graph:map_nodes_recursive(fn)
@@ -368,25 +397,6 @@ function graph:map_nodes_recursive(fn)
     assert(new_label:is(flow.node))
     self.nodes[node] = new_label
   end
-end
-
-function graph:filter_nodes(fn)
-  local result = terralib.newlist()
-  for node, label in pairs(self.nodes) do
-    if fn(node, label) then
-      result:insert(node)
-    end
-  end
-  return result
-end
-
-function graph:any_nodes(fn)
-  for node, label in pairs(self.nodes) do
-    if fn(node, label) then
-      return true
-    end
-  end
-  return false
 end
 
 function graph:traverse_edges(fn)
@@ -682,6 +692,14 @@ function graph:incoming_write_set(node)
     function(edge) return edge.label:is(flow.edge.Write) end, node)
 end
 
+function graph:incoming_mutate_set(node)
+  return self:filter_immediate_predecessors_by_edges(
+    function(edge)
+      return edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Reduce)
+    end,
+    node)
+end
+
 function graph:incoming_use_set(node)
   return self:filter_immediate_predecessors_by_edges(
     function(edge)
@@ -910,6 +928,7 @@ flow:inner("node")
 -- Compute
 flow.node:leaf("Opaque", {"action"})
 
+flow.node:leaf("Binary", {"op", "expr_type", "options", "span"})
 flow.node:leaf("IndexAccess", {"expr_type", "options", "span"})
 flow.node:leaf("Deref", {"expr_type", "options", "span"})
 flow.node:leaf("Advance", {"expr_type", "options", "span"})

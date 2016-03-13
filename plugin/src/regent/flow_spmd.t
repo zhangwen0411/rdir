@@ -67,9 +67,46 @@ end
 
 local flow_spmd = {}
 
+local function is_leaf(cx, nid)
+  local label = cx.graph:node_label(nid)
+  if not label:is(flow.node.ctrl.ForNum) then return false end
+
+  local block_cx = cx:new_graph_scope(label.block)
+  local inner = block_cx.graph:any_nodes(
+    function(_, label) return label:is(flow.node.ctrl) end)
+  local task = block_cx.graph:any_nodes(
+    function(_, label) return label:is(flow.node.Task) end)
+  return task and not inner
+end
+
 local function has_demand_spmd(cx, nid)
   local label = cx.graph:node_label(nid)
   return label.options.spmd:is(ast.options.Demand)
+end
+
+local function whitelist_node_types(cx, loop_nid)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+  return block_cx.graph:traverse_nodes_recursive(
+    function(_, _, label)
+      return (
+        label:is(flow.node.Binary) or label:is(flow.node.IndexAccess) or
+          (label:is(flow.node.Task) and not label.opaque) or
+          label:is(flow.node.Open) or label:is(flow.node.Close) or
+          label:is(flow.node.ctrl) or label:is(flow.node.data) or
+          label:is(flow.node.Constant) or label:is(flow.node.Function)) and nil
+    end) == nil
+end
+
+local function has_leaves(cx, loop_nid)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  return block_cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = block_cx:new_graph_scope(graph)
+      return is_leaf(inner_cx, nid) or nil
+    end)
 end
 
 local function filter_join(list1, list2, fn)
@@ -84,68 +121,90 @@ local function filter_join(list1, list2, fn)
   return result
 end
 
+local function get_incoming_reduction_op(cx, nid)
+  local op = false
+  local port = false
+  cx.graph:traverse_incoming_edges(
+    function(_, _, edge)
+      if edge.label:is(flow.edge.Reduce) then
+        assert(not op or op == edge.label.op)
+        op = edge.label.op
+        port = edge.from_port
+      end
+    end,
+    nid)
+  return op, port
+end
+
 local function is_parallel_loop(cx, loop_nid)
-  -- Conditions:
-  --
-  --  1. Loop has no opaque nodes.
-  --  2. All pairs of data nodes are non-interfering.
+  --  Check that all pairs of data nodes are non-interfering.
 
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
-  local opaque = block_cx.graph:filter_nodes(
-    function(_, label) return label:is(flow.node.Opaque) end)
-  if #opaque > 0 then return false end
-
-  local function is_data(_, label)
-    return label:is(flow.node.data)
-  end
-  local data = block_cx.graph:filter_nodes(is_data)
-
   local function can_interfere(nid1, nid2)
+    if nid1 == nid2 then return false end -- Skip self checks.
+
+    -- Check fields.
     local label1 = block_cx.graph:node_label(nid1)
     local label2 = block_cx.graph:node_label(nid2)
     if label1.field_path ~= label2.field_path then return false end
 
-    local region1, region2 = label1.region_type, label2.region_type
-    if std.type_eq(region1, region2) then
-      if block_cx.tree:has_region_index(region1) and
-        block_cx.tree:has_region_index(region2)
-      then
-        local index1 = block_cx.tree:region_index(region1)
-        local index2 = block_cx.tree:region_index(region2)
-        if index1:is(ast.typed.expr.ID) and index2:is(ast.typed.expr.ID) and
-          index1.value == loop_label.symbol and
-          index2.value == loop_label.symbol
-        then
-          return true
-        end
-      end
-      return false
-    else
-      return block_cx.tree:can_alias(region1, region2)
-    end
-  end
-  return #filter_join(data, data, can_interfere) == 0
-end
-
-local function contains_only_parallel_loops(cx, loop_nid)
-  local loop_label = cx.graph:node_label(loop_nid)
-  local block_cx = cx:new_graph_scope(loop_label.block)
-
-  local function is_bad(nid, label)
-    if label:is(flow.node.ctrl.ForNum) then
-      return is_parallel_loop(block_cx, nid)
-    elseif label:is(flow.node.Open) or label:is(flow.node.Close) or
-      label:is(flow.node.Constant) or label:is(flow.node.Function) or
-      label:is(flow.node.data)
+    -- Check for conflicts: read-write, read-reduce, etc.
+    local readers1 = #block_cx.graph:outgoing_read_set(nid1) > 0
+    local readers2 = #block_cx.graph:outgoing_read_set(nid2) > 0
+    local writers1 = #block_cx.graph:incoming_mutate_set(nid1) > 0
+    local writers2 = #block_cx.graph:incoming_mutate_set(nid2) > 0
+    local op1 = get_incoming_reduction_op(block_cx, nid1)
+    local op2 = get_incoming_reduction_op(block_cx, nid2)
+    if not (((writers1 and (readers2 or writers2)) or
+             (writers2 and (readers1 or writers1))) and op1 ~= op2)
     then
       return false
     end
-    return true
+
+    -- Check for region aliasing. (Aliased? Then it interferes.)
+    local region1, region2 = label1.region_type, label2.region_type
+    if not std.type_eq(region1, region2) then
+      return std.type_maybe_eq(region1:fspace(), region2:fspace()) and
+        block_cx.tree:can_alias(region1, region2)
+    end
+
+    -- Check for region indexing.
+    if block_cx.tree:has_region_index(region1) then
+      -- Is it indexed by the loop variable? (No? Then it interferes.)
+      local index = block_cx.tree:region_index(region1)
+      if not (index:is(ast.typed.expr.ID) and index.value == loop_label.symbol) then
+        return true
+      end
+
+      -- Is the parent disjoint? (No? Then it interferes.)
+      local parent = block_cx.tree:parent(region1)
+      if block_cx.tree:aliased(parent) then
+        return true
+      end
+    end
+
+    -- Fall through: no interference.
+    return false
   end
-  local bad = block_cx.graph:filter_nodes(is_bad)
-  return #bad == 0
+
+  local data = block_cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.data) end)
+  return #filter_join(data, data, can_interfere) == 0
+end
+
+local function leaves_are_parallel_loops(cx, loop_nid)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  return block_cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = block_cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        return is_parallel_loop(inner_cx, nid) and nil
+      end
+    end) == nil
 end
 
 local function get_input(inputs, i, optional)
@@ -155,30 +214,85 @@ local function get_input(inputs, i, optional)
   assert(optional)
 end
 
+local function bounds_eq(label1, label2)
+  if label1:is(flow.node.Constant) and label2:is(flow.node.Constant) then
+    return label1.value.value == label2.value.value
+  elseif label1:is(flow.node.data.Scalar) and label2:is(flow.node.data.Scalar) then
+    return label1.region_type == label2.region_type and
+      label1.field_path == label2.field_path
+  end
+end
+
+local function find_first_instance(cx, value_label)
+  local nids = cx.graph:toposort()
+  for _, nid in ipairs(nids) do
+    local label = cx.graph:node_label(nid)
+    if label:is(flow.node.data) and
+      label.region_type == value_label.region_type and
+      label.field_path == value_label.field_path
+    then
+      return nid
+    end
+  end
+  assert(false)
+end
+
+local function find_last_instance(cx, value_label)
+  local nids = cx.graph:inverse_toposort()
+  for _, nid in ipairs(nids) do
+    local label = cx.graph:node_label(nid)
+    if label:is(flow.node.data) and
+      label.region_type == value_label.region_type and
+      label.field_path == value_label.field_path
+    then
+      return nid
+    end
+  end
+  assert(false)
+end
+
 local function loops_are_compatible(cx, loop_nid)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
-  local loops = block_cx.graph:filter_nodes(
-    function(_, label) return label:is(flow.node.ctrl.ForNum) end)
+  -- Check that no leaves use strides.
+  local check = block_cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = block_cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        local inputs = inner_cx.graph:incoming_edges_by_port(nid)
+        return get_input(inputs, 3, true) or nil
+      end
+    end) == nil
+  if not check then return false end
 
-  local function equivalent(nid1, nid2)
-    if nid1 == nid2 then return true end
+  -- Check that leaves use compatible bounds.
+  local label1, label2
+  local check = block_cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = block_cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        local inputs = inner_cx.graph:incoming_edges_by_port(nid)
+        if not label1 and not label2 then
+          label1 = inner_cx.graph:node_label(get_input(inputs, 1))
+          label2 = inner_cx.graph:node_label(get_input(inputs, 2))
+        else
+          assert(label1 and label2)
+          return bounds_eq(label1, inner_cx.graph:node_label(get_input(inputs, 1))) and
+            bounds_eq(label2, inner_cx.graph:node_label(get_input(inputs, 2))) and
+            nil
+        end
+      end
+    end) == nil
+  if not check then return false end
+  assert(label1 and label2)
 
-    local label1 = block_cx.graph:node_label(nid1)
-    local label2 = block_cx.graph:node_label(nid2)
-    if label1:is(flow.node.Constant) and label2:is(flow.node.Constant) then
-      return label1.value.value == label2.value.value
-    end
-  end
-  local function incompatible(nid1, nid2)
-    local inputs1 = block_cx.graph:incoming_edges_by_port(nid1)
-    local inputs2 = block_cx.graph:incoming_edges_by_port(nid2)
-    return not equivalent(get_input(inputs1, 1), get_input(inputs2, 1)) or
-      not equivalent(get_input(inputs1, 2), get_input(inputs2, 2)) or
-      get_input(inputs1, 3, true) or get_input(inputs1, 3, true)
-  end
-  return #filter_join(loops, loops, incompatible) == 0
+  -- Check that bounds are never written.
+  local nid1 = label1:is(flow.node.data) and find_last_instance(block_cx, label1)
+  local nid2 = label2:is(flow.node.data) and find_last_instance(block_cx, label2)
+
+  return not nid1 or #block_cx.graph:incoming_mutate_set(nid1) == 0 and
+    not nid2 or #block_cx.graph:incoming_mutate_set(nid2) == 0
 end
 
 local function can_spmdize(cx, loop)
@@ -195,7 +309,9 @@ local function can_spmdize(cx, loop)
   --      d. Any variables updated must be updated uniformly (not checked yet)
 
   return has_demand_spmd(cx, loop) and
-    contains_only_parallel_loops(cx, loop) and
+    whitelist_node_types(cx, loop) and
+    has_leaves(cx, loop) and
+    leaves_are_parallel_loops(cx, loop) and
     loops_are_compatible(cx, loop)
 end
 
@@ -318,34 +434,6 @@ local function make_constant(value, value_type, span)
     options = ast.default_options(),
     span = span,
   }
-end
-
-local function find_first_instance(cx, value_label)
-  local nids = cx.graph:toposort()
-  for _, nid in ipairs(nids) do
-    local label = cx.graph:node_label(nid)
-    if label:is(flow.node.data) and
-      label.region_type == value_label.region_type and
-      label.field_path == value_label.field_path
-    then
-      return nid
-    end
-  end
-  assert(false)
-end
-
-local function find_last_instance(cx, value_label)
-  local nids = cx.graph:inverse_toposort()
-  for _, nid in ipairs(nids) do
-    local label = cx.graph:node_label(nid)
-    if label:is(flow.node.data) and
-      label.region_type == value_label.region_type and
-      label.field_path == value_label.field_path
-    then
-      return nid
-    end
-  end
-  assert(false)
 end
 
 local function compute_version_numbers(cx)
@@ -839,21 +927,6 @@ local function rewrite_shard_partitions(cx)
     end)
 
   return new_labels, old_labels, mapping
-end
-
-local function get_incoming_reduction_op(cx, nid)
-  local op = false
-  local port = false
-  cx.graph:traverse_incoming_edges(
-    function(_, _, edge)
-      if edge.label:is(flow.edge.Reduce) then
-        assert(not op or op == edge.label.op)
-        op = edge.label.op
-        port = edge.from_port
-      end
-    end,
-    nid)
-  return op, port
 end
 
 local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make_fresh_type)

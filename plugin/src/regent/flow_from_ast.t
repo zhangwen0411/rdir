@@ -1864,6 +1864,21 @@ local function as_fill_expr(cx, args, dst_field_paths,
   return attach_result(privilege_map, compute_nid)
 end
 
+local function as_binary_expr(cx, op, args, expr_type, options, span,
+                              privilege_map)
+  local label = flow.node.Binary {
+    op = op,
+    expr_type = expr_type,
+    options = options,
+    span = span,
+  }
+  local compute_nid = add_node(cx, label)
+  local result_nid = add_result(cx, compute_nid, expr_type, options, span)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, result_nid)
+end
+
 local function as_index_expr(cx, args, result, expr_type, options, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
@@ -2180,10 +2195,9 @@ end
 function flow_from_ast.expr_binary(cx, node, privilege_map)
   local lhs = flow_from_ast.expr(cx, node.lhs, reads)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
-  return as_opaque_expr(
-    cx,
-    function(v1, v2) return node { lhs = v1, rhs = v2 } end,
-    terralib.newlist({lhs, rhs}),
+  local inputs = terralib.newlist({lhs, rhs})
+  return as_binary_expr(
+    cx, node.op, inputs, node.expr_type, node.options, node.span,
     privilege_map)
 end
 
