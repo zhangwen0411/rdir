@@ -151,14 +151,16 @@ local function is_parallel_loop(cx, loop_nid)
     if label1.field_path ~= label2.field_path then return false end
 
     -- Check for conflicts: read-write, read-reduce, etc.
-    local readers1 = #block_cx.graph:outgoing_read_set(nid1) > 0
-    local readers2 = #block_cx.graph:outgoing_read_set(nid2) > 0
-    local writers1 = #block_cx.graph:incoming_mutate_set(nid1) > 0
-    local writers2 = #block_cx.graph:incoming_mutate_set(nid2) > 0
-    local op1 = get_incoming_reduction_op(block_cx, nid1)
-    local op2 = get_incoming_reduction_op(block_cx, nid2)
-    if not (((writers1 and (readers2 or writers2)) or
-             (writers2 and (readers1 or writers1))) and op1 ~= op2)
+    local read1 = #block_cx.graph:outgoing_read_set(nid1) > 0
+    local read2 = #block_cx.graph:outgoing_read_set(nid2) > 0
+    local write1 = #block_cx.graph:incoming_write_set(nid1) > 0
+    local write2 = #block_cx.graph:incoming_write_set(nid2) > 0
+    local reduce1 = get_incoming_reduction_op(block_cx, nid1)
+    local reduce2 = get_incoming_reduction_op(block_cx, nid2)
+    if not ((write1 and (read2 or write2 or reduce2)) or
+            (write2 and (read1 or write1 or reduce1)) or
+            (reduce1 and (read2 or (reduce2 and reduce2 ~= reduce1))) or
+            (reduce2 and (read1 or (reduce1 and reduce1 ~= reduce2))))
     then
       return false
     end
