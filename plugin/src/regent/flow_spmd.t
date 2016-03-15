@@ -230,7 +230,7 @@ local function bounds_eq(label1, label2)
   end
 end
 
-local function find_first_instance(cx, value_label)
+local function find_first_instance(cx, value_label, optional)
   local nids = cx.graph:toposort()
   for _, nid in ipairs(nids) do
     local label = cx.graph:node_label(nid)
@@ -241,10 +241,10 @@ local function find_first_instance(cx, value_label)
       return nid
     end
   end
-  assert(false)
+  assert(optional)
 end
 
-local function find_last_instance(cx, value_label)
+local function find_last_instance(cx, value_label, optional)
   local nids = cx.graph:inverse_toposort()
   for _, nid in ipairs(nids) do
     local label = cx.graph:node_label(nid)
@@ -255,7 +255,7 @@ local function find_last_instance(cx, value_label)
       return nid
     end
   end
-  assert(false)
+  assert(optional)
 end
 
 local function loops_are_compatible(cx, loop_nid)
@@ -1648,7 +1648,7 @@ end
 --       * vn1 is beyond the existing last occurance (phase n+1)
 
 local function issue_intersection_copy_synchronization_forwards(
-    cx, dst_in_nid, dst_out_nid, copy_nid, barriers, first)
+    cx, dst_in_nid, dst_out_nid, copy_nid, barriers)
   local dst_label = cx.graph:node_label(dst_in_nid)
   local dst_type = dst_label.region_type
   local field_path = dst_label.field_path
@@ -1697,10 +1697,31 @@ local function issue_intersection_copy_synchronization_forwards(
     end
   end
   assert(#consumer_nids > 0)
+  consumer_nids = data.filter(
+    function(nid)
+      local dominated = false
+      for _, other_nid in ipairs(consumer_nids) do
+        if nid ~= other_nid and cx.graph:reachable(
+          other_nid, nid,
+          function(edge)
+            return edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write)
+          end)
+        then
+          dominated = true
+          break
+        end
+      end
+      return not dominated
+    end, consumer_nids)
+  assert(#consumer_nids > 0)
+  for _, nid in ipairs(consumer_nids) do
+    -- Right now the synchronization will get messed up if any
+    -- consumer is an inner loop, so just assert that it's not.
+    assert(not is_inner(cx, nid), "consumer is inner loop")
+  end
 
   local function get_current_instance(cx, label)
-    if not first then return find_last_instance(cx, label) end
-    return cx.graph:add_node(label)
+    return find_last_instance(cx, label, true) or cx.graph:add_node(label)
   end
 
   -- Get the current phase.
@@ -1725,7 +1746,7 @@ local function issue_intersection_copy_synchronization_forwards(
 end
 
 local function issue_intersection_copy_synchronization_backwards(
-    cx, dst_in_nid, dst_out_nid, copy_nid, barriers, first)
+    cx, dst_in_nid, dst_out_nid, copy_nid, barriers)
   local dst_label = cx.graph:node_label(dst_in_nid)
   local dst_type = dst_label.region_type
   local field_path = dst_label.field_path
@@ -1775,10 +1796,12 @@ local function issue_intersection_copy_synchronization_backwards(
     end
   end
   assert(prev_consumer_nid)
+  -- Right now the synchronization will get messed up if any
+  -- consumer is an inner loop, so just assert that it's not.
+  assert(not is_inner(cx, prev_consumer_nid), "previous consumer is inner loop")
 
   local function get_current_instance(cx, label)
-    if not first then return find_first_instance(cx, label) end
-    return cx.graph:add_node(label)
+    return find_first_instance(cx, label, true) or cx.graph:add_node(label)
   end
 
   -- Get the next phase.
@@ -1806,38 +1829,16 @@ local function issue_intersection_copy_synchronization_backwards(
   issue_barrier_arrive(cx, empty_in_nid, prev_consumer_nid)
 end
 
-local function rewrite_communication(cx, shard_loop, mapping)
-  -- Every close operation has zero or one pass-through inputs and
-  -- zero or more copied inputs. Copied inputs come in two forms:
-  -- blits and reductions.
-  --
-  -- The pass-through input (if any) is always the same type as the
-  -- output, and is always (a) a reduction (b) which is not used in
-  -- communication (i.e. it will not be transformed into reduction
-  -- buffer later). Since the data (by definition) lives at the
-  -- destination, there is no need to copy it.
-  --
-  -- Other inputs (if any) become copied inputs. Copied inputs are
-  -- distinguished by whether the source region was the target of a
-  -- reduction. If so, the copy is issued with the given reduction
-  -- operator, otherwise, the copy is issued as a blit (no reduction
-  -- operator).
-
-  local shard_label = cx.graph:node_label(shard_loop)
-  local block_cx = cx:new_graph_scope(shard_label.block)
-
-  local inverse_mapping = {}
-  for k, v in pairs(mapping) do
-    inverse_mapping[v] = k
-  end
+local function rewrite_copies_subgraph(cx, loop_nid, inverse_mapping, intersections)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
 
   -- Issue copies for each close.
   local close_nids = data.filter(
     function(nid) return block_cx.graph:node_label(nid):is(flow.node.Close) end,
     block_cx.graph:toposort())
-  local intersections = data.new_recursive_map(2)
   local remove = terralib.newlist()
-  local sync = terralib.newlist()
+  local sync = data.newmap()
   for _, close_nid in ipairs(close_nids) do
     local dst_out_nid = only(block_cx.graph:outgoing_write_set(close_nid))
     local dst_label = block_cx.graph:node_label(dst_out_nid)
@@ -1866,9 +1867,9 @@ local function rewrite_communication(cx, shard_loop, mapping)
         else
           copy_nid = issue_intersection_copy(
             block_cx, src_nid, dst_in_nid, dst_out_nid, op, intersections)
-          sync:insert(data.newtuple(
-            copy_nid, dst_in_nid, dst_out_nid, src_type,
-            dst_label.region_type, dst_label.field_path))
+          sync[copy_nid] = data.newtuple(
+            dst_in_nid, dst_out_nid, src_type,
+            dst_label.region_type, dst_label.field_path)
         end
 
         -- Migrate other types of edges...
@@ -1893,24 +1894,152 @@ local function rewrite_communication(cx, shard_loop, mapping)
     block_cx.graph:remove_node(close_nid)
   end
 
+  return sync
+end
+
+local function raise_barriers_forwards(cx, loop_nid, barriers)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  for _, b1 in barriers:items() do
+    for _, b2 in b1:items() do
+      for _, b3 in b2:items() do
+        local empty_in, empty_out, full_in, full_out = unpack(b3)
+        for _, barrier in ipairs({full_in, full_out}) do
+          if find_first_instance(block_cx, barrier, true) then
+            local last_nid = find_last_instance(cx, barrier, true) or
+              cx.graph:add_node(barrier)
+            local next_nid = cx.graph:add_node(barrier)
+            local port = cx.graph:node_available_port(loop_nid)
+            cx.graph:add_edge(
+              flow.edge.Read(flow.default_mode()),
+              last_nid, cx.graph:node_result_port(last_nid),
+              loop_nid, port)
+            cx.graph:add_edge(
+              flow.edge.Write(flow.default_mode()),
+              loop_nid, port,
+              next_nid, cx.graph:node_available_port(next_nid))
+          end
+        end
+      end
+    end
+  end
+end
+
+local function raise_barriers_backwards(cx, loop_nid, barriers)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  for _, b1 in barriers:items() do
+    for _, b2 in b1:items() do
+      for _, b3 in b2:items() do
+        local empty_in, empty_out, full_in, full_out = unpack(b3)
+        for _, barrier in ipairs({empty_in, empty_out}) do
+          if find_first_instance(block_cx, barrier, true) then
+            local first_nid = find_first_instance(cx, barrier, true) or
+              cx.graph:add_node(barrier)
+            local prev_nid = cx.graph:add_node(barrier)
+            local port = cx.graph:node_available_port(loop_nid)
+            cx.graph:add_edge(
+              flow.edge.Read(flow.default_mode()),
+              prev_nid, cx.graph:node_result_port(prev_nid),
+              loop_nid, port)
+            cx.graph:add_edge(
+              flow.edge.Write(flow.default_mode()),
+              loop_nid, port,
+              first_nid, cx.graph:node_available_port(first_nid))
+          end
+        end
+      end
+    end
+  end
+end
+
+local function rewrite_synchronization_forwards_subgraph(cx, loop_nid, sync, barriers)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  -- Issue copy synchronization in the forwards direction.
+  local used_forwards = data.new_recursive_map(2)
+  for _, nid in ipairs(block_cx.graph:toposort()) do
+    if sync[nid] then
+      local dst_in_nid, dst_out_nid, src_type, dst_type, field_path = unpack(sync[nid])
+      issue_intersection_copy_synchronization_forwards(
+        block_cx, dst_in_nid, dst_out_nid, nid, barriers[src_type])
+    elseif is_inner(block_cx, nid) then
+      raise_barriers_forwards(block_cx, nid, barriers)
+    end
+  end
+end
+
+local function rewrite_synchronization_backwards_subgraph(cx, loop_nid, sync, barriers)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
+  local used_backwards = data.new_recursive_map(2)
+  for _, nid in ipairs(block_cx.graph:inverse_toposort()) do
+    if sync[nid] then
+    local dst_in_nid, dst_out_nid, src_type, dst_type, field_path = unpack(sync[nid])
+    issue_intersection_copy_synchronization_backwards(
+      block_cx, dst_in_nid, dst_out_nid, nid, barriers[src_type])
+    elseif is_inner(block_cx, nid) then
+      raise_barriers_backwards(block_cx, nid, barriers)
+    end
+  end
+end
+
+local function rewrite_communication(cx, shard_loop, mapping)
+  -- Every close operation has zero or one pass-through inputs and
+  -- zero or more copied inputs. Copied inputs come in two forms:
+  -- blits and reductions.
+  --
+  -- The pass-through input (if any) is always the same type as the
+  -- output, and is always (a) a reduction (b) which is not used in
+  -- communication (i.e. it will not be transformed into reduction
+  -- buffer later). Since the data (by definition) lives at the
+  -- destination, there is no need to copy it.
+  --
+  -- Other inputs (if any) become copied inputs. Copied inputs are
+  -- distinguished by whether the source region was the target of a
+  -- reduction. If so, the copy is issued with the given reduction
+  -- operator, otherwise, the copy is issued as a blit (no reduction
+  -- operator).
+
+  local shard_label = cx.graph:node_label(shard_loop)
+  local block_cx = cx:new_graph_scope(shard_label.block)
+
+  local inverse_mapping = {}
+  for k, v in pairs(mapping) do
+    inverse_mapping[v] = k
+  end
+
+  -- Issue copies for each close.
+  local intersections = data.new_recursive_map(2)
+  local sync = {}
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        sync[graph] = rewrite_copies_subgraph(inner_cx, nid, inverse_mapping, intersections)
+      end
+    end)
+
   -- Issue synchronization for each copy.
   local barriers = data.new_recursive_map(2)
-  local used_forwards = data.new_recursive_map(2)
-  for i = 1, #sync do
-    local copy_nid, dst_in_nid, dst_out_nid, src_type, dst_type, field_path = unpack(sync[i])
-    local first = not used_forwards[src_type][dst_type][field_path]
-    used_forwards[src_type][dst_type][field_path] = true
-    issue_intersection_copy_synchronization_forwards(
-      block_cx, dst_in_nid, dst_out_nid, copy_nid, barriers[src_type], first)
-  end
-  local used_backwards = data.new_recursive_map(2)
-  for i = #sync, 1, -1 do
-    local copy_nid, dst_in_nid, dst_out_nid, src_type, dst_type, field_path = unpack(sync[i])
-    local first = not used_backwards[src_type][dst_type][field_path]
-    used_backwards[src_type][dst_type][field_path] = true
-    issue_intersection_copy_synchronization_backwards(
-      block_cx, dst_in_nid, dst_out_nid, copy_nid, barriers[src_type], first)
-  end
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        rewrite_synchronization_forwards_subgraph(inner_cx, nid, sync[graph], barriers)
+      end
+    end)
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        rewrite_synchronization_backwards_subgraph(inner_cx, nid, sync[graph], barriers)
+      end
+    end)
 
   -- Raise intersections as arguments to loop.
   for _, i1 in intersections:items() do
@@ -2022,19 +2151,19 @@ local function rewrite_inner_loop_bounds(cx, loop_nid, start)
   end
 end
 
-
 local function rewrite_shard_loop_bounds(cx, shard_loop)
-  -- Find the current loop bounds.
   local shard_label = cx.graph:node_label(shard_loop)
-  local block_cx = cx:new_graph_scope(shard_label.block)
+
+  -- Find the current loop bounds.
   local original_bounds_labels
   local bounds_type
-  block_cx.graph:traverse_nodes(
-    function(nid, label)
-      if label:is(flow.node.ctrl.ForNum) then
-        local inputs = block_cx.graph:incoming_edges_by_port(nid)
-        local value1 = block_cx.graph:node_label(get_input(inputs, 1))
-        local value2 = block_cx.graph:node_label(get_input(inputs, 2))
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        local inputs = inner_cx.graph:incoming_edges_by_port(nid)
+        local value1 = inner_cx.graph:node_label(get_input(inputs, 1))
+        local value2 = inner_cx.graph:node_label(get_input(inputs, 2))
         if not original_bounds_labels then
           original_bounds_labels = terralib.newlist({value1, value2})
         end
@@ -2046,58 +2175,79 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
           assert(std.type_eq(value_type, bounds_type))
         end
         bounds_type = value_type
+        return true
       end
     end)
   assert(original_bounds_labels and bounds_type)
 
   -- Make labels for the new bounds.
   local bounds_labels = terralib.newlist()
-  local block_bounds = terralib.newlist()
-  local shard_bounds = terralib.newlist()
   for i = 1, 2 do
     local bound_label = make_variable_label(
       cx, terralib.newsymbol(bounds_type, "shard_bound" .. i),
       bounds_type, shard_label.span)
     bounds_labels:insert(bound_label)
-    block_bounds:insert(block_cx.graph:add_node(bound_label))
-    shard_bounds:insert(cx.graph:add_node(bound_label))
   end
 
   -- Replace old bounds with new.
-  block_cx.graph:traverse_nodes(
-    function(nid, label)
-      if label:is(flow.node.ctrl.ForNum) then
-        local inputs = block_cx.graph:incoming_edges_by_port(nid)
+  local bounds = {}
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        if not bounds[graph] then
+          bounds[graph] = terralib.newlist()
+          for i = 1, 2 do
+            bounds[graph]:insert(inner_cx.graph:add_node(bounds_labels[i]))
+          end
+        end
+
+        local inputs = inner_cx.graph:incoming_edges_by_port(nid)
         for i = 1, 2 do
           local value_nid, edge = get_input(inputs, i)
-          local value_inputs = block_cx.graph:incoming_edges(value_nid)
+          local value_inputs = inner_cx.graph:incoming_edges(value_nid)
           for _, edge in ipairs(value_inputs) do
             if not edge.label:is(flow.edge.HappensBefore) then
               assert(false)
             end
           end
-          block_cx.graph:replace_edges(edge.to_node, edge.from_node, block_bounds[i])
-          if #block_cx.graph:outgoing_edges(value_nid) == 0 then
-            block_cx.graph:remove_node(value_nid)
+          inner_cx.graph:replace_edges(edge.to_node, edge.from_node, bounds[graph][i])
+          if #inner_cx.graph:outgoing_edges(value_nid) == 0 then
+            inner_cx.graph:remove_node(value_nid)
           end
         end
       end
     end)
 
-  -- Rewrite bounds used for accessing lists inside of loops.
-  block_cx.graph:traverse_nodes(
-    function(nid, label)
-      if label:is(flow.node.ctrl.ForNum) then
-        rewrite_inner_loop_bounds(block_cx, nid, bounds_labels[1])
+  -- Bubble new bounds up to parent context.
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        if not bounds[graph] then
+          bounds[graph] = terralib.newlist()
+          for i = 1, 2 do
+            bounds[graph]:insert(inner_cx.graph:add_node(bounds_labels[i]))
+          end
+        end
+
+        for _, bound_nid in ipairs(bounds[graph]) do
+          inner_cx.graph:add_edge(
+            flow.edge.Read(flow.default_mode()),
+            bound_nid, inner_cx.graph:node_result_port(bound_nid),
+            nid, inner_cx.graph:node_available_port(nid))
+        end
       end
     end)
 
-  -- Bubble new bounds up to parent context.
-  for _, nid in ipairs(shard_bounds) do
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), nid, cx.graph:node_result_port(nid),
-      shard_loop, cx.graph:node_available_port(shard_loop))
-  end
+  -- Rewrite bounds used for accessing lists inside of loops.
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_leaf(inner_cx, nid) then
+        rewrite_inner_loop_bounds(inner_cx, nid, bounds_labels[1])
+      end
+    end)
 
   return bounds_labels, original_bounds_labels
 end
@@ -3483,9 +3633,8 @@ local function spmdize(cx, loop)
   normalize_communication(shard_cx)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
   local intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
-  local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop)
+  local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop) -- FIXME: nested
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
-  -- FIXME: Tell to the outliner what should be simultaneous/no-access.
 
   local outer_shard_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local outer_shard_block = make_block(
