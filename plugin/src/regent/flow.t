@@ -661,6 +661,14 @@ function graph:filter_immediate_predecessors_by_edges(fn, node)
   return result
 end
 
+function graph:filter_immediate_successors(fn, node)
+  local result = terralib.newlist()
+  self:traverse_immediate_successors(
+    function(succ, label) if fn(succ, label) then result:insert(succ) end end,
+    node)
+  return result
+end
+
 function graph:filter_immediate_successors_by_edges(fn, node)
   assert(self:has_node(node))
   local result = terralib.newlist()

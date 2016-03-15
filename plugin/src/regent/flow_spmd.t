@@ -79,6 +79,11 @@ local function is_leaf(cx, nid)
   return task and not inner
 end
 
+local function is_inner(cx, nid)
+  local label = cx.graph:node_label(nid)
+  return label:is(flow.node.ctrl) and not is_leaf(cx, nid)
+end
+
 local function has_demand_spmd(cx, nid)
   local label = cx.graph:node_label(nid)
   return label.options.spmd:is(ast.options.Demand)
@@ -380,7 +385,7 @@ local function find_matching_output(cx, op_nid, region_type, field_path)
   return maybe(cx.graph:filter_immediate_successors_by_edges(
     function(edge)
       if edge.label:is(flow.edge.Read) or edge.label:is(flow.edge.Write) then
-        local nid, label = edge.from_node, cx.graph:node_label(edge.from_node)
+        local nid, label = edge.to_node, cx.graph:node_label(edge.to_node)
         return label:is(flow.node.data) and
           label.region_type == region_type and
           (not field_path or label.field_path == field_path)
@@ -461,7 +466,7 @@ local function compute_version_numbers(cx)
   return versions
 end
 
-local function normalize_communication(cx, shard_loop)
+local function normalize_communication_subgraph(cx, shard_loop)
   -- This step simplifies and normalizes the communication graph,
   -- removing opens and instances of parent regions. Close nodes in
   -- the resulting graph represent locations where explicit copies are
@@ -469,7 +474,7 @@ local function normalize_communication(cx, shard_loop)
   --
   --  1. Normalize close inputs (to ensure all partitions exist at version 0).
   --  2. Remove opens (and regions used as intermediates).
-  --  3. Normalize close outputs (to ensure consistent versioning bumps).
+  --  3. Normalize close outputs (remove spurious closes and close-outputs).
   --  4. Normalize final state (to ensure consistent final versions).
   --  5. Add reduction self-closes (for reductions involved in communication).
   --  6. Prune edges from read-reduce conflicts to avoid spurious copies.
@@ -540,25 +545,46 @@ local function normalize_communication(cx, shard_loop)
   local versions = compute_version_numbers(block_cx)
   for _, close_nid in ipairs(close_nids) do
     local result_nids = block_cx.graph:immediate_successors(close_nid)
-    if #result_nids > 1 then
-      local versions_changed = 0
+    local versions_changed = 0
+    for _, result_nid in ipairs(result_nids) do
+      local result_label = block_cx.graph:node_label(result_nid)
+      local input_nid = find_matching_input(
+        block_cx, close_nid, result_label.region_type, result_label.field_path)
+      assert(input_nid)
+      if versions[result_nid] > versions[input_nid] then
+        versions_changed = versions_changed + 1
+      end
+    end
+    assert(versions_changed <= 1)
+
+    -- If the version changed, prune back any regions that didn't change.
+    if versions_changed == 1 then
       for _, result_nid in ipairs(result_nids) do
         local result_label = block_cx.graph:node_label(result_nid)
         local input_nid = find_matching_input(
           block_cx, close_nid, result_label.region_type, result_label.field_path)
         assert(input_nid)
-        if versions[result_nid] > versions[input_nid] then
-          versions_changed = versions_changed + 1
-          assert(versions_changed <= 1)
-        else
-          local user_nids = block_cx.graph:immediate_successors(result_nid)
-          for _, user_nid in ipairs(user_nids) do
-            block_cx.graph:replace_edges(user_nid, result_nid, input_nid)
-          end
+        if versions[result_nid] <= versions[input_nid] then
+          block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
           block_cx.graph:remove_node(result_nid)
         end
       end
-      assert(versions_changed > 0)
+    end
+
+    -- If the version didn't change, remove the close entirely.
+    if versions_changed == 0 then
+      -- Bump each region to the next available version.
+      local input_nids = block_cx.graph:immediate_predecessors(close_nid)
+      for _, input_nid in ipairs(input_nids) do
+        local input_label = block_cx.graph:node_label(input_nid)
+        local result_nid = find_matching_output(
+          block_cx, close_nid, input_label.region_type, input_label.field_path)
+        if result_nid then
+          block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
+          block_cx.graph:remove_node(result_nid)
+        end
+      end
+      block_cx.graph:remove_node(close_nid)
     end
   end
 
@@ -644,7 +670,7 @@ local function normalize_communication(cx, shard_loop)
   end
 
   -- Add reduction self-closes (for reductions which will be communicated).
-  close_nids = block_cx.graph:filter_nodes(
+  local close_nids = block_cx.graph:filter_nodes(
     function(nid, label) return label:is(flow.node.Close) end)
   for _, close_nid in ipairs(close_nids) do
     local read_nids = block_cx.graph:incoming_read_set(close_nid)
@@ -747,15 +773,25 @@ local function normalize_communication(cx, shard_loop)
   assert(not block_cx.graph:find_node(
            function(_, label) return label:is(flow.node.data.Region) end))
 
-  -- Replace regions at top level context as well.
-  local region_nids = cx.graph:filter_nodes(
-    function(_, label) return label:is(flow.node.data.Region) end)
+  -- Replace regions in the outer context as well.
+  local region_nids = terralib.newlist()
+  region_nids:insertall(
+    cx.graph:filter_immediate_predecessors(
+      function(_, label) return label:is(flow.node.data.Region) end,
+      shard_loop))
+  region_nids:insertall(
+    cx.graph:filter_immediate_successors(
+      function(_, label) return label:is(flow.node.data.Region) end,
+      shard_loop))
   for _, region_nid in ipairs(region_nids) do
     local region_label = cx.graph:node_label(region_nid)
+
+    -- Find the labels from the inner context that will replace this region.
     local replacement_labels = data.newmap()
     block_cx.graph:traverse_nodes(
       function(_, label)
         if label:is(flow.node.data) and
+          std.type_maybe_eq(label.region_type:fspace(), region_label.region_type:fspace()) and
           cx.tree:can_alias(label.region_type, region_label.region_type) and
           label.field_path == region_label.field_path
         then
@@ -763,13 +799,21 @@ local function normalize_communication(cx, shard_loop)
         end
       end)
     assert(not replacement_labels:is_empty())
+
+    local replacement_nids = terralib.newlist()
     for _, replacement_label in replacement_labels:items() do
-      local nid = cx.graph:add_node(replacement_label)
-      local similar_nid = cx.graph:find_node(
+      -- If there are an existing node, find the port it is attached to.
+      local similar_nid = cx.graph:find_immediate_predecessor(
         function(_, label)
           return label:is(flow.node.data) and
             label.region_type == replacement_label.region_type
-        end)
+        end,
+        shard_loop) or cx.graph:find_immediate_successor(
+        function(_, label)
+          return label:is(flow.node.data) and
+            label.region_type == replacement_label.region_type
+        end,
+        shard_loop)
       local port
       if similar_nid then
         for _, edge in ipairs(cx.graph:incoming_edges(similar_nid)) do
@@ -790,20 +834,79 @@ local function normalize_communication(cx, shard_loop)
       if not port then
         port = cx.graph:node_available_port(shard_loop)
       end
+
+      -- Build the replacement node and copy old edges.
+      local nid = cx.graph:add_node(replacement_label)
+      replacement_nids:insert(nid)
       cx.graph:copy_edges(shard_loop, region_nid, nid, port)
     end
-    -- Sanity check the region wasn't connected to anything else.
+
+    -- Add open and/or close nodes as necessary.
+    local needs_open = false
     for _, edge in ipairs(cx.graph:incoming_edges(region_nid)) do
-      assert(edge.from_node == shard_loop)
+      if edge.from_node ~= shard_loop then
+        needs_open = true
+        break
+      end
     end
+    local needs_close = false
     for _, edge in ipairs(cx.graph:outgoing_edges(region_nid)) do
-      assert(edge.to_node == shard_loop)
+      if edge.to_node ~= shard_loop then
+        needs_close = true
+        break
+      end
     end
-    cx.graph:remove_node(region_nid)
+    if needs_open or needs_close then
+      if needs_open then
+        local open_nid = cx.graph:add_node(flow.node.Open {})
+        cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()), region_nid, cx.graph:node_result_port(region_nid),
+          open_nid, cx.graph:node_available_port(open_nid))
+        for _, nid in ipairs(replacement_nids) do
+          cx.graph:add_edge(
+            flow.edge.Write(flow.default_mode()),
+            open_nid, cx.graph:node_available_port(open_nid),
+            nid, cx.graph:node_available_port(open_nid))
+        end
+      end
+      if needs_close then
+        local close_nid = cx.graph:add_node(flow.node.Close {})
+        for _, nid in ipairs(replacement_nids) do
+          cx.graph:add_edge(
+            flow.edge.Read(flow.default_mode()),
+            nid, cx.graph:node_result_port(nid),
+            close_nid, cx.graph:node_available_port(close_nid))
+        end
+        cx.graph:add_edge(
+          flow.edge.Write(flow.default_mode()),
+          close_nid, cx.graph:node_result_port(region_nid),
+          region_nid, cx.graph:node_available_port(region_nid))
+      end
+
+      cx.graph:remove_incoming_edges(
+        function(edge) return edge.from_node == shard_loop end,
+        region_nid)
+      cx.graph:remove_outgoing_edges(
+        function(edge) return edge.to_node == shard_loop end,
+        region_nid)
+    else
+      cx.graph:remove_node(region_nid)
+    end
   end
 
   assert(not block_cx.graph:find_node(
            function(_, label) return label:is(flow.node.data.Region) end))
+end
+
+local function normalize_communication(cx)
+  -- Normalization is applied recursively to subgraphs, bottom-up.
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        normalize_communication_subgraph(inner_cx, nid)
+      end
+    end)
 end
 
 local function rewrite_shard_partitions(cx)
@@ -3377,7 +3480,7 @@ local function spmdize(cx, loop)
   local shard_graph, shard_loop = flow_extract_subgraph.entry(cx.graph, loop)
 
   local shard_cx = cx:new_graph_scope(shard_graph)
-  normalize_communication(shard_cx, shard_loop)
+  normalize_communication(shard_cx)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
   local intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
   local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop)
