@@ -1753,6 +1753,13 @@ local function as_forlist_stat(cx, symbol, block, args, options, span)
   })
 end
 
+local function as_assignment_stat(cx, args, options, span)
+  return as_stat(cx, args, flow.node.Assignment {
+    options = options,
+    span = span,
+  })
+end
+
 local function as_reduce_stat(cx, op, args, options, span)
   return as_stat(cx, args, flow.node.Reduce {
     op = op,
@@ -2506,7 +2513,23 @@ function flow_from_ast.stat_break(cx, node)
 end
 
 function flow_from_ast.stat_assignment(cx, node)
-  as_opaque_stat(cx, node)
+  if not data.all(
+    unpack(node.lhs:map(function(lh) return lh:is(ast.typed.expr.ID) end)))
+  then
+    as_opaque_stat(cx, node)
+    return
+  end
+
+  local rhs = node.rhs:map(
+    function(rh) return flow_from_ast.expr(cx, rh, reads) end)
+  local lhs = node.lhs:map(
+    function(lh) return flow_from_ast.expr(cx, lh, reads_writes) end)
+
+  local inputs = terralib.newlist()
+  inputs:insertall(lhs)
+  inputs:insertall(rhs)
+
+  as_assignment_stat(cx, inputs, node.options, node.span)
 end
 
 function flow_from_ast.stat_reduce(cx, node)

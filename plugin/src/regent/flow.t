@@ -942,6 +942,7 @@ flow.node:leaf("Binary", {"op", "expr_type", "options", "span"})
 flow.node:leaf("IndexAccess", {"expr_type", "options", "span"})
 flow.node:leaf("Deref", {"expr_type", "options", "span"})
 flow.node:leaf("Advance", {"expr_type", "options", "span"})
+flow.node:leaf("Assignment", {"options", "span"})
 flow.node:leaf("Reduce", {"op", "options", "span"})
 flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
 flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",

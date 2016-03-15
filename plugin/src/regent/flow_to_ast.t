@@ -363,6 +363,35 @@ function flow_to_ast.node_advance(cx, nid)
   return make_expr_result(cx, nid, action)
 end
 
+function flow_to_ast.node_assignment(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  local outputs = cx.graph:outgoing_edges_by_port(nid)
+
+  local maxport = get_maxport(inputs)
+  assert(maxport % 2 == 0)
+
+  local lhs = terralib.newlist()
+  for i = 1, maxport/2 do
+    assert(rawget(inputs, i) and #inputs[i] == 1)
+    lhs:insert(cx.ast[inputs[i][1].from_node])
+  end
+
+  local rhs = terralib.newlist()
+  for i = maxport/2 + 1, maxport do
+    assert(rawget(inputs, i) and #inputs[i] == 1)
+    rhs:insert(cx.ast[inputs[i][1].from_node])
+  end
+
+  local action = ast.typed.stat.Assignment {
+    lhs = lhs,
+    rhs = rhs,
+    options = label.options,
+    span = label.span,
+  }
+  return terralib.newlist({action})
+end
+
 function flow_to_ast.node_reduce(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -795,6 +824,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Advance) then
     return flow_to_ast.node_advance(cx, nid)
+
+  elseif label:is(flow.node.Assignment) then
+    return flow_to_ast.node_assignment(cx, nid)
 
   elseif label:is(flow.node.Reduce) then
     return flow_to_ast.node_reduce(cx, nid)
