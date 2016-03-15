@@ -96,6 +96,7 @@ local function whitelist_node_types(cx, loop_nid)
     function(_, _, label)
       return (
         label:is(flow.node.Binary) or label:is(flow.node.IndexAccess) or
+          label:is(flow.node.Reduce) or
           (label:is(flow.node.Task) and not label.opaque) or
           label:is(flow.node.Open) or label:is(flow.node.Close) or
           label:is(flow.node.ctrl) or label:is(flow.node.data) or

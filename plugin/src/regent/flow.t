@@ -116,6 +116,8 @@ function graph:node_minimum_port(node)
   elseif label:is(flow.node.ctrl.Block) then
     return 1
   elseif label:is(flow.node.ctrl.WhileLoop) then
+    return 1
+  elseif label:is(flow.node.ctrl.WhileBody) then
     return 2
   elseif label:is(flow.node.ctrl.ForNum) then
     return 4

@@ -66,19 +66,13 @@ function context.new_global_scope()
 end
 
 local function count_output_scalars(cx, nid)
-  local result = 0
-  local outputs = cx.graph:outgoing_edges(nid)
-  for _, edge in ipairs(outputs) do
-    local label = cx.graph:node_label(edge.to_node)
-    if label:is(flow.node.data.Scalar) then
-      result = result + 1
-    end
-  end
-  return result
+  return #cx.graph:filter_immediate_successors(
+    function(_, label) return label:is(flow.node.data.Scalar) end,
+    nid)
 end
 
 local function has_partition_accesses(cx, nid)
-  local inputs = cx.graph:outgoing_edges(nid)
+  local inputs = cx.graph:incoming_edges(nid)
   for _, edge in ipairs(inputs) do
     local label = cx.graph:node_label(edge.from_node)
     if label:is(flow.node.data.Partition) and (
@@ -104,7 +98,7 @@ local function has_partition_accesses(cx, nid)
 end
 
 local function can_outline(cx, nid)
-  return count_output_scalars(cx, nid) == 0 and
+  return count_output_scalars(cx, nid) <= 1 and
     not has_partition_accesses(cx, nid)
 end
 
@@ -316,17 +310,39 @@ local function summarize_flags(cx, nid)
   return result
 end
 
+local function add_return(cx, nid)
+  local result_nid, result_label = cx.graph:find_immediate_successor(
+    function(_, label) return label:is(flow.node.data.Scalar) end,
+    nid)
+  if result_nid then
+    local return_label = flow.node.Opaque {
+      action = ast.typed.stat.Return {
+        value = result_label.value,
+        options = ast.default_options(),
+        span = result_label.value.span,
+      }
+    }
+    local return_nid = cx.graph:add_node(return_label)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), result_nid, cx.graph:node_result_port(result_nid),
+      return_nid, cx.graph:node_available_port(return_nid))
+    return std.as_read(result_label.value.expr_type)
+  else
+    return terralib.types.unit
+  end
+end
+
 local function extract_task(cx, nid, prefix, force_read_write)
   local label = cx.graph:node_label(nid)
   local params, param_mapping = gather_params(cx, nid)
-  local return_type = terralib.types.unit
   local privileges = summarize_privileges(cx, nid, force_read_write)
   local coherence_modes = summarize_coherence(cx, nid)
   local flags = summarize_flags(cx, nid)
   local conditions = {} -- FIXME: Need conditions.
   -- FIXME: Need to scope constraints to regions used by task body.
   local constraints = false -- summarize_constraints(cx, nid)
-  local body = flow_extract_subgraph.entry(cx.graph, nid)
+  local body, body_nid = flow_extract_subgraph.entry(cx.graph, nid)
+  local return_type = add_return(cx:new_graph_scope(body), body_nid)
 
   local name = tostring(terralib.newsymbol())
   if prefix then name = prefix .. "_" .. name end
@@ -383,11 +399,11 @@ local function extract_task(cx, nid, prefix, force_read_write)
   return ast, param_mapping
 end
 
-local function add_call_node(cx, nid)
+local function add_call_node(cx, nid, return_type)
   local original_label = cx.graph:node_label(nid)
   local label = flow.node.Task {
     opaque = false,
-    expr_type = terralib.types.unit,
+    expr_type = return_type,
     options = ast.default_options(),
     span = original_label.span,
   }
@@ -459,7 +475,8 @@ local function copy_args(cx, original_nid, call_nid, param_mapping)
     if outputs[i] then
       for _, edge in ipairs(outputs[i]) do
         local label = cx.graph:node_label(edge.from_node)
-        if not (label:is(flow.node.Constant) or label:is(flow.node.Function))
+        if not (label:is(flow.node.Constant) or label:is(flow.node.Function) or
+                  label:is(flow.node.data.Scalar))
         then
           -- Hack: Reorder inputs according to the param mapping.
           local port = param_mapping[next_port - 1] + 1 -- next_port
@@ -475,10 +492,73 @@ local function copy_args(cx, original_nid, call_nid, param_mapping)
   end
 end
 
+local function add_result(cx, original_nid, call_nid)
+  local output_nid = cx.graph:filter_immediate_successors_by_edges(
+    function(edge)
+      local label = cx.graph:node_label(edge.to_node)
+      return label:is(flow.node.data.Scalar) and edge.label:is(flow.edge.Write)
+    end,
+    original_nid)[1]
+  if output_nid then
+    local output_label = cx.graph:node_label(output_nid)
+    local input_nid = cx.graph:filter_immediate_predecessors_by_edges(
+    function(edge)
+      local label = cx.graph:node_label(edge.from_node)
+      return label:is(flow.node.data.Scalar) and
+        label.region_type == output_label.region_type and
+        label.field_path == output_label.field_path and
+        edge.label:is(flow.edge.Read)
+    end,
+    original_nid)[1]
+    assert(input_nid)
+
+    -- Create a node to represent the task result.
+    local tmp_symbol = terralib.newsymbol(std.as_read(output_label.value.expr_type))
+    local tmp_label = output_label {
+      value = output_label.value {
+        value = tmp_symbol,
+      },
+      fresh = true,
+    }
+    local tmp_nid = cx.graph:add_node(tmp_label)
+    cx.graph:add_edge(
+      flow.edge.Write(flow.default_mode()),
+      call_nid, cx.graph:node_result_port(call_nid),
+      tmp_nid, 0)
+    cx.graph:remove_outgoing_edges(
+      function(edge) return edge.to_node == output_nid end,
+      call_nid)
+
+    local assign_label = flow.node.Opaque {
+      action = ast.typed.stat.Assignment {
+        lhs = terralib.newlist({output_label.value}),
+        rhs = terralib.newlist({tmp_label.value}),
+        options = ast.default_options(),
+        span = output_label.value.span,
+      }
+    }
+    local assign_nid = cx.graph:add_node(assign_label)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      tmp_nid, cx.graph:node_result_port(tmp_nid),
+      assign_nid, cx.graph:node_available_port(assign_nid))
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      input_nid, cx.graph:node_result_port(input_nid),
+      assign_nid, cx.graph:node_available_port(assign_nid))
+    cx.graph:add_edge(
+      flow.edge.Write(flow.default_mode()),
+      assign_nid, cx.graph:node_available_port(assign_nid),
+      output_nid, cx.graph:node_result_port(output_nid))
+  end
+end
+
 local function issue_call(cx, nid, task, param_mapping)
-  local call_nid = add_call_node(cx, nid)
+  if task:gettype().returntype ~= terralib.types.unit then print("FIXME: Not copying back scalar result") end
+  local call_nid = add_call_node(cx, nid, terralib.types.unit)--task:gettype().returntype)
   add_task_arg(cx, call_nid, task)
   copy_args(cx, nid, call_nid, param_mapping)
+  -- add_result(cx, nid, call_nid)
   return call_nid
 end
 
