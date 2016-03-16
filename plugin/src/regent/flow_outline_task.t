@@ -494,16 +494,14 @@ end
 
 local function add_result(cx, original_nid, call_nid)
   local output_nid = cx.graph:filter_immediate_successors_by_edges(
-    function(edge)
-      local label = cx.graph:node_label(edge.to_node)
+    function(edge, label)
       return label:is(flow.node.data.Scalar) and edge.label:is(flow.edge.Write)
     end,
     original_nid)[1]
   if output_nid then
     local output_label = cx.graph:node_label(output_nid)
     local input_nid = cx.graph:filter_immediate_predecessors_by_edges(
-    function(edge)
-      local label = cx.graph:node_label(edge.from_node)
+    function(edge, label)
       return label:is(flow.node.data.Scalar) and
         label.region_type == output_label.region_type and
         label.field_path == output_label.field_path and

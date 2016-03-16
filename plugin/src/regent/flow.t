@@ -653,7 +653,8 @@ function graph:filter_immediate_predecessors_by_edges(fn, node)
   if rawget(self.backedges, node) then
     for from_node, edges in pairs(self.backedges[node]) do
       for _, edge in pairs(edges) do
-        if fn(pack_edge(from_node, node, edge)) then
+        local label = self:node_label(from_node)
+        if fn(pack_edge(from_node, node, edge), label) then
           result:insert(from_node)
           break
         end
@@ -677,7 +678,8 @@ function graph:filter_immediate_successors_by_edges(fn, node)
   if rawget(self.edges, node) then
     for to_node, edges in pairs(self.edges[node]) do
       for _, edge in pairs(edges) do
-        if fn(pack_edge(node, to_node, edge)) then
+        local label = self:node_label(to_node)
+        if fn(pack_edge(node, to_node, edge), label) then
           result:insert(to_node)
           break
         end
@@ -885,10 +887,11 @@ function graph:printpretty(ids, types, metadata)
     if metadata then label = label .. " " .. tostring(metadata[i]) end
     local shape
     if node:is(flow.node.Opaque) or
-      node:is(flow.node.IndexAccess) or
+      node:is(flow.node.Binary) or node:is(flow.node.IndexAccess) or
       node:is(flow.node.Deref) or
       node:is(flow.node.Advance) or
-      node:is(flow.node.Reduce) or node:is(flow.node.Task) or
+      node:is(flow.node.Assignment) or node:is(flow.node.Reduce) or
+      node:is(flow.node.Task) or
       node:is(flow.node.Copy) or node:is(flow.node.Fill) or
       node:is(flow.node.ctrl)
     then
