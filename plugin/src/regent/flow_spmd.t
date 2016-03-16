@@ -1068,7 +1068,7 @@ local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make
   end
 end
 
-local function issue_with_scratch_fields(cx, reduction_nids, other_nids,
+local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
                                          user_nid, user_port,
                                          scratch_fields, mapping)
   local make_fresh_type = function(cx, value_type, span)
@@ -1201,10 +1201,11 @@ local function issue_with_scratch_fields(cx, reduction_nids, other_nids,
       new_nid_cleared, cx.graph:node_sync_port(new_nid_cleared))
 
     -- Fill the new input.
-    print("FIXME: Reduction fill initializes to 0 (assumes +/-)")
     local init_type = std.get_field_path(old_type:fspace(), field_path)
+    local init_value = std.reduction_op_init[op][init_type]
+    assert(init_value)
     local init_label = flow.node.Constant {
-      value = make_constant(0, init_type, old_label.value.span),
+      value = make_constant(init_value, init_type, old_label.value.span),
     }
     local init_nid = cx.graph:add_node(init_label)
     local fill_label = flow.node.Fill {
@@ -1342,7 +1343,7 @@ local function rewrite_reduction_scratch_fields(cx, shard_loop)
         user_nid)
 
       issue_with_scratch_fields(
-        block_cx, reduction_nids, other_nids, user_nid, port,
+        block_cx, op, reduction_nids, other_nids, user_nid, port,
         scratch_fields, mapping)
 
       for _, reduction_nid in ipairs(reduction_nids) do
@@ -2087,6 +2088,8 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     local target_label = cx.graph:node_label(target_nid)
     local target_type = std.as_read(target_label.value.expr_type)
 
+    local op = get_incoming_reduction_op(cx, target_nid)
+
     -- 1. Replicate the target.
     local local_label = make_variable_label(
       cx, terralib.newsymbol(target_type, "local_" .. tostring(target_label.value.value)),
@@ -2094,13 +2097,14 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     local local_nid = cx.graph:add_node(local_label)
 
     -- 2. Initialize the replicated variable.
-    print("FIXME: Reduction fill initializes to 0 (assumes +/-)")
+    local init_value = std.reduction_op_init[op][target_type]
+    assert(init_value)
     local var_label = flow.node.Opaque {
       action = ast.typed.stat.Var {
         symbols = terralib.newlist({local_label.value.value}),
         types = terralib.newlist({target_type}),
         values = terralib.newlist({
-            make_constant(0, target_type, target_label.value.span)}),
+            make_constant(init_value, target_type, target_label.value.span)}),
         options = ast.default_options(),
         span = target_label.value.span,
       }
@@ -2135,7 +2139,6 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     local collective_v1_nid = cx.graph:add_node(collective_label)
 
     -- And remember it for later...
-    local op = get_incoming_reduction_op(cx, target_nid)
     collectives:insert(data.newtuple(collective_label, op))
 
     -- 5. Arrive at the collective with the replicated value.
