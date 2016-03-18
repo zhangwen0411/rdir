@@ -489,6 +489,7 @@ local function normalize_communication_subgraph(cx, shard_loop)
     local result_nids = find_close_results(block_cx, close_nid)
 
     -- For each region, look back in the graph to find a matching region.
+    local detach_nids = terralib.newlist()
     for _, result_nid in ipairs(result_nids) do
       local result_label = block_cx.graph:node_label(result_nid)
       -- Look for an exact match first.
@@ -514,9 +515,16 @@ local function normalize_communication_subgraph(cx, shard_loop)
         else
           -- Otherwise just duplicate it.
           input_nid = block_cx.graph:add_node(result_label)
-          block_cx.graph:replace_edges(close_nid, parent_nid, input_nid)
+          block_cx.graph:copy_outgoing_edges(
+            function(edge) return edge.to_node == close_nid end, parent_nid, input_nid)
+          detach_nids:insert(parent_nid)
         end
       end
+    end
+
+    for _, nid in ipairs(detach_nids) do
+      block_cx.graph:remove_outgoing_edges(
+        function(edge) return edge.to_node == close_nid end, nid)
     end
   end
 
@@ -553,24 +561,69 @@ local function normalize_communication_subgraph(cx, shard_loop)
         versions_changed = versions_changed + 1
       end
     end
-    assert(versions_changed <= 1)
 
-    -- If the version changed, prune back any regions that didn't change.
-    if versions_changed == 1 then
+    -- If multiple versions changed, split the close.
+    if versions_changed > 1 then
+      local contributor_nids = terralib.newlist()
+      local input_nids = block_cx.graph:immediate_predecessors(close_nid)
+      for _, input_nid in ipairs(input_nids) do
+        local input_label = block_cx.graph:node_label(input_nid)
+        local result_nid = find_matching_output(
+          block_cx, close_nid, input_label.region_type, input_label.field_path)
+        if result_nid and versions[result_nid] <= versions[input_nid] then
+          contributor_nids:insert(input_nid)
+        end
+      end
+
+      local last_split
+      for _, result_nid in ipairs(result_nids) do
+        local result_label = block_cx.graph:node_label(result_nid)
+        local input_nid = find_matching_input(
+          block_cx, close_nid, result_label.region_type, result_label.field_path)
+        assert(input_nid)
+        if versions[result_nid] > versions[input_nid] then
+          -- Version changed, count this as a split.
+          if last_split then
+            local split = block_cx.graph:add_node(flow.node.Close {})
+            for _, nid in ipairs(contributor_nids) do
+              block_cx.graph:copy_incoming_edges(
+                function(edge) return edge.from_node == nid end, close_nid, split)
+            end
+            block_cx.graph:copy_incoming_edges(
+              function(edge) return edge.from_node == input_nid end, close_nid, split, true)
+            block_cx.graph:copy_outgoing_edges(
+              function(edge) return edge.to_node == result_nid end, close_nid, split, true)
+            block_cx.graph:add_edge(
+              flow.edge.HappensBefore {}, last_split, block_cx.graph:node_sync_port(last_split),
+              split, block_cx.graph:node_sync_port(split))
+            last_split = split
+          else
+            last_split = close_nid
+          end
+        else
+          -- Version didn't change, prune it back to the input.
+          block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
+          block_cx.graph:remove_node(result_nid)
+        end
+      end
+
+    -- If exactly one version changed, just prune back the regions that didn't change.
+    elseif versions_changed == 1 then
       for _, result_nid in ipairs(result_nids) do
         local result_label = block_cx.graph:node_label(result_nid)
         local input_nid = find_matching_input(
           block_cx, close_nid, result_label.region_type, result_label.field_path)
         assert(input_nid)
         if versions[result_nid] <= versions[input_nid] then
+          -- Version didn't change, prune it back to the input.
           block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
           block_cx.graph:remove_node(result_nid)
         end
       end
-    end
 
-    -- If the version didn't change, remove the close entirely.
-    if versions_changed == 0 then
+    -- If no versions changed, remove the close entirely.
+    else
+      assert(versions_changed == 0)
       -- Bump each region to the next available version.
       local input_nids = block_cx.graph:immediate_predecessors(close_nid)
       for _, input_nid in ipairs(input_nids) do
