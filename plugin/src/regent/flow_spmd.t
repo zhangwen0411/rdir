@@ -2327,6 +2327,81 @@ local function rewrite_scalar_communication(cx)
   return collectives
 end
 
+local function rewrite_shard_intersections(cx, shard_loop, intersections)
+  local mapping = {}
+
+  local shallow_intersections = data.new_recursive_map(2)
+  for lhs_type, i1 in intersections:items() do
+    for rhs_type, i2 in i1:items() do
+      local intersection_label
+      for field_path, label in i2:items() do
+        intersection_label = label
+        break
+      end
+      assert(intersection_label)
+      local intersection_type = intersection_label.region_type
+
+      local shallow_type = std.list(
+        std.list(intersection_type:subregion_dynamic()))
+      local shallow_symbol = terralib.newsymbol(
+        shallow_type, "shallow_" .. tostring(intersection_label.value.value))
+
+      mapping[intersection_type] = shallow_type
+
+      local lhs_label = cx.graph:node_label(find_matching_input(cx, shard_loop, lhs_type))
+
+      local complete_label = flow.node.Opaque {
+        action = ast.typed.stat.Var {
+          symbols = terralib.newlist({intersection_label.value.value}),
+          types = terralib.newlist({intersection_label.region_type}),
+          values = terralib.newlist({
+              ast.typed.expr.ListCrossProductComplete {
+                lhs = lhs_label.value,
+                product = intersection_label.value {
+                  value = shallow_symbol,
+                  expr_type = std.type_sub(intersection_label.value.expr_type, mapping),
+                },
+                expr_type = intersection_type,
+                options = ast.default_options(),
+                span = intersection_label.value.span,
+              },
+          }),
+          options = ast.default_options(),
+          span = intersection_label.value.span,
+        }
+      }
+      local complete_nid = cx.graph:add_node(complete_label)
+
+      for field_path, old_label in i2:items() do
+        local old_nid = find_matching_input(cx, shard_loop, old_label.region_type, old_label.field_path)
+        local lhs_nid = find_matching_input(cx, shard_loop, lhs_type, old_label.field_path)
+        local new_label = old_label {
+          value = old_label.value {
+            value = shallow_symbol,
+            expr_type = std.type_sub(old_label.value.expr_type, mapping),
+          },
+          region_type = shallow_type,
+        }
+        local new_nid = cx.graph:add_node(new_label)
+
+        shallow_intersections[lhs_type][rhs_type][field_path] = new_label
+
+        cx.graph:add_edge(
+          flow.edge.None(flow.default_mode()), new_nid, cx.graph:node_result_port(new_nid),
+          complete_nid, cx.graph:node_available_port(complete_nid))
+        cx.graph:add_edge(
+          flow.edge.None(flow.default_mode()), lhs_nid, cx.graph:node_result_port(lhs_nid),
+          complete_nid, cx.graph:node_available_port(complete_nid))
+        cx.graph:add_edge(
+          flow.edge.HappensBefore {}, complete_nid, cx.graph:node_sync_port(complete_nid),
+          old_nid, cx.graph:node_sync_port(old_nid))
+      end
+    end
+  end
+
+  return shallow_intersections, mapping
+end
+
 local function rewrite_inner_loop_bounds(cx, loop_nid, start)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
@@ -2870,6 +2945,9 @@ end
 
 local function apply_mapping(old, new)
   local result = {}
+  for k, v in pairs(new) do
+    result[k] = v
+  end
   for k, v in pairs(old) do
     result[k] = (new[v] == nil and v) or new[v]
   end
@@ -3522,6 +3600,7 @@ local function issue_intersection_creation(cx, intersection_nids,
           ast.typed.expr.ListCrossProduct {
             lhs = lhs.value,
             rhs = rhs.value,
+            shallow = true,
             expr_type = std.as_read(first_intersection.value.expr_type),
             options = ast.default_options(),
             span = first_intersection.value.span,
@@ -3967,14 +4046,17 @@ local function spmdize(cx, loop)
   local shard_cx = cx:new_graph_scope(shard_graph)
   normalize_communication(shard_cx)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
-  local intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
+  local original_intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
   local collectives = rewrite_scalar_communication(shard_cx)
   local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop) -- FIXME: nested
+  local intersections, intersection_mapping = rewrite_shard_intersections(
+    shard_cx, shard_loop, original_intersections)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
 
+  local shard_mapping = apply_mapping(scratch_field_mapping, intersection_mapping)
   local outer_shard_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local outer_shard_block = make_block(
-    outer_shard_cx, shard_cx.graph, scratch_field_mapping, span)
+    outer_shard_cx, shard_cx.graph, shard_mapping, span)
   upgrade_simultaneous_coherence(outer_shard_cx)
 
   local shard_task = flow_outline_task.entry(
