@@ -2578,6 +2578,168 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   return bounds_labels, original_bounds_labels
 end
 
+local function select_copy_elision(cx, lists, inverse_mapping)
+  -- In general, partitions must be duplicated to avoid conflicts. But
+  -- disjoint partitions (at most one, if there are multiple such
+  -- aliased partitions) need not be duplicated---and in avoiding the
+  -- duplication, copies can also be avoided.
+
+  local elide_copy = data.newmap()
+  for _, list_type in lists:keys() do
+    local old_type = inverse_mapping[list_type]
+    if std.is_list_of_regions(list_type) and
+      std.is_partition(old_type) and old_type:is_disjoint()
+    then
+      local aliased = false
+      for other_type, _ in elide_copy:items() do
+        if std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
+          cx.tree:can_alias(old_type, other_type)
+        then
+          aliased = true
+          break
+        end
+      end
+      if not aliased then
+        elide_copy[old_type] = true
+      end
+    end
+  end
+  return elide_copy
+end
+
+local function rewrite_elided_lists(cx, lists, intersections, barriers,
+                                    inverse_mapping, elide_copy, elide_mapping)
+  local elided_lists = data.new_recursive_map(1)
+  local elided_mapping = {}
+  for list_type, list in lists:items() do
+    local original_type = inverse_mapping[list_type]
+    if elide_copy[original_type] then
+      local _, list_label = cx.graph:find_node(
+        function(_, label) return label:is(flow.node.data) and label.region_type == list_type end)
+
+      local new_type = std.list(list_type.element_type, list_type.partition_type, nil, original_type:parent_region())
+      local new_symbol = terralib.newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
+      cx.tree:intern_region_expr(
+        new_type, ast.default_options(), list_label.value.span)
+
+      elided_mapping[list_type] = new_type
+
+      -- Rewrite the list entries.
+      for field_path, label in list:items() do
+        elided_lists[new_type][field_path] = label {
+          value = label.value {
+            value = new_symbol,
+            expr_type = std.type_sub(label.value.expr_type, elided_mapping),
+          },
+          region_type = new_type,
+        }
+      end
+
+      -- Rewrite the graph.
+      cx.graph:map_nodes_recursive(
+        function(_, _, label)
+          if label:is(flow.node.data) and label.region_type == list_type then
+            return label {
+              value = label.value {
+                value = new_symbol,
+                expr_type = std.type_sub(label.value.expr_type, elided_mapping),
+              },
+              region_type = new_type,
+            }
+          end
+          return label
+        end)
+    else
+      elided_lists[list_type] = list
+    end
+  end
+
+  local elided_intersections = data.new_recursive_map(2)
+  for lhs_type, i1 in intersections:items() do
+    for rhs_type, i2 in i1:items() do
+      local new_lhs_type = std.type_sub(lhs_type, elided_mapping)
+      local new_rhs_type = std.type_sub(rhs_type, elided_mapping)
+
+      if elide_copy[inverse_mapping[rhs_type]] then
+        local old_label
+        for field_path, label in i2:items() do
+          old_label = label
+        end
+        assert(old_label)
+
+        local old_type = old_label.region_type
+        local new_type = std.list(
+          std.list(old_type.element_type.element_type, old_type.partition_type,
+                   new_rhs_type.privilege_depth, new_rhs_type.region_root),
+          old_type.partition_type,
+          new_rhs_type.privilege_depth, new_rhs_type.region_root)
+        local new_symbol = terralib.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
+        cx.tree:intern_region_expr(
+          new_type, ast.default_options(), old_label.value.span)
+
+        elided_mapping[old_type] = new_type
+
+        -- Rewrite the intersection entries.
+        for field_path, label in i2:items() do
+          elided_intersections[new_lhs_type][new_rhs_type][field_path] = label {
+            value = label.value {
+              value = new_symbol,
+              expr_type = std.type_sub(label.value.expr_type, elided_mapping),
+            },
+            region_type = new_type,
+          }
+        end
+
+      -- Rewrite the graph.
+      cx.graph:map_nodes_recursive(
+        function(_, _, label)
+          if label:is(flow.node.data) and label.region_type == old_type then
+            return label {
+              value = label.value {
+                value = new_symbol,
+                expr_type = std.type_sub(label.value.expr_type, elided_mapping),
+              },
+              region_type = new_type,
+            }
+          end
+          return label
+        end)
+      else
+        for field_path, label in i2:items() do
+          elided_intersections[new_lhs_type][new_rhs_type][field_path] = label
+        end
+      end
+    end
+  end
+
+  local elided_barriers = data.new_recursive_map(2)
+  for lhs_type, b1 in barriers:items() do
+    for rhs_type, b2 in b1:items() do
+      for field_path, barrier_labels in b2:items() do
+        local new_lhs_type = std.type_sub(lhs_type, elided_mapping)
+        local new_rhs_type = std.type_sub(rhs_type, elided_mapping)
+        elided_barriers[new_lhs_type][new_rhs_type][field_path] = barrier_labels
+      end
+    end
+  end
+
+  return elided_lists, elided_intersections, elided_barriers, elided_mapping
+end
+
+local function rewrite_list_elision(cx, lists, intersections, barriers, mapping)
+  -- Compute copy elision and rewrite the elided lists.
+  local inverse_mapping = {}
+  for k, v in pairs(mapping) do
+    inverse_mapping[v] = k
+  end
+
+  local elide_copy = select_copy_elision(cx, lists, inverse_mapping)
+  local elided_lists, elided_intersections, elided_barriers, elided_mapping =
+    rewrite_elided_lists(cx, lists, intersections, barriers,
+                         inverse_mapping, elide_copy)
+  return elided_lists, elided_intersections, elided_barriers, elide_copy, elided_mapping
+end
+
 local function get_slice_type_and_symbol(cx, region_type, list_type, label)
   if std.is_list_of_regions(region_type) or
     std.is_list_of_partitions(region_type)
@@ -2941,17 +3103,6 @@ local function make_must_epoch(cx, block, span)
   local nid = cx.graph:add_node(label)
   flow_summarize_subgraph.entry(cx.graph, nid, {})
   return nid
-end
-
-local function apply_mapping(old, new)
-  local result = {}
-  for k, v in pairs(new) do
-    result[k] = v
-  end
-  for k, v in pairs(old) do
-    result[k] = (new[v] == nil and v) or new[v]
-  end
-  return result
 end
 
 local function find_match_incoming(cx, predicate, nid)
@@ -3385,9 +3536,9 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
   return copy_loop_nid
 end
 
-local function issue_input_copies_partition(cx, region_type, need_copy,
-                                            partitions, old_loop, bounds,
-                                            opened_nids)
+local function issue_input_copies_partition(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
     find_partition_nids(
@@ -3397,37 +3548,43 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
   opened_nids[region_type] = partition_nids
 
   -- Name the intermediate list (before it has valid data).
-  local name_nids = data.newmap()
-  for field_path, new_nid in new_nids:items() do
-    local new_label = cx.graph:node_label(new_nid)
-    local name_nid = cx.graph:add_node(new_label)
-    name_nids[field_path] = name_nid
+  local name_nids
+  if elide then
+    name_nids = new_nids
+  else
+    name_nids = data.newmap()
+    for field_path, new_nid in new_nids:items() do
+      local new_label = cx.graph:node_label(new_nid)
+      local name_nid = cx.graph:add_node(new_label)
+      name_nids[field_path] = name_nid
+    end
   end
 
   -- Duplicate the partition.
+  local slice = ast.typed.expr.ListDuplicatePartition
+  if elide then
+    slice = ast.typed.expr.ListSlicePartition
+  end
+
+  local indices = ast.typed.expr.ListRange {
+    start = bounds[1].value,
+    stop = bounds[2].value,
+    expr_type = std.list(int),
+    options = ast.default_options(),
+    span = first_partition_label.value.span,
+  }
+  local duplicated = slice {
+    partition = first_partition_label.value,
+    indices = indices,
+    expr_type = std.as_read(first_new_label.value.expr_type),
+    options = ast.default_options(),
+    span = first_partition_label.value.span,
+  }
   local duplicate = flow.node.Opaque {
     action = ast.typed.stat.Var {
-      symbols = terralib.newlist({
-          first_new_label.value.value,
-      }),
-      types = terralib.newlist({
-          region_type,
-      }),
-      values = terralib.newlist({
-          ast.typed.expr.ListDuplicatePartition {
-            partition = first_partition_label.value,
-            indices = ast.typed.expr.ListRange {
-              start = bounds[1].value,
-              stop = bounds[2].value,
-              expr_type = std.list(int),
-              options = ast.default_options(),
-              span = first_partition_label.value.span,
-            },
-            expr_type = std.as_read(first_new_label.value.expr_type),
-            options = ast.default_options(),
-            span = first_partition_label.value.span,
-          },
-      }),
+      symbols = terralib.newlist({ first_new_label.value.value }),
+      types = terralib.newlist({ region_type }),
+      values = terralib.newlist({ duplicated }),
       options = ast.default_options(),
       span = first_partition_label.value.span,
     }
@@ -3446,18 +3603,20 @@ local function issue_input_copies_partition(cx, region_type, need_copy,
       name_nid, cx.graph:node_sync_port(name_nid))
   end
 
-  local copy_nid = issue_zipped_copy(
-    cx, partition_nids, name_nids, new_nids,
-    std.as_read(first_partition_label.value.expr_type), region_type,
-    bounds, first_new_label.value.span)
-  cx.graph:copy_incoming_edges(
-    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
-    old_loop, copy_nid)
+  if not elide then
+    local copy_nid = issue_zipped_copy(
+      cx, partition_nids, name_nids, new_nids,
+      std.as_read(first_partition_label.value.expr_type), region_type,
+      bounds, first_new_label.value.span)
+    cx.graph:copy_incoming_edges(
+      function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+      old_loop, copy_nid)
+  end
 end
 
-local function issue_input_copies_cross_product(cx, region_type, need_copy,
-                                                partitions, old_loop, bounds,
-                                                opened_nids)
+local function issue_input_copies_cross_product(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   assert(std.is_list_of_partitions(region_type))
   local old_nids, new_nids, product_nids, first_product_label, first_new_label =
     find_cross_product_nids(
@@ -3515,21 +3674,25 @@ local function issue_input_copies_cross_product(cx, region_type, need_copy,
   end
 end
 
-local function issue_input_copies(cx, region_type, need_copy, partitions,
-                                  old_loop, bounds, opened_nids)
+local function issue_input_copies(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   if std.is_list_of_regions(region_type) then
-    issue_input_copies_partition(cx, region_type, need_copy, partitions,
-                                 old_loop, bounds, opened_nids)
+    issue_input_copies_partition(
+      cx, region_type, need_copy, elide, partitions, old_loop,
+      bounds, opened_nids)
   elseif std.is_list_of_partitions(region_type) then
-    issue_input_copies_cross_product(cx, region_type, need_copy, partitions,
-                                     old_loop, bounds, opened_nids)
+    issue_input_copies_cross_product(
+      cx, region_type, need_copy, elide, partitions, old_loop,
+      bounds, opened_nids)
   else
     assert(false)
   end
 end
 
-local function issue_output_copies_partition(cx, region_type, need_copy,
-                                             partitions, old_loop, bounds, opened_nids)
+local function issue_output_copies_partition(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
     find_partition_nids(
@@ -3554,29 +3717,52 @@ local function issue_output_copies_partition(cx, region_type, need_copy,
     end
   end
 
-  local copy_nid = issue_zipped_copy(
-    cx, new_nids, opened_partition_nids, partition_nids,
-    region_type, std.as_read(first_partition_label.value.expr_type),
-    bounds, first_new_label.value.span)
-  cx.graph:copy_outgoing_edges(
-    function(edge) return edge.label:is(flow.edge.HappensBefore) end,
-    old_loop, copy_nid)
+  if not elide then
+    local copy_nid = issue_zipped_copy(
+      cx, new_nids, opened_partition_nids, partition_nids,
+      region_type, std.as_read(first_partition_label.value.expr_type),
+      bounds, first_new_label.value.span)
+    cx.graph:copy_outgoing_edges(
+      function(edge) return edge.label:is(flow.edge.HappensBefore) end,
+      old_loop, copy_nid)
+  else
+    for field_path, new_nid in new_nids:items() do
+      local opened_partition_nid = opened_partition_nids[field_path]
+      local partition_nid = partition_nids[field_path]
+
+      local close_nid = cx.graph:add_node(flow.node.Close {})
+      cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), opened_partition_nid, cx.graph:node_result_port(opened_partition_nid),
+        close_nid, cx.graph:node_available_port(close_nid))
+      cx.graph:add_edge(
+        flow.edge.Write(flow.default_mode()), close_nid, cx.graph:node_result_port(close_nid),
+        partition_nid, cx.graph:node_available_port(partition_nid))
+
+      cx.graph:add_edge(
+        flow.edge.HappensBefore {}, new_nid, cx.graph:node_sync_port(new_nid),
+        close_nid, cx.graph:node_sync_port(close_nid))
+    end
+  end
 end
 
-local function issue_output_copies_cross_product(cx, region_type, need_copy,
-                                                 partitions, old_loop, bounds, opened_nids)
+local function issue_output_copies_cross_product(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   assert(std.is_list_of_partitions(region_type))
   assert(false)
 end
 
-local function issue_output_copies(cx, region_type, need_copy, partitions,
-                                   old_loop, bounds, opened_nids)
+local function issue_output_copies(
+    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    opened_nids)
   if std.is_list_of_regions(region_type) then
-    issue_output_copies_partition(cx, region_type, need_copy, partitions,
-                                  old_loop, bounds, opened_nids)
+    issue_output_copies_partition(
+      cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+      opened_nids)
   elseif std.is_list_of_partitions(region_type) then
-    issue_output_copies_cross_product(cx, region_type, need_copy, partitions,
-                                      old_loop, bounds, opened_nids)
+    issue_output_copies_cross_product(
+      cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+      opened_nids)
   else
     assert(false)
   end
@@ -3837,7 +4023,7 @@ end
 
 local function rewrite_inputs(cx, old_loop, new_loop,
                               original_partitions, original_bounds,
-                              intersections, barriers, collectives, mapping)
+                              elide_copy, intersections, barriers, collectives, mapping)
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
@@ -3890,6 +4076,11 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     collective_types[collective.region_type] = true
   end
 
+  local inverse_mapping = {}
+  for k, v in pairs(mapping) do
+    if v then inverse_mapping[v] = k end
+  end
+
   -- Find mapping from old to new inputs.
   local input_nid_mapping, output_nid_mapping = find_nid_mapping(
     cx, old_loop, new_loop, intersection_types,
@@ -3918,9 +4109,10 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       end
     end
     if not need_copy:is_empty() then
+      local elide = elide_copy[region_type.partition_type]
       issue_input_copies(
-        cx, region_type, need_copy, partitions, old_loop, original_bounds,
-        opened_nids)
+        cx, region_type, need_copy, elide, partitions,
+        old_loop, original_bounds, opened_nids)
     end
   end
 
@@ -3945,8 +4137,9 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       end
     end
     if not need_copy:is_empty() then
+      local elide = elide_copy[region_type.partition_type]
       issue_output_copies(
-        cx, region_type, need_copy, partitions, old_loop, original_bounds,
+        cx, region_type, need_copy, elide, partitions, old_loop, original_bounds,
         opened_nids)
     end
   end
@@ -4023,6 +4216,17 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     old_loop, new_loop)
 end
 
+local function compose_mapping(old, new)
+  local result = {}
+  for k, v in pairs(new) do
+    result[k] = v
+  end
+  for k, v in pairs(old) do
+    result[k] = (new[v] == nil and v) or new[v]
+  end
+  return result
+end
+
 local function spmdize(cx, loop)
   --  1. Extract shard (deep copy).
   --  2. Normalize communication graph (remove opens).
@@ -4053,7 +4257,7 @@ local function spmdize(cx, loop)
     shard_cx, shard_loop, original_intersections)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
 
-  local shard_mapping = apply_mapping(scratch_field_mapping, intersection_mapping)
+  local shard_mapping = compose_mapping(scratch_field_mapping, intersection_mapping)
   local outer_shard_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local outer_shard_block = make_block(
     outer_shard_cx, shard_cx.graph, shard_mapping, span)
@@ -4061,21 +4265,26 @@ local function spmdize(cx, loop)
 
   local shard_task = flow_outline_task.entry(
     outer_shard_cx.graph, outer_shard_block, "shard", true)
+  local elided_lists, elided_intersections, elided_barriers, elide_copy, elided_mapping =
+    rewrite_list_elision(outer_shard_cx, lists, intersections, barriers, mapping)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
-    outer_shard_cx, bounds, lists, intersections, barriers, mapping)
+      outer_shard_cx, bounds, elided_lists, elided_intersections,
+      elided_barriers, compose_mapping(mapping, elided_mapping))
 
   local dist_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local dist_loop = make_distribution_loop(
     dist_cx, outer_shard_cx.graph, shard_index, shard_stride, original_bounds,
-    slice_mapping, span)
+    compose_mapping(elided_mapping, slice_mapping), span)
   downgrade_simultaneous_coherence(dist_cx)
 
   local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
 
-  local inputs_mapping = apply_mapping(mapping, slice_mapping)
+  local inputs_mapping = compose_mapping(
+    mapping, compose_mapping(elided_mapping, slice_mapping))
+
   rewrite_inputs(cx, loop, epoch_loop, original_partitions, original_bounds,
-                 new_intersections, new_barriers, collectives, inputs_mapping)
+                 elide_copy, new_intersections, new_barriers, collectives, inputs_mapping)
 
   return epoch_loop
 end
