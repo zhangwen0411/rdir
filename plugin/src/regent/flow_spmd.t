@@ -3094,10 +3094,10 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
   return nid
 end
 
-local function make_must_epoch(cx, block, span)
+local function make_must_epoch(cx, block, options, span)
   local label = flow.node.ctrl.MustEpoch {
     block = block,
-    options = ast.default_options(),
+    options = options { spmd = ast.options.Forbid { value = false } },
     span = span,
   }
   local nid = cx.graph:add_node(label)
@@ -4244,6 +4244,7 @@ local function spmdize(cx, loop)
   -- 14. Rewrite inputs/outputs.
 
   local span = cx.graph:node_label(loop).span
+  local options = cx.graph:node_label(loop).options
 
   local shard_graph, shard_loop = flow_extract_subgraph.entry(cx.graph, loop)
 
@@ -4278,7 +4279,7 @@ local function spmdize(cx, loop)
     compose_mapping(elided_mapping, slice_mapping), span)
   downgrade_simultaneous_coherence(dist_cx)
 
-  local epoch_loop = make_must_epoch(cx, dist_cx.graph, span)
+  local epoch_loop = make_must_epoch(cx, dist_cx.graph, options, span)
 
   local inputs_mapping = compose_mapping(
     mapping, compose_mapping(elided_mapping, slice_mapping))
