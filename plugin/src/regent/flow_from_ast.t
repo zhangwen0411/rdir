@@ -975,9 +975,13 @@ local function preopen_region_tree_top(cx, path, privilege, field_path)
     return
   end
   for index = #path, 2, -1 do
+    -- This opens in write mode (rather than the requested mode)
+    -- because preopen is occaisionally used in contexts where two
+    -- disjoint regions with a common ancestor are used with
+    -- conflicting privileges.
     cx:state(field_path):ensure(path[index])
-    cx:state(field_path):set_mode(path[index], desired_mode)
-    cx:state(field_path):set_op(path[index], desired_op)
+    cx:state(field_path):set_mode(path[index], modes.write)
+    cx:state(field_path):set_op(path[index], false)
   end
 end
 
