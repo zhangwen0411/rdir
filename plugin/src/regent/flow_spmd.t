@@ -1339,7 +1339,7 @@ local function issue_allocate_scratch_fields(cx, shard_loop, scratch_fields)
       }
       local create_nid = cx.graph:add_node(create_label)
 
-      local fid_nid = cx.graph:add_node(fid_label)
+      local fid_nid = find_first_instance(cx, fid_label)
 
       cx.graph:add_edge(
         flow.edge.HappensBefore {}, create_nid, cx.graph:node_sync_port(create_nid),
@@ -1363,17 +1363,31 @@ local function is_reduction_communicated(cx, nid)
   return op and #copy_nids > 0
 end
 
-local function rewrite_reduction_scratch_fields(cx, shard_loop)
-  -- FIXME: This needs to be made field-aware. The AST generator will
-  -- assume all fields are coming from the same region, so it'll pick
-  -- one and miss the scratch field created here.
+local function raise_scratch_fields(cx, loop_nid, scratch_fields)
+  local loop_label = cx.graph:node_label(loop_nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
 
-  local shard_label = cx.graph:node_label(shard_loop)
-  local block_cx = cx:new_graph_scope(shard_label.block)
+  for _, s1 in scratch_fields:items() do
+    for _, fid in s1:items() do
+      local fid_label, _ = unpack(fid)
+      if find_first_instance(block_cx, fid_label, true) then
+        local nid = find_first_instance(cx, fid_label, true) or
+          cx.graph:add_node(fid_label)
+        local port = cx.graph:node_available_port(loop_nid)
+        cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          nid, cx.graph:node_result_port(nid),
+          loop_nid, port)
+      end
+    end
+  end
+end
 
-  -- Rewrite reduction copies to use scratch fields.
-  local mapping = {}
-  local scratch_fields = data.new_recursive_map(1)
+local function rewrite_reduction_scratch_fields_subgraph(
+    cx, nid, scratch_fields, mapping)
+  local loop_label = cx.graph:node_label(nid)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+
   local data_nids = block_cx.graph:filter_nodes(
     function(_, label) return label:is(flow.node.data) end)
   local touched_nids = {}
@@ -1404,6 +1418,21 @@ local function rewrite_reduction_scratch_fields(cx, shard_loop)
       end
     end
   end
+
+  raise_scratch_fields(cx, nid, scratch_fields)
+end
+
+local function rewrite_reduction_scratch_fields(cx, shard_loop)
+  -- Rewrite reduction copies to use scratch fields.
+  local mapping = {}
+  local scratch_fields = data.new_recursive_map(1)
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        rewrite_reduction_scratch_fields_subgraph(inner_cx, nid, scratch_fields, mapping)
+      end
+    end)
 
   -- Raise scratch field IDs to level of outer loop.
   issue_allocate_scratch_fields(cx, shard_loop, scratch_fields)
@@ -4222,7 +4251,7 @@ local function compose_mapping(old, new)
     result[k] = v
   end
   for k, v in pairs(old) do
-    result[k] = (new[v] == nil and v) or new[v]
+    result[k] = (new[v] ~= nil and new[v]) or v
   end
   return result
 end
@@ -4253,7 +4282,7 @@ local function spmdize(cx, loop)
   local lists, original_partitions, mapping = rewrite_shard_partitions(shard_cx)
   local original_intersections, barriers = rewrite_communication(shard_cx, shard_loop, mapping)
   local collectives = rewrite_scalar_communication(shard_cx)
-  local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop) -- FIXME: nested
+  local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop)
   local intersections, intersection_mapping = rewrite_shard_intersections(
     shard_cx, shard_loop, original_intersections)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
@@ -4317,7 +4346,7 @@ end
 
 function flow_spmd.graph(cx, graph)
   assert(flow.is_graph(graph))
-  local cx = cx:new_graph_scope(graph:copy())
+  local cx = cx:new_graph_scope(graph)
   local loops = cx.graph:filter_nodes(
     function(_, label) return label:is(flow.node.ctrl) end)
   spmdize_eligible_loops(cx, loops)
@@ -4325,7 +4354,16 @@ function flow_spmd.graph(cx, graph)
 end
 
 function flow_spmd.stat_task(cx, node)
-  return node { body = flow_spmd.graph(cx, node.body) }
+  local body = node.body:deepcopy()
+  body:map_nodes_recursive(
+    function(graph, nid, label)
+      if label:is(flow.node.ctrl) then
+        return label { block = flow_spmd.graph(cx, label.block) }
+      end
+      return label
+    end)
+  body = flow_spmd.graph(cx, body)
+  return node { body = body }
 end
 
 function flow_spmd.stat_top(cx, node)

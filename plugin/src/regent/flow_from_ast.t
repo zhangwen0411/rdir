@@ -2370,7 +2370,7 @@ function flow_from_ast.stat_while(cx, node)
       open_region_tree(loop_cx, region_type, nil, privilege_map))
   end
   local body = as_while_body_stat(
-    loop_cx, body_cx.graph, body_inputs, node.options, node.span)
+    loop_cx, body_cx.graph, body_inputs, ast.default_options(), node.span)
 
   local loop_inputs = terralib.newlist()
   for region_type, privilege_map in pairs(loop_outer_privileges) do
