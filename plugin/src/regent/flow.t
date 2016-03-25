@@ -577,19 +577,23 @@ end
 
 function graph:traverse_immediate_predecessors(fn, node)
   assert(self:has_node(node))
-  for from_node, _ in pairs(self.backedges[node]) do
-    local from_node_label = self:node_label(from_node)
-    local result = {fn(from_node, from_node_label)}
-    if result[1] ~= nil then return unpack(result) end
+  for from_node, edges in pairs(self.backedges[node]) do
+    if #edges > 0 then
+      local from_node_label = self:node_label(from_node)
+      local result = {fn(from_node, from_node_label)}
+      if result[1] ~= nil then return unpack(result) end
+    end
   end
 end
 
 function graph:traverse_immediate_successors(fn, node)
   assert(self:has_node(node))
-  for to_node, _ in pairs(self.edges[node]) do
-    local to_node_label = self:node_label(to_node)
-    local result = {fn(to_node, to_node_label)}
-    if result[1] ~= nil then return unpack(result) end
+  for to_node, edges in pairs(self.edges[node]) do
+    if #edges > 0 then
+      local to_node_label = self:node_label(to_node)
+      local result = {fn(to_node, to_node_label)}
+      if result[1] ~= nil then return unpack(result) end
+    end
   end
 end
 
