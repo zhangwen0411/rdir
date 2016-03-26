@@ -2371,7 +2371,8 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
       local intersection_type = intersection_label.region_type
 
       local shallow_type = std.list(
-        std.list(intersection_type:subregion_dynamic()))
+        std.list(intersection_type:subregion_dynamic(), nil, nil, nil, true),
+      nil, nil, nil, true)
       local shallow_symbol = terralib.newsymbol(
         shallow_type, "shallow_" .. tostring(intersection_label.value.value))
 
@@ -2699,9 +2700,11 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
         local old_type = old_label.region_type
         local new_type = std.list(
           std.list(old_type.element_type.element_type, old_type.partition_type,
-                   new_rhs_type.privilege_depth, new_rhs_type.region_root),
+                   new_rhs_type.privilege_depth, new_rhs_type.region_root,
+                   old_type.shallow),
           old_type.partition_type,
-          new_rhs_type.privilege_depth, new_rhs_type.region_root)
+          new_rhs_type.privilege_depth, new_rhs_type.region_root,
+          old_type.shallow)
         local new_symbol = terralib.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
         cx.tree:intern_region_expr(
           new_type, ast.default_options(), old_label.value.span)
