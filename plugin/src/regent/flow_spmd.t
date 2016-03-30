@@ -2805,7 +2805,8 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
 end
 
 local function build_slice(cx, region_type, list_type, index_nid, index_label,
-                           stride_nid, stride_label, bounds_type, slice_mapping)
+                           stride_nid, stride_label, original_bounds,
+                           bounds_type, slice_mapping)
   local list_nids = cx.graph:filter_nodes(
     function(nid, label)
       return label:is(flow.node.data) and
@@ -2827,18 +2828,26 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
       }
     }
 
+    -- FIXME: Need to connect up the value of original_bounds[2].
     local compute_list = flow.node.Opaque {
       action = ast.typed.expr.IndexAccess {
         value = first_parent_list.value,
         index = ast.typed.expr.ListRange {
           start = index_label.value,
           stop = ast.typed.expr.Binary {
-            lhs = index_label.value,
-            rhs = stride_label.value,
-            op = "+",
-            expr_type = bounds_type,
+            lhs = ast.typed.expr.Binary {
+              lhs = index_label.value,
+              rhs = stride_label.value,
+              op = "+",
+              expr_type = std.as_read(index_label.value.expr_type),
+              options = ast.default_options(),
+              span = index_label.value.span,
+            },
+            rhs = original_bounds[2].value,
+            op = "min",
+            expr_type = std.as_read(index_label.value.expr_type),
             options = ast.default_options(),
-            span = first_list.value.span,
+            span = index_label.value.span,
           },
           expr_type = std.list(int),
           options = ast.default_options(),
@@ -2880,8 +2889,8 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
   end
 end
 
-local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
-                                    mapping)
+local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
+                                    intersections, barriers, mapping)
   assert(#bounds == 2)
 
   local slice_mapping = {}
@@ -2909,6 +2918,7 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
         end)
     end)
 
+  -- FIXME: Need to connect up the value of original_bounds[2].
   local compute_bounds = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = bounds:map(function(bound) return bound.value.value end),
@@ -2917,9 +2927,16 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
       values = terralib.newlist({
           index_label.value,
           ast.typed.expr.Binary {
-            lhs = index_label.value,
-            rhs = stride_label.value,
-            op = "+",
+            lhs = ast.typed.expr.Binary {
+              lhs = index_label.value,
+              rhs = stride_label.value,
+              op = "+",
+              expr_type = std.as_read(index_label.value.expr_type),
+              options = ast.default_options(),
+              span = index_label.value.span,
+            },
+            rhs = original_bounds[2].value,
+            op = "min",
             expr_type = std.as_read(index_label.value.expr_type),
             options = ast.default_options(),
             span = index_label.value.span,
@@ -2954,7 +2971,7 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
   for _, list_type in lists:keys() do
     build_slice(
       cx, list_type, list_type, index_nid, index_label, stride_nid, stride_label,
-      bounds_type, slice_mapping)
+      original_bounds, bounds_type, slice_mapping)
   end
 
   -- Build list slices for intersections.
@@ -2970,7 +2987,7 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
 
       local parent = build_slice(
         cx, list_type, list_type, index_nid, index_label,
-        stride_nid, stride_label, bounds_type, slice_mapping)
+        stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
       assert(parent)
 
       for field_path, intersection_label in i2:items() do
@@ -2990,25 +3007,25 @@ local function rewrite_shard_slices(cx, bounds, lists, intersections, barriers,
         local empty_in_region = empty_in.region_type
         local empty_in_parent = build_slice(
           cx, empty_in_region, empty_in_type, index_nid, index_label,
-          stride_nid, stride_label, bounds_type, slice_mapping)
+          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
 
         local empty_out_type = std.as_read(empty_out.value.expr_type)
         local empty_out_region = empty_out.region_type
         local empty_out_parent = build_slice(
           cx, empty_out_region, empty_out_type, index_nid, index_label,
-          stride_nid, stride_label, bounds_type, slice_mapping)
+          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
 
         local full_in_type = std.as_read(full_in.value.expr_type)
         local full_in_region = full_in.region_type
         local full_in_parent = build_slice(
           cx, full_in_region, full_in_type, index_nid, index_label,
-          stride_nid, stride_label, bounds_type, slice_mapping)
+          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
 
         local full_out_type = std.as_read(full_out.value.expr_type)
         local full_out_region = full_out.region_type
         local full_out_parent = build_slice(
           cx, full_out_region, full_out_type, index_nid, index_label,
-          stride_nid, stride_label, bounds_type, slice_mapping)
+          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
 
         assert(empty_in_parent and empty_out_parent and
                  full_in_parent and full_out_parent)
@@ -4302,7 +4319,7 @@ local function spmdize(cx, loop)
     rewrite_list_elision(outer_shard_cx, lists, intersections, barriers, mapping)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
-      outer_shard_cx, bounds, elided_lists, elided_intersections,
+      outer_shard_cx, bounds, original_bounds, elided_lists, elided_intersections,
       elided_barriers, compose_mapping(mapping, elided_mapping))
 
   local dist_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
