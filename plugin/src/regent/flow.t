@@ -900,8 +900,10 @@ function graph:printpretty(ids, types, metadata)
       node:is(flow.node.ctrl)
     then
       shape = "rectangle"
-    elseif node:is(flow.node.Open) or node:is(flow.node.Close) then
-      shape = "diamond"
+    elseif node:is(flow.node.Open) then
+      shape = "polygon, sides = 3, orientation = 90"
+    elseif node:is(flow.node.Close) then
+      shape = "polygon, sides = 3, orientation = 270"
     elseif node:is(flow.node.data) or
       node:is(flow.node.Constant) or node:is(flow.node.Function)
     then
