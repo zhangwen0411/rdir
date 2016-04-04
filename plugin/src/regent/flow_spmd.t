@@ -2608,6 +2608,82 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   return bounds_labels, original_bounds_labels
 end
 
+local function synchronize_shard_start(cx, shard_loop)
+  local shard_label = cx.graph:node_label(shard_loop)
+
+  local precondition_nids = cx.graph:filter_nodes(
+    function(_, label) return label:is(flow.node.Opaque) end)
+
+  local barrier_type = std.phase_barrier
+  local barrier_symbol = terralib.newsymbol(barrier_type, "start_barrier")
+  local barrier_label = make_variable_label(cx, barrier_symbol, barrier_type, shard_label.span)
+  local barrier_nid = cx.graph:add_node(barrier_label)
+
+  local sync_label = flow.node.Opaque {
+    action = ast.typed.stat.Block {
+      block = ast.typed.Block {
+        stats = terralib.newlist({
+            ast.typed.stat.Expr {
+              expr = ast.typed.expr.Arrive {
+                barrier = barrier_label.value,
+                value = false,
+                expr_type = barrier_type,
+                options = ast.default_options(),
+                span = shard_label.span,
+              },
+              options = ast.default_options(),
+              span = shard_label.span,
+            },
+            ast.typed.stat.Assignment {
+              lhs = terralib.newlist({barrier_label.value}),
+              rhs = terralib.newlist({
+                  ast.typed.expr.Advance {
+                    value = barrier_label.value,
+                    expr_type = barrier_type,
+                    options = ast.default_options(),
+                    span = shard_label.span,
+                  }
+              }),
+              options = ast.default_options(),
+              span = shard_label.span,
+            },
+            ast.typed.stat.Expr {
+              expr = ast.typed.expr.Await {
+                barrier = barrier_label.value,
+                expr_type = terralib.types.unit,
+                options = ast.default_options(),
+                span = shard_label.span,
+              },
+              options = ast.default_options(),
+              span = shard_label.span,
+            },
+        }),
+        span = shard_label.span,
+      },
+      options = ast.default_options(),
+      span = shard_label.span,
+    }
+  }
+  local sync_nid = cx.graph:add_node(sync_label)
+
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    barrier_nid, cx.graph:node_result_port(barrier_nid),
+    sync_nid, cx.graph:node_available_port(sync_nid))
+  for _, nid in ipairs(precondition_nids) do
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {},
+      nid, cx.graph:node_sync_port(nid),
+      sync_nid, cx.graph:node_sync_port(sync_nid))
+  end
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    sync_nid, cx.graph:node_sync_port(sync_nid),
+    shard_loop, cx.graph:node_sync_port(shard_loop))
+
+  return barrier_label
+end
+
 local function select_copy_elision(cx, lists, inverse_mapping)
   -- In general, partitions must be duplicated to avoid conflicts. But
   -- disjoint partitions (at most one, if there are multiple such
@@ -3184,7 +3260,7 @@ local function find_nid_mapping(cx, old_loop, new_loop,
                                 intersection_types,
                                 barriers_empty_in, barriers_empty_out,
                                 barriers_full_in, barriers_full_out,
-                                collective_types, mapping)
+                                collective_types, start_barrier, mapping)
   local function matches(new_label)
     return function(nid, label)
       if label:is(flow.node.data) then
@@ -3217,7 +3293,8 @@ local function find_nid_mapping(cx, old_loop, new_loop,
                  barriers_empty_out[new_input.region_type] or
                  barriers_full_in[new_input.region_type] or
                  barriers_full_out[new_input.region_type] or
-                 collective_types[new_input.region_type])
+                 collective_types[new_input.region_type] or
+                 new_input.region_type == start_barrier.region_type)
         -- Skip intersections, phase barriers, collectives.
       else
         input_nid_mapping[new_input.region_type][new_input.field_path][
@@ -3239,7 +3316,8 @@ local function find_nid_mapping(cx, old_loop, new_loop,
                  barriers_empty_out[new_output.region_type] or
                  barriers_full_in[new_output.region_type] or
                  barriers_full_out[new_output.region_type] or
-                 collective_types[new_input.region_type])
+                 collective_types[new_input.region_type] or
+                 new_input.region_type == start_barrier.region_type)
         -- Skip intersections, phase barriers, collectives.
       else
         output_nid_mapping[new_output.region_type][new_output.field_path][
@@ -4002,6 +4080,70 @@ local function issue_collective_creation(cx, loop_nid, collective_nid, op, bound
     collective_nid, cx.graph:node_sync_port(collective_nid))
 end
 
+local function issue_single_barrier_creation(cx, loop_nid, barrier_nid, bounds)
+  local barrier = cx.graph:node_label(barrier_nid)
+  local barrier_type = std.as_read(barrier.value.expr_type)
+
+  local stride = make_constant(shard_size, int, barrier.value.span)
+  local stride_minus_1 = make_constant(shard_size - 1, int, barrier.value.span)
+
+  local create_label = flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({barrier.value.value}),
+      types = terralib.newlist({barrier_type}),
+      values = terralib.newlist({
+          ast.typed.expr.PhaseBarrier {
+            value = ast.typed.expr.Binary {
+              lhs = ast.typed.expr.Binary {
+                lhs = ast.typed.expr.Binary {
+                  lhs = bounds[2].value,
+                  rhs = bounds[1].value,
+                  op = "-",
+                  expr_type = int,
+                  options = ast.default_options(),
+                  span = barrier.value.span,
+                },
+                rhs = stride_minus_1,
+                op = "+",
+                expr_type = int,
+                options = ast.default_options(),
+                span = barrier.value.span,
+              },
+              rhs = stride,
+              op = "/",
+              expr_type = int,
+              options = ast.default_options(),
+              span = barrier.value.span,
+            },
+            expr_type = barrier_type,
+            options = ast.default_options(),
+            span = barrier.value.span,
+          },
+      }),
+      options = ast.default_options(),
+      span = barrier.value.span,
+    }
+  }
+  local create_nid = cx.graph:add_node(create_label)
+
+  if bounds[1]:is(flow.node.data) then
+    local bound1_nid = find_matching_input(cx, loop_nid, bounds[1].region_type, bounds[1].field_path)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), bound1_nid, cx.graph:node_result_port(bound1_nid),
+      create_nid, cx.graph:node_available_port(create_nid))
+  end
+
+  if bounds[2]:is(flow.node.data) then
+    local bound2_nid = find_matching_input(cx, loop_nid, bounds[2].region_type, bounds[2].field_path)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), bound2_nid, cx.graph:node_result_port(bound2_nid),
+      create_nid, cx.graph:node_available_port(create_nid))
+  end
+
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {}, create_nid, cx.graph:node_sync_port(create_nid),
+    barrier_nid, cx.graph:node_sync_port(barrier_nid))
+end
 
 local function merge_open_nids(cx)
   local function is_read_to_open(edge)
@@ -4072,7 +4214,8 @@ end
 
 local function rewrite_inputs(cx, old_loop, new_loop,
                               original_partitions, original_bounds,
-                              elide_copy, intersections, barriers, collectives, mapping)
+                              elide_copy, intersections, barriers, collectives,
+                              start_barrier, mapping)
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
@@ -4134,7 +4277,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   local input_nid_mapping, output_nid_mapping = find_nid_mapping(
     cx, old_loop, new_loop, intersection_types,
     barriers_empty_in, barriers_empty_out, barriers_full_in, barriers_full_out,
-    collective_types, mapping)
+    collective_types, start_barrier, mapping)
 
   -- Rewrite inputs.
   local opened_nids = data.new_recursive_map(1)
@@ -4244,6 +4387,10 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     issue_collective_creation(cx, old_loop, collective_nid, op, original_bounds)
   end
 
+  local start_barrier_nid = find_matching_input(
+    cx, new_loop, start_barrier.region_type, start_barrier.field_path)
+  issue_single_barrier_creation(cx, old_loop, start_barrier_nid, original_bounds)
+
   -- Merge open and close nodes for racing copies.
 
   -- Sometimes this algorith generates copies which have the potential
@@ -4306,6 +4453,7 @@ local function spmdize(cx, loop)
   local intersections, intersection_mapping = rewrite_shard_intersections(
     shard_cx, shard_loop, original_intersections)
   local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
+  local start_barrier = synchronize_shard_start(shard_cx, shard_loop)
 
   local shard_mapping = compose_mapping(scratch_field_mapping, intersection_mapping)
   local outer_shard_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
@@ -4334,7 +4482,8 @@ local function spmdize(cx, loop)
     mapping, compose_mapping(elided_mapping, slice_mapping))
 
   rewrite_inputs(cx, loop, epoch_loop, original_partitions, original_bounds,
-                 elide_copy, new_intersections, new_barriers, collectives, inputs_mapping)
+                 elide_copy, new_intersections, new_barriers, collectives,
+                 start_barrier, inputs_mapping)
 
   return epoch_loop
 end
