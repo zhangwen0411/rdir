@@ -2701,6 +2701,7 @@ local function select_copy_elision(cx, lists, inverse_mapping)
         if std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
           cx.tree:can_alias(old_type, other_type)
         then
+          shadowed_partitions[old_type] = other_type
           aliased = true
           break
         end
@@ -2710,7 +2711,24 @@ local function select_copy_elision(cx, lists, inverse_mapping)
       end
     end
   end
-  return elide_copy
+
+  -- Build a map of who shadows who based on which copies were elided.
+  local shadowed_partitions = data.newmap()
+  for _, list_type in lists:keys() do
+    local old_type = inverse_mapping[list_type]
+    if std.is_list_of_regions(list_type) and std.is_partition(old_type) then
+      for other_type, _ in elide_copy:items() do
+        if not std.type_eq(old_type, other_type) and
+          std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
+          cx.tree:can_alias(old_type, other_type)
+        then
+          shadowed_partitions[old_type] = other_type
+          break
+        end
+      end
+    end
+  end
+  return elide_copy, shadowed_partitions
 end
 
 local function rewrite_elided_lists(cx, lists, intersections, barriers,
@@ -2841,11 +2859,11 @@ local function rewrite_list_elision(cx, lists, intersections, barriers, mapping)
     inverse_mapping[v] = k
   end
 
-  local elide_copy = select_copy_elision(cx, lists, inverse_mapping)
+  local elide_copy, shadowed_partitions = select_copy_elision(cx, lists, inverse_mapping)
   local elided_lists, elided_intersections, elided_barriers, elided_mapping =
     rewrite_elided_lists(cx, lists, intersections, barriers,
                          inverse_mapping, elide_copy)
-  return elided_lists, elided_intersections, elided_barriers, elide_copy, elided_mapping
+  return elided_lists, elided_intersections, elided_barriers, elide_copy, shadowed_partitions, elided_mapping
 end
 
 local function get_slice_type_and_symbol(cx, region_type, list_type, label)
@@ -3482,8 +3500,10 @@ local function find_close_region(cx, nid, loop)
   return writes[1]
 end
 
-local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
-                                 src_type, dst_type, bounds, span)
+local function issue_zipped_copy_interior(
+    cx, src_nids, dst_in_nids, dst_out_nids,
+    src_type, dst_type, bounds, span)
+
   -- Build the copy loop.
   local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
 
@@ -3663,6 +3683,165 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
   return copy_loop_nid
 end
 
+
+local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
+                                 src_type, dst_type, bounds, shadow, span)
+  if not shadow then
+    return issue_zipped_copy_interior(
+      cx, src_nids, dst_in_nids, dst_out_nids,
+      src_type, dst_type, bounds, span)
+  else
+    local shadow_label
+    for field_path, label in shadow:items() do
+      shadow_label = label
+    end
+    assert(shadow_label and std.is_partition(shadow_label.region_type))
+
+    -- Build the outer conditional.
+    local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
+
+    -- Check the conditional.
+    local cond_type = std.rawref(&int)
+    local cond_symbol = terralib.newsymbol(int, "complete_cond")
+    local cond_label = make_variable_label(
+      block_cx, cond_symbol, int, span)
+    local cond_nid = cx.graph:add_node(cond_label)
+
+    local check = flow.node.Opaque {
+      action = ast.typed.stat.Var {
+        symbols = terralib.newlist({cond_symbol}),
+        types = terralib.newlist({int}),
+        values = terralib.newlist({
+            ast.typed.expr.Cast {
+              fn = ast.typed.expr.Function {
+                value = int,
+                expr_type = terralib.types.functype({std.untyped}, int, false),
+                options = ast.default_options(),
+                span = span,
+              },
+              arg = ast.typed.expr.Call {
+                fn = ast.typed.expr.Function {
+                  value = std.c.legion_index_partition_is_complete,
+                  expr_type = std.c.legion_index_partition_is_complete:gettype(),
+                  options = ast.default_options(),
+                  span = span,
+                },
+                args = terralib.newlist({
+                    ast.typed.expr.RawRuntime {
+                      expr_type = std.c.legion_runtime_t,
+                      options = ast.default_options(),
+                      span = span,
+                    },
+                    ast.typed.expr.RawContext {
+                      expr_type = std.c.legion_context_t,
+                      options = ast.default_options(),
+                      span = span,
+                    },
+                    ast.typed.expr.FieldAccess {
+                      value = ast.typed.expr.RawValue {
+                        value = shadow_label.value,
+                        expr_type = std.c.legion_logical_partition_t,
+                        options = ast.default_options(),
+                        span = span,
+                      },
+                      field_name = "index_partition",
+                      expr_type = std.c.legion_index_partition_t,
+                      options = ast.default_options(),
+                      span = span,
+                    },
+                }),
+                conditions = terralib.newlist({}),
+                expr_type = bool,
+                options = ast.default_options(),
+                span = span,
+              },
+              expr_type = int,
+              options = ast.default_options(),
+              span = span,
+            },
+        }),
+        options = ast.default_options(),
+        span = span,
+      }
+    }
+    local check_nid = cx.graph:add_node(check)
+    for field_path, src_nid in src_nids:items() do
+      cx.graph:add_edge(
+        flow.edge.HappensBefore {}, src_nid, cx.graph:node_sync_port(src_nid),
+        check_nid, cx.graph:node_sync_port(check_nid))
+    end
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {}, check_nid, cx.graph:node_sync_port(check_nid),
+      cond_nid, cx.graph:node_sync_port(cond_nid))
+
+    local index_type = std.rawref(&int)
+    local index_symbol = terralib.newsymbol(int, "complete_index")
+    local index_label = make_variable_label(
+      block_cx, index_symbol, int, span)
+    local index_nid = block_cx.graph:add_node(index_label)
+
+    -- Exterior of the loop:
+    local copy_loop = flow.node.ctrl.ForNum {
+      symbol = index_symbol,
+      block = block_cx.graph,
+      options = ast.default_options(),
+      span = span,
+    }
+    local copy_loop_nid = cx.graph:add_node(copy_loop)
+    local bound1_nid = cond_nid
+    local bound2_nid = cx.graph:add_node(
+      flow.node.Constant { value = make_constant(1, int, span) })
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      bound1_nid, cx.graph:node_result_port(bound1_nid),
+      copy_loop_nid, 1)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      bound2_nid, cx.graph:node_result_port(bound2_nid),
+      copy_loop_nid, 2)
+    local copy_loop_src_port = cx.graph:node_available_port(copy_loop_nid)
+    for field_path, src_nid in src_nids:items() do
+      cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), src_nid, cx.graph:node_result_port(src_nid),
+        copy_loop_nid, copy_loop_src_port)
+    end
+    local copy_loop_dst_port = cx.graph:node_available_port(copy_loop_nid)
+    for field_path, dst_in_nid in dst_in_nids:items() do
+      local dst_out_nid = dst_out_nids[field_path]
+      cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), dst_in_nid, cx.graph:node_result_port(dst_in_nid),
+        copy_loop_nid, copy_loop_dst_port)
+      cx.graph:add_edge(
+        flow.edge.Write(flow.default_mode()), copy_loop_nid, copy_loop_dst_port,
+        dst_out_nid, cx.graph:node_available_port(dst_out_nid))
+    end
+
+    -- Interior of loop:
+
+    local inner_src_nids = data.newmap()
+    for field_path, src_nid in src_nids:items() do
+      local inner_src_nid = block_cx.graph:add_node(cx.graph:node_label(src_nid))
+      inner_src_nids[field_path] = inner_src_nid
+    end
+
+    local inner_dst_in_nids = data.newmap()
+    for field_path, dst_in_nid in dst_in_nids:items() do
+      local inner_dst_in_nid = block_cx.graph:add_node(cx.graph:node_label(dst_in_nid))
+      inner_dst_in_nids[field_path] = inner_dst_in_nid
+    end
+
+    local inner_dst_out_nids = data.newmap()
+    for field_path, dst_out_nid in dst_out_nids:items() do
+      local inner_dst_out_nid = block_cx.graph:add_node(cx.graph:node_label(dst_out_nid))
+      inner_dst_out_nids[field_path] = inner_dst_out_nid
+    end
+
+    return issue_zipped_copy_interior(
+      block_cx, inner_src_nids, inner_dst_in_nids, inner_dst_out_nids,
+      src_type, dst_type, bounds, span)
+  end
+end
+
 local function issue_input_copies_partition(
     cx, region_type, need_copy, elide, partitions, old_loop, bounds,
     opened_nids)
@@ -3734,7 +3913,7 @@ local function issue_input_copies_partition(
     local copy_nid = issue_zipped_copy(
       cx, partition_nids, name_nids, new_nids,
       std.as_read(first_partition_label.value.expr_type), region_type,
-      bounds, first_new_label.value.span)
+      bounds, false, first_new_label.value.span)
     cx.graph:copy_incoming_edges(
       function(edge) return edge.label:is(flow.edge.HappensBefore) end,
       old_loop, copy_nid)
@@ -3818,7 +3997,7 @@ local function issue_input_copies(
 end
 
 local function issue_output_copies_partition(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
@@ -3848,7 +4027,7 @@ local function issue_output_copies_partition(
     local copy_nid = issue_zipped_copy(
       cx, new_nids, opened_partition_nids, partition_nids,
       region_type, std.as_read(first_partition_label.value.expr_type),
-      bounds, first_new_label.value.span)
+      bounds, shadow, first_new_label.value.span)
     cx.graph:copy_outgoing_edges(
       function(edge) return edge.label:is(flow.edge.HappensBefore) end,
       old_loop, copy_nid)
@@ -3873,22 +4052,22 @@ local function issue_output_copies_partition(
 end
 
 local function issue_output_copies_cross_product(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   assert(std.is_list_of_partitions(region_type))
   assert(false)
 end
 
 local function issue_output_copies(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   if std.is_list_of_regions(region_type) then
     issue_output_copies_partition(
-      cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
       opened_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_output_copies_cross_product(
-      cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
       opened_nids)
   else
     assert(false)
@@ -4214,7 +4393,7 @@ end
 
 local function rewrite_inputs(cx, old_loop, new_loop,
                               original_partitions, original_bounds,
-                              elide_copy, intersections, barriers, collectives,
+                              elide_copy, shadowed_partitions, intersections, barriers, collectives,
                               start_barrier, mapping)
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
@@ -4330,8 +4509,10 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     end
     if not need_copy:is_empty() then
       local elide = elide_copy[region_type.partition_type]
+      local shadow = shadowed_partitions[region_type.partition_type]
+      local shadow_label = shadow and partitions[mapping[shadow]]
       issue_output_copies(
-        cx, region_type, need_copy, elide, partitions, old_loop, original_bounds,
+        cx, region_type, need_copy, elide, shadow_label, partitions, old_loop, original_bounds,
         opened_nids)
     end
   end
@@ -4463,7 +4644,7 @@ local function spmdize(cx, loop)
 
   local shard_task = flow_outline_task.entry(
     outer_shard_cx.graph, outer_shard_block, "shard", true)
-  local elided_lists, elided_intersections, elided_barriers, elide_copy, elided_mapping =
+  local elided_lists, elided_intersections, elided_barriers, elide_copy, shadowed_partitions, elided_mapping =
     rewrite_list_elision(outer_shard_cx, lists, intersections, barriers, mapping)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
@@ -4482,7 +4663,7 @@ local function spmdize(cx, loop)
     mapping, compose_mapping(elided_mapping, slice_mapping))
 
   rewrite_inputs(cx, loop, epoch_loop, original_partitions, original_bounds,
-                 elide_copy, new_intersections, new_barriers, collectives,
+                 elide_copy, shadowed_partitions, new_intersections, new_barriers, collectives,
                  start_barrier, inputs_mapping)
 
   return epoch_loop
