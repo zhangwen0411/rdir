@@ -1341,6 +1341,10 @@ function analyze_privileges.expr_static_cast(cx, node, privilege_map)
   return analyze_privileges.expr(cx, node.value, reads)
 end
 
+function analyze_privileges.expr_unsafe_cast(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.value, reads)
+end
+
 function analyze_privileges.expr_ispace(cx, node, privilege_map)
   return privilege_meet(
     analyze_privileges.expr(cx, node.extent, reads),
@@ -1483,6 +1487,9 @@ function analyze_privileges.expr(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.StaticCast) then
     return analyze_privileges.expr_static_cast(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.UnsafeCast) then
+    return analyze_privileges.expr_unsafe_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Ispace) then
     return analyze_privileges.expr_ispace(cx, node, privilege_map)
@@ -2161,6 +2168,15 @@ function flow_from_ast.expr_static_cast(cx, node, privilege_map)
     privilege_map)
 end
 
+function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1) return node { value = v1 } end,
+    terralib.newlist({value}),
+    privilege_map)
+end
+
 function flow_from_ast.expr_copy(cx, node, privilege_map)
   local dst_mode = reads_writes
   if node.op then
@@ -2302,6 +2318,9 @@ function flow_from_ast.expr(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.StaticCast) then
     return flow_from_ast.expr_static_cast(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.UnsafeCast) then
+    return flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Ispace) then
     return flow_from_ast.expr_ispace(cx, node, privilege_map)
