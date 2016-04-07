@@ -2701,7 +2701,6 @@ local function select_copy_elision(cx, lists, inverse_mapping)
         if std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
           cx.tree:can_alias(old_type, other_type)
         then
-          shadowed_partitions[old_type] = other_type
           aliased = true
           break
         end
