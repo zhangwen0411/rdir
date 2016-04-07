@@ -4067,7 +4067,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
 end
 
 local function issue_input_copies_partition(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
@@ -4134,10 +4134,12 @@ local function issue_input_copies_partition(
   end
 
   if not elide then
+    shadow = false -- Just turn this off for now; needs the interior copy to really work.
+    if shadow then print("FIXME: Issuing conditional copy-in without internal copy") end
     local copy_nid = issue_zipped_copy(
       cx, partition_nids, name_nids, new_nids,
       std.as_read(first_partition_label.value.expr_type), region_type,
-      bounds, false, first_new_label.value.span)
+      bounds, shadow, first_new_label.value.span)
     cx.graph:copy_incoming_edges(
       function(edge) return edge.label:is(flow.edge.HappensBefore) end,
       old_loop, copy_nid)
@@ -4145,7 +4147,7 @@ local function issue_input_copies_partition(
 end
 
 local function issue_input_copies_cross_product(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   assert(std.is_list_of_partitions(region_type))
   local old_nids, new_nids, product_nids, first_product_label, first_new_label =
@@ -4205,15 +4207,15 @@ local function issue_input_copies_cross_product(
 end
 
 local function issue_input_copies(
-    cx, region_type, need_copy, elide, partitions, old_loop, bounds,
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
     opened_nids)
   if std.is_list_of_regions(region_type) then
     issue_input_copies_partition(
-      cx, region_type, need_copy, elide, partitions, old_loop,
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop,
       bounds, opened_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_input_copies_cross_product(
-      cx, region_type, need_copy, elide, partitions, old_loop,
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop,
       bounds, opened_nids)
   else
     assert(false)
@@ -4705,8 +4707,10 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     end
     if not need_copy:is_empty() then
       local elide = elide_copy[region_type.partition_type]
+      local shadow = shadowed_partitions[region_type.partition_type]
+      local shadow_label = shadow and partitions[mapping[shadow]]
       issue_input_copies(
-        cx, region_type, need_copy, elide, partitions,
+        cx, region_type, need_copy, elide, shadow_label, partitions,
         old_loop, original_bounds, opened_nids)
     end
   end
@@ -4736,8 +4740,8 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       local shadow = shadowed_partitions[region_type.partition_type]
       local shadow_label = shadow and partitions[mapping[shadow]]
       issue_output_copies(
-        cx, region_type, need_copy, elide, shadow_label, partitions, old_loop, original_bounds,
-        opened_nids)
+        cx, region_type, need_copy, elide, shadow_label, partitions,
+        old_loop, original_bounds, opened_nids)
     end
   end
 
