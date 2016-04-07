@@ -38,8 +38,16 @@ local flow_outline_task = require("regent/flow_outline_task")
 local flow_region_tree = require("regent/flow_region_tree")
 local flow_summarize_subgraph = require("regent/flow_summarize_subgraph")
 local flow_to_ast = require("regent/flow_to_ast")
+local optimize_config_options = require("regent/optimize_config_options")
+local optimize_divergence = require("regent/optimize_divergence")
+local optimize_futures = require("regent/optimize_futures")
+local optimize_inlines = require("regent/optimize_inlines")
+local optimize_loops = require("regent/optimize_loops")
+local optimize_traces = require("regent/optimize_traces")
+local pretty = require("regent/pretty")
 local log = require("regent/log")
 local std = require("regent/std")
+local vectorize_loops = require("regent/vectorize_loops")
 
 -- Configuration Variables
 
@@ -1710,6 +1718,221 @@ function issue_barrier_await_loop(cx, bar_list_nid, use_nid)
   issue_barrier_await(block_cx, block_bar_nid, block_compute_nid)
 end
 
+local generate_empty_task
+do
+  local empty_task
+  function generate_empty_task(cx, span)
+    if empty_task then
+      return empty_task
+    end
+
+    local privileges = terralib.newlist()
+    local coherence_modes = data.new_recursive_map(1)
+    local flags = data.new_recursive_map(2)
+    local conditions = {}
+    local constraints = false
+    local return_type = int
+
+    local name = data.newtuple("empty_task_" .. tostring(terralib.newsymbol(return_type)))
+    local prototype = std.newtask(name)
+    local task_type = terralib.types.functype(
+      terralib.newlist(), return_type, false)
+    prototype:settype(task_type)
+    prototype:set_param_symbols(terralib.newlist())
+    prototype:setprivileges(privileges)
+    prototype:set_coherence_modes(coherence_modes)
+    prototype:set_flags(flags)
+    prototype:set_conditions(conditions)
+    prototype:set_param_constraints(constraints)
+    prototype:set_constraints(cx.tree.constraints)
+    prototype:set_region_universe(cx.tree.region_universe)
+
+    local ast = ast.typed.stat.Task {
+      name = name,
+      params = terralib.newlist(),
+      return_type = return_type,
+      privileges = privileges,
+      coherence_modes = coherence_modes,
+      flags = flags,
+      conditions = conditions,
+      constraints = constraints,
+      body = ast.typed.Block {
+        stats = terralib.newlist({
+            ast.typed.stat.Return {
+              value = ast.typed.expr.Constant {
+                value = 0,
+                expr_type = return_type,
+                options = ast.default_options(),
+                span = span,
+              },
+              options = ast.default_options(),
+              span = span,
+            },
+        }),
+        span = span,
+      },
+      config_options = ast.TaskConfigOptions {
+        leaf = false,
+        inner = false,
+        idempotent = false,
+      },
+      region_divergence = false,
+      prototype = prototype,
+      options = ast.default_options(),
+      span = span,
+    }
+
+    -- Hack: Can't include passes here, because that would create a
+    -- cyclic dependence. Name each optimization individually.
+
+    -- passes.optimize(ast)
+    if std.config["index-launches"] then ast = optimize_loops.entry(ast) end
+    if std.config["futures"] then ast = optimize_futures.entry(ast) end
+    print("FIXME: Inline optimization disabled while generating empty task")
+    -- if std.config["inlines"] then ast = optimize_inlines.entry(ast) end
+    if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
+    if std.config["trace"] then ast = optimize_traces.entry(ast) end
+    if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
+    if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
+
+    if std.config["pretty"] then print(pretty.entry(ast)) end
+    ast = codegen.entry(ast)
+
+    empty_task = ast
+    return ast
+  end
+end
+
+local terra block_on_future(x : int) end
+
+local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inner_sync_points)
+  local use_label = cx.graph:node_label(use_nid)
+
+  local var_nid
+  if inner_sync_points[use_nid] then
+    var_nid = inner_sync_points[use_nid]
+  else
+    local var_type = int
+    local var_symbol = terralib.newsymbol(var_type, "inner_sync_point")
+    local var_label = make_variable_label(cx, var_symbol, var_type, use_label.span)
+    var_nid = cx.graph:add_node(var_label)
+    inner_sync_points[use_nid] = var_nid
+
+    local def_label = flow.node.Opaque {
+      action = ast.typed.stat.Var {
+        symbols = terralib.newlist({var_symbol}),
+        values = terralib.newlist({
+            ast.typed.expr.Constant {
+              value = 0,
+              expr_type = var_type,
+              options = ast.default_options(),
+              span = use_label.span,
+            }
+        }),
+        types = terralib.newlist({var_type}),
+        options = ast.default_options(),
+        span = use_label.span,
+      }
+    }
+    local def_nid = cx.graph:add_node(def_label)
+    cx.graph:add_edge(
+      flow.edge.HappensBefore {},
+      def_nid, cx.graph:node_sync_port(def_nid),
+      var_nid, cx.graph:node_sync_port(var_nid))
+
+    -- Force execution to block by consuming the value.
+    local sink_label = flow.node.Function {
+      value = ast.typed.expr.Function {
+        value = block_on_future,
+        expr_type = wait_for:gettype(),
+        options = ast.default_options(),
+        span = use_label.span,
+      }
+    }
+    local sink_nid = cx.graph:add_node(sink_label)
+
+    local consume_label = flow.node.Task {
+      opaque = true,
+      expr_type = terralib.types.unit,
+      options = ast.default_options(),
+      span = use_label.span,
+    }
+    local consume_nid = cx.graph:add_node(consume_label)
+
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      sink_nid, cx.graph:node_result_port(sink_nid),
+      consume_nid, 1)
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      var_nid, cx.graph:node_result_port(var_nid),
+      consume_nid, 2)
+
+    if not cx.graph:reachable(use_nid, after_nid) then
+      cx.graph:add_edge(
+        flow.edge.HappensBefore {},
+        consume_nid, cx.graph:node_sync_port(consume_nid),
+        use_nid, cx.graph:node_sync_port(use_nid))
+    end
+  end
+
+  local empty_task = generate_empty_task(cx, use_label.span)
+
+  local task_label = flow.node.Function {
+    value = ast.typed.expr.Function {
+      value = empty_task,
+      expr_type = empty_task:gettype(),
+      options = ast.default_options(),
+      span = use_label.span,
+    }
+  }
+  local task_nid = cx.graph:add_node(task_label)
+
+  local scratch_type = int
+  local scratch_symbol = terralib.newsymbol(scratch_type)
+  local scratch_label = make_variable_label(cx, scratch_symbol, scratch_type, use_label.span){ fresh = true }
+  local scratch_nid = cx.graph:add_node(scratch_label)
+
+  local call_label = flow.node.Task {
+    opaque = false,
+    expr_type = scratch_type,
+    options = ast.default_options(),
+    span = use_label.span,
+  }
+  local call_nid = cx.graph:add_node(call_label)
+
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    task_nid, cx.graph:node_result_port(task_nid),
+    call_nid, 1)
+  cx.graph:add_edge(
+    flow.edge.Write(flow.default_mode()),
+    call_nid, cx.graph:node_result_port(call_nid),
+    scratch_nid, 0)
+
+  local reduce_label = flow.node.Reduce {
+    op = "+",
+    options = ast.default_options(),
+    span = use_label.span,
+  }
+  local reduce_nid = cx.graph:add_node(reduce_label)
+  cx.graph:add_edge(
+    flow.edge.Reduce({op = "+", coherence = flow.default_coherence(), flag = flow.default_flag()}),
+    reduce_nid, 1,
+    var_nid, cx.graph:node_result_port(var_nid))
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    scratch_nid, cx.graph:node_result_port(scratch_nid),
+    reduce_nid, 2)
+
+  issue_barrier_await(cx, bar_nid, call_nid)
+
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    after_nid, cx.graph:node_sync_port(after_nid),
+    call_nid, cx.graph:node_sync_port(call_nid))
+end
+
 -- The phase barriers here are labeled full/empty * in/out * v0/vi/vi1
 --
 --   * Full means that the producer has finished writing, and the
@@ -1728,7 +1951,7 @@ end
 --       * vn1 is beyond the existing last occurance (phase n+1)
 
 local function issue_intersection_copy_synchronization_forwards(
-    cx, dst_in_nid, dst_out_nid, copy_nid, barriers)
+    cx, dst_in_nid, dst_out_nid, copy_nid, barriers, inner_sync_points)
   local dst_label = cx.graph:node_label(dst_in_nid)
   local dst_type = dst_label.region_type
   local field_path = dst_label.field_path
@@ -1794,11 +2017,6 @@ local function issue_intersection_copy_synchronization_forwards(
       return not dominated
     end, consumer_nids)
   assert(#consumer_nids > 0)
-  for _, nid in ipairs(consumer_nids) do
-    -- Right now the synchronization will get messed up if any
-    -- consumer is an inner loop, so just assert that it's not.
-    assert(not is_inner(cx, nid), "consumer is inner loop")
-  end
 
   local function get_current_instance(cx, label)
     return find_last_instance(cx, label, true) or cx.graph:add_node(label)
@@ -1821,7 +2039,11 @@ local function issue_intersection_copy_synchronization_forwards(
 
   issue_barrier_arrive(cx, full_out_nid, copy_nid)
   for _, consumer_nid in ipairs(consumer_nids) do
-    issue_barrier_await(cx, full_in_nid, consumer_nid)
+    if is_inner(cx, consumer_nid) then
+      issue_barrier_await_blocking(cx, full_in_nid, consumer_nid, copy_nid, inner_sync_points)
+    else
+      issue_barrier_await(cx, full_in_nid, consumer_nid)
+    end
   end
 end
 
@@ -2035,7 +2257,7 @@ local function raise_barriers_backwards(cx, loop_nid, barriers)
   end
 end
 
-local function rewrite_synchronization_forwards_subgraph(cx, loop_nid, sync, barriers)
+local function rewrite_synchronization_forwards_subgraph(cx, loop_nid, sync, barriers, inner_sync_points)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
@@ -2045,7 +2267,7 @@ local function rewrite_synchronization_forwards_subgraph(cx, loop_nid, sync, bar
     if sync[nid] then
       local dst_in_nid, dst_out_nid, src_type, dst_type, field_path = unpack(sync[nid])
       issue_intersection_copy_synchronization_forwards(
-        block_cx, dst_in_nid, dst_out_nid, nid, barriers[src_type])
+        block_cx, dst_in_nid, dst_out_nid, nid, barriers[src_type], inner_sync_points)
     elseif is_inner(block_cx, nid) then
       raise_barriers_forwards(block_cx, nid, barriers)
     end
@@ -2106,11 +2328,14 @@ local function rewrite_communication(cx, shard_loop, mapping)
 
   -- Issue synchronization for each copy.
   local barriers = data.new_recursive_map(2)
+  local inner_sync_points = {}
   cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
+      if not inner_sync_points[graph] then inner_sync_points[graph] = data.newmap() end
       local inner_cx = cx:new_graph_scope(graph)
       if is_inner(inner_cx, nid) then
-        rewrite_synchronization_forwards_subgraph(inner_cx, nid, sync[graph], barriers)
+        rewrite_synchronization_forwards_subgraph(
+          inner_cx, nid, sync[graph], barriers, inner_sync_points[graph])
       end
     end)
   cx.graph:traverse_nodes_recursive(
