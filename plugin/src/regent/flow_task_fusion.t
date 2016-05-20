@@ -202,13 +202,13 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   local params = terralib.newlist()
   -- FIXME: This hack wouldn't be necessarily if codegen propertly
   -- understood symbols as params. (I.e. different symbols with the
-  -- same displayname shouldn't cause any problems.)
+  -- same name shouldn't cause any problems.)
   for _, param in ipairs(node1.params) do
     local param_type = std.type_sub(param.param_type, mapping)
-    local symbol = terralib.newsymbol(
+    local symbol = std.newsymbol(
       param_type,
-      param.symbol.displayname .. "_1"
-      -- tostring(terralib.newsymbol())
+      param.symbol:getname() .. "_1"
+      -- tostring(std.newsymbol())
     )
     symbol1_mapping[param.symbol] = symbol
     if mapping[param.param_type] then
@@ -219,10 +219,10 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   for _, param in ipairs(node2.params) do
     local param_type = std.type_sub(param.param_type, mapping)
     if not mapping[param.param_type] then
-      local symbol = terralib.newsymbol(
+      local symbol = std.newsymbol(
         param_type,
-        param.symbol.displayname .. "_2"
-        -- tostring(terralib.newsymbol())
+        param.symbol:getname() .. "_2"
+        -- tostring(std.newsymbol())
       )
       symbol2_mapping[param.symbol] = symbol
       params:insert(param { symbol = symbol, param_type = param_type })

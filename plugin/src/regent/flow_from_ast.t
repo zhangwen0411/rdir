@@ -387,7 +387,7 @@ local function add_result(cx, from_nid, expr_type, options, span)
     return from_nid
   end
 
-  local symbol = terralib.newsymbol(expr_type)
+  local symbol = std.newsymbol(expr_type)
   local region_type = cx.tree:intern_variable(expr_type, symbol, options, span)
   local label = ast.typed.expr.ID {
     value = symbol,
@@ -564,9 +564,9 @@ function analyze_regions.vars(cx)
       end
     elseif node:is(ast.typed.stat.ForNum) or node:is(ast.typed.stat.ForList) then
       local var_symbol = node.symbol
-      local var_type = node.symbol.type
+      local var_type = node.symbol:gettype()
       cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
-    elseif node:is(ast.typed.stat.Task) then
+    elseif node:is(ast.typed.top.Task) then
       for i, param in ipairs(node.params) do
         local param_type = std.rawref(&param.param_type)
         cx.tree:intern_variable(
@@ -625,7 +625,7 @@ function analyze_regions.expr(cx)
   end
 end
 
-function analyze_regions.stat_task(cx, node)
+function analyze_regions.top_task(cx, node)
   ast.traverse_node_postorder(analyze_regions.vars(cx), node)
   ast.traverse_expr_postorder(analyze_regions.expr(cx), node)
 end
@@ -706,7 +706,7 @@ local function get_region_label(cx, region_type, field_path)
       local parent = cx.tree:parent(cx.tree:parent(region_type))
       local expr_type = get_expanded_field(parent:fspace(), field_path)
       name = name {
-        value = terralib.newsymbol(expr_type),
+        value = std.newsymbol(expr_type),
         expr_type = expr_type,
       }
     end
@@ -2629,18 +2629,18 @@ function flow_from_ast.stat(cx, node)
   end
 end
 
-function flow_from_ast.stat_task(cx, node)
+function flow_from_ast.top_task(cx, node)
   local task = node.prototype
   local cx = cx:new_task_scope(task:get_constraints(),
                                task:get_region_universe())
-  analyze_regions.stat_task(cx, node)
+  analyze_regions.top_task(cx, node)
   flow_from_ast.block(cx, node.body)
   return node { body = cx.graph }
 end
 
-function flow_from_ast.stat_top(cx, node)
-  if node:is(ast.typed.stat.Task) then
-    return flow_from_ast.stat_task(cx, node)
+function flow_from_ast.top(cx, node)
+  if node:is(ast.typed.top.Task) then
+    return flow_from_ast.top_task(cx, node)
 
   else
     return node
@@ -2649,7 +2649,7 @@ end
 
 function flow_from_ast.entry(node)
   local cx = context.new_global_scope()
-  return flow_from_ast.stat_top(cx, node)
+  return flow_from_ast.top(cx, node)
 end
 
 return flow_from_ast

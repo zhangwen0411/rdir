@@ -124,7 +124,7 @@ local function gather_params(cx, nid)
       end
       if not (label:is(flow.node.Constant) or label:is(flow.node.Function)) then
         result:insert(
-          ast.typed.stat.TaskParam {
+          ast.typed.top.TaskParam {
             symbol = label.value.value,
             param_type = std.as_read(label.value.expr_type),
             options = label.value.options,
@@ -378,7 +378,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
   local body, body_nid = flow_extract_subgraph.entry(cx.graph, nid)
   local return_type = gather_return(cx:new_graph_scope(body), body_nid)
 
-  local name = tostring(terralib.newsymbol())
+  local name = tostring(std.newsymbol())
   if prefix then name = prefix .. "_" .. name end
   name = data.newtuple(name)
   local prototype = std.newtask(name)
@@ -395,7 +395,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
   prototype:set_constraints(cx.tree.constraints)
   prototype:set_region_universe(cx.tree.region_universe)
 
-  local ast = ast.typed.stat.Task {
+  local ast = ast.typed.top.Task {
     name = name,
     params = params,
     return_type = return_type,
@@ -546,7 +546,7 @@ local function add_result(cx, original_nid, call_nid, return_type)
     assert(input_nid)
 
     -- Create a node to represent the task result.
-    local tmp_symbol = terralib.newsymbol(std.as_read(output_label.value.expr_type))
+    local tmp_symbol = std.newsymbol(std.as_read(output_label.value.expr_type))
     local tmp_label = output_label {
       value = output_label.value {
         value = tmp_symbol,

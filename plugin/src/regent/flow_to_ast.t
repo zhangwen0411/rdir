@@ -899,13 +899,13 @@ function flow_to_ast.graph(cx, graph)
   }
 end
 
-function flow_to_ast.stat_task(cx, node)
+function flow_to_ast.top_task(cx, node)
   return node { body = flow_to_ast.graph(cx, node.body) }
 end
 
-function flow_to_ast.stat_top(cx, node)
-  if node:is(ast.typed.stat.Task) then
-    return flow_to_ast.stat_task(cx, node)
+function flow_to_ast.top(cx, node)
+  if node:is(ast.typed.top.Task) then
+    return flow_to_ast.top_task(cx, node)
 
   else
     return node
@@ -914,7 +914,7 @@ end
 
 function flow_to_ast.entry(node)
   local cx = context.new_global_scope()
-  return flow_to_ast.stat_top(cx, node)
+  return flow_to_ast.top(cx, node)
 end
 
 return flow_to_ast

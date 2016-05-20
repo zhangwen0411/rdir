@@ -165,7 +165,7 @@ function region_tree:intern_region_expr(expr_type, options, span)
 
   self.region_universe[region_type] = true
 
-  local symbol = terralib.newsymbol(region_type)
+  local symbol = std.newsymbol(region_type)
   self.region_symbols[region_type] = symbol
   self.region_var_types[region_type] = expr_type
   self.region_option_sets[region_type] = options
@@ -197,7 +197,7 @@ function region_tree:intern_region_point_expr(parent, index, options, span)
 
   self.region_universe[subregion] = true
 
-  local symbol = terralib.newsymbol(subregion)
+  local symbol = std.newsymbol(subregion)
   self.region_symbols[subregion] = symbol
   self.region_var_types[subregion] = subregion
   self.region_option_sets[subregion] = options

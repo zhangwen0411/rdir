@@ -1019,7 +1019,7 @@ local function rewrite_shard_partitions(cx)
         local region_type = value_type:parent_region()
         local expr_type = std.list(
           std.region(
-            terralib.newsymbol(std.ispace(region_type:ispace().index_type)),
+            std.newsymbol(std.ispace(region_type:ispace().index_type)),
             region_type:fspace()),
           value_type)
         for other_region, _ in pairs(cx.tree.region_universe) do
@@ -1057,7 +1057,7 @@ local function rewrite_shard_partitions(cx)
         if not mapping[region_type] then
           new_region_type = make_fresh_type(graph_cx, region_type, label.value.span)
           mapping[region_type] = new_region_type
-          symbols[region_type] = terralib.newsymbol(
+          symbols[region_type] = std.newsymbol(
             mapping[region_type], "shard_" .. tostring(label.value.value))
         else
           new_region_type = mapping[region_type]
@@ -1123,7 +1123,7 @@ local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make
       local old_indexed_type = old_indexed_label.region_type
 
       local new_indexed_type = make_fresh_type(cx, old_indexed_type, old_indexed_label.value.span)
-      local new_indexed_symbol = terralib.newsymbol(new_indexed_type, "scratch_" .. tostring(old_indexed_label.value.value))
+      local new_indexed_symbol = std.newsymbol(new_indexed_type, "scratch_" .. tostring(old_indexed_label.value.value))
       rewrite_interior_regions(cx, old_indexed_type, new_indexed_type, new_indexed_symbol, make_fresh_type)
     end
   end
@@ -1135,7 +1135,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
   local make_fresh_type = function(cx, value_type, span)
     if std.is_region(value_type) then
       local expr_type = std.region(
-        terralib.newsymbol(std.ispace(value_type:ispace().index_type)),
+        std.newsymbol(std.ispace(value_type:ispace().index_type)),
         value_type:fspace())
       cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
       return expr_type
@@ -1163,7 +1163,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
       fid_label, fid_nid = unpack(scratch_fields[old_type][field_path])
     else
       local fid_type = std.c.legion_field_id_t[1]
-      local fid_symbol = terralib.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
+      local fid_symbol = std.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
       fid_label = make_variable_label(cx, fid_symbol, fid_type, old_label.value.span)
       fid_nid = cx.graph:add_node(fid_label)
       scratch_fields[old_type][field_path] = data.newtuple(fid_label, fid_nid)
@@ -1188,7 +1188,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
 
   -- Name the (with scratch fields) type.
   local new_type = name_type
-  local new_symbol = terralib.newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
+  local new_symbol = std.newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
   mapping[old_type] = new_type
 
   name_label = flow.node.Opaque {
@@ -1508,7 +1508,7 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid, op,
     if not intersection_label then
       local intersection_type = std.list(
         std.list(dst_type:subregion_dynamic(), nil, 1), nil, 1)
-      local intersection_symbol = terralib.newsymbol(
+      local intersection_symbol = std.newsymbol(
         intersection_type,
         "intersection_" .. tostring(src_label.value.value) .. "_" ..
           tostring(dst_label.value.value))
@@ -1619,7 +1619,7 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
   local bar_type = bar_list_type.element_type
   local block_bar_list_nid = cx.graph:add_node(bar_list_label)
 
-  local bar_symbol = terralib.newsymbol(bar_type, "bar_" .. tostring(bar_list_label.value.value))
+  local bar_symbol = std.newsymbol(bar_type, "bar_" .. tostring(bar_list_label.value.value))
   local bar_label = make_variable_label(
     cx, bar_symbol, bar_type, bar_list_label.value.span) { fresh = true }
   local block_bar_nid = cx.graph:add_node(bar_label)
@@ -1733,10 +1733,9 @@ do
     local constraints = false
     local return_type = int
 
-    local name = data.newtuple("empty_task_" .. tostring(terralib.newsymbol(return_type)))
+    local name = data.newtuple("empty_task_" .. tostring(std.newsymbol(return_type)))
     local prototype = std.newtask(name)
-    local task_type = terralib.types.functype(
-      terralib.newlist(), return_type, false)
+    local task_type = {} -> return_type
     prototype:settype(task_type)
     prototype:set_param_symbols(terralib.newlist())
     prototype:setprivileges(privileges)
@@ -1747,7 +1746,7 @@ do
     prototype:set_constraints(cx.tree.constraints)
     prototype:set_region_universe(cx.tree.region_universe)
 
-    local ast = ast.typed.stat.Task {
+    local ast = ast.typed.top.Task {
       name = name,
       params = terralib.newlist(),
       return_type = return_type,
@@ -1813,7 +1812,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
     var_nid = inner_sync_points[use_nid]
   else
     local var_type = int
-    local var_symbol = terralib.newsymbol(var_type, "inner_sync_point")
+    local var_symbol = std.newsymbol(var_type, "inner_sync_point")
     local var_label = make_variable_label(cx, var_symbol, var_type, use_label.span)
     var_nid = cx.graph:add_node(var_label)
     inner_sync_points[use_nid] = var_nid
@@ -1889,7 +1888,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
   local task_nid = cx.graph:add_node(task_label)
 
   local scratch_type = int
-  local scratch_symbol = terralib.newsymbol(scratch_type)
+  local scratch_symbol = std.newsymbol(scratch_type)
   local scratch_label = make_variable_label(cx, scratch_symbol, scratch_type, use_label.span){ fresh = true }
   local scratch_nid = cx.graph:add_node(scratch_label)
 
@@ -1963,22 +1962,22 @@ local function issue_intersection_copy_synchronization_forwards(
   else
     local bar_type = std.list(std.list(std.phase_barrier))
 
-    local empty_in_symbol = terralib.newsymbol(
+    local empty_in_symbol = std.newsymbol(
       bar_type, "empty_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     empty_in = make_variable_label(
       cx, empty_in_symbol, bar_type, dst_label.value.span)
 
-    local empty_out_symbol = terralib.newsymbol(
+    local empty_out_symbol = std.newsymbol(
       bar_type, "empty_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     empty_out = make_variable_label(
       cx, empty_out_symbol, bar_type, dst_label.value.span)
 
-    local full_in_symbol = terralib.newsymbol(
+    local full_in_symbol = std.newsymbol(
       bar_type, "full_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     full_in = make_variable_label(
       cx, full_in_symbol, bar_type, dst_label.value.span)
 
-    local full_out_symbol = terralib.newsymbol(
+    local full_out_symbol = std.newsymbol(
       bar_type, "full_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     full_out = make_variable_label(
       cx, full_out_symbol, bar_type, dst_label.value.span)
@@ -2399,7 +2398,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
 
     -- 1. Replicate the target.
     local local_label = make_variable_label(
-      cx, terralib.newsymbol(target_type, "local_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(target_type, "local_" .. tostring(target_label.value.value)),
       target_type, target_label.value.span)
     local local_nid = cx.graph:add_node(local_label)
 
@@ -2440,7 +2439,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     -- 4. Create the collective.
     local collective_type = std.dynamic_collective(target_type)
     local collective_label = make_variable_label(
-      cx, terralib.newsymbol(collective_type, "collective_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(collective_type, "collective_" .. tostring(target_label.value.value)),
       collective_type, target_label.value.span)
     local collective_v0_nid = cx.graph:add_node(collective_label)
     local collective_v1_nid = cx.graph:add_node(collective_label)
@@ -2495,7 +2494,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
 
     -- 7. Retrieve the collective value and assign to the original target.
     local global_label = make_variable_label(
-      cx, terralib.newsymbol(target_type, "global_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(target_type, "global_" .. tostring(target_label.value.value)),
       target_type, target_label.value.span) { fresh = true }
     local global_nid = cx.graph:add_node(global_label)
 
@@ -2598,7 +2597,7 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
       local shallow_type = std.list(
         std.list(intersection_type:subregion_dynamic(), nil, nil, nil, true),
       nil, nil, nil, true)
-      local shallow_symbol = terralib.newsymbol(
+      local shallow_symbol = std.newsymbol(
         shallow_type, "shallow_" .. tostring(intersection_label.value.value))
 
       mapping[intersection_type] = shallow_type
@@ -2672,7 +2671,7 @@ local function rewrite_inner_loop_bounds(cx, loop_nid, start)
 
   local index_type = std.as_read(global_index.value.expr_type)
   local local_index = make_variable_label(
-    block_cx, terralib.newsymbol(index_type, "local_index"),
+    block_cx, std.newsymbol(index_type, "local_index"),
     index_type, global_index.value.span)
   local local_index_nid = block_cx.graph:add_node(local_index)
 
@@ -2765,7 +2764,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
   local bounds_labels = terralib.newlist()
   for i = 1, 2 do
     local bound_label = make_variable_label(
-      cx, terralib.newsymbol(bounds_type, "shard_bound" .. i),
+      cx, std.newsymbol(bounds_type, "shard_bound" .. i),
       bounds_type, shard_label.span)
     bounds_labels:insert(bound_label)
   end
@@ -2840,7 +2839,7 @@ local function synchronize_shard_start(cx, shard_loop)
     function(_, label) return label:is(flow.node.Opaque) end)
 
   local barrier_type = std.phase_barrier
-  local barrier_symbol = terralib.newsymbol(barrier_type, "start_barrier")
+  local barrier_symbol = std.newsymbol(barrier_type, "start_barrier")
   local barrier_label = make_variable_label(cx, barrier_symbol, barrier_type, shard_label.span)
   local barrier_nid = cx.graph:add_node(barrier_label)
 
@@ -2966,7 +2965,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
         function(_, label) return label:is(flow.node.data) and label.region_type == list_type end)
 
       local new_type = std.list(list_type.element_type, list_type.partition_type, nil, original_type:parent_region())
-      local new_symbol = terralib.newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
+      local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
       cx.tree:intern_region_expr(
         new_type, ast.default_options(), list_label.value.span)
 
@@ -3023,7 +3022,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
           old_type.partition_type,
           new_rhs_type.privilege_depth, new_rhs_type.region_root,
           old_type.shallow)
-        local new_symbol = terralib.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
+        local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
         cx.tree:intern_region_expr(
           new_type, ast.default_options(), old_label.value.span)
 
@@ -3106,14 +3105,14 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
     cx.tree:intern_region_expr(
       parent_list_type, ast.default_options(), label.value.span)
 
-    local parent_list_symbol = terralib.newsymbol(
+    local parent_list_symbol = std.newsymbol(
       parent_list_type,
       "parent_" .. tostring(label.value.value))
     return parent_list_type, parent_list_type, parent_list_symbol
   else
     local parent_list_type = std.rawref(&list_type)
-    local parent_list_symbol = terralib.newsymbol(
-      parent_list_type,
+    local parent_list_symbol = std.newsymbol(
+      list_type,
       "parent_" .. tostring(label.value.value))
     local parent_list_region = cx.tree:intern_variable(
       parent_list_type, parent_list_symbol,
@@ -3216,7 +3215,7 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
   -- Build the actual shard index.
   local bounds_type = std.as_read(bounds[1].value.expr_type)
   local index_label = make_variable_label(
-    cx, terralib.newsymbol(bounds_type, "shard_index"),
+    cx, std.newsymbol(bounds_type, "shard_index"),
     bounds_type, bounds[1].value.span)
   local index_nid = cx.graph:add_node(index_label)
 
@@ -3732,7 +3731,7 @@ local function issue_zipped_copy_interior(
   local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
 
   local index_type = std.rawref(&int)
-  local index_symbol = terralib.newsymbol(int, "index")
+  local index_symbol = std.newsymbol(int, "index")
   local index_label = make_variable_label(
     block_cx, index_symbol, int, span)
   local index_nid = block_cx.graph:add_node(index_label)
@@ -3790,7 +3789,7 @@ local function issue_zipped_copy_interior(
     block_src_i_nids[field_path] = block_cx.graph:add_node(
       src_label {
         value = src_label.value {
-          value = terralib.newsymbol(block_src_i_type),
+          value = std.newsymbol(block_src_i_type),
           expr_type = block_src_i_type,
         },
       })
@@ -3814,7 +3813,7 @@ local function issue_zipped_copy_interior(
 
     local block_dst_i = flow.node.data.Region(dst_in_label) {
       value = dst_in_label.value {
-        value = terralib.newsymbol(block_dst_i_type),
+        value = std.newsymbol(block_dst_i_type),
         expr_type = block_dst_i_type,
       },
     }
@@ -3926,7 +3925,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
 
     -- Check the conditional.
     local cond_type = std.rawref(&int)
-    local cond_symbol = terralib.newsymbol(int, "complete_cond")
+    local cond_symbol = std.newsymbol(int, "complete_cond")
     local cond_label = make_variable_label(
       block_cx, cond_symbol, int, span)
     local cond_nid = cx.graph:add_node(cond_label)
@@ -3939,7 +3938,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
             ast.typed.expr.Cast {
               fn = ast.typed.expr.Function {
                 value = int,
-                expr_type = terralib.types.functype({std.untyped}, int, false),
+                expr_type = {std.untyped} -> int,
                 options = ast.default_options(),
                 span = span,
               },
@@ -3999,7 +3998,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
       cond_nid, cx.graph:node_sync_port(cond_nid))
 
     local index_type = std.rawref(&int)
-    local index_symbol = terralib.newsymbol(int, "complete_index")
+    local index_symbol = std.newsymbol(int, "complete_index")
     local index_label = make_variable_label(
       block_cx, index_symbol, int, span)
     local index_nid = block_cx.graph:add_node(index_label)
@@ -4931,7 +4930,7 @@ function flow_spmd.graph(cx, graph)
   return cx.graph
 end
 
-function flow_spmd.stat_task(cx, node)
+function flow_spmd.top_task(cx, node)
   local body = node.body:deepcopy()
   body:map_nodes_recursive(
     function(graph, nid, label)
@@ -4944,9 +4943,9 @@ function flow_spmd.stat_task(cx, node)
   return node { body = body }
 end
 
-function flow_spmd.stat_top(cx, node)
-  if node:is(ast.typed.stat.Task) then
-    return flow_spmd.stat_task(cx, node)
+function flow_spmd.top(cx, node)
+  if node:is(ast.typed.top.Task) then
+    return flow_spmd.top_task(cx, node)
 
   else
     return node
@@ -4955,7 +4954,7 @@ end
 
 function flow_spmd.entry(node)
   local cx = context.new_global_scope()
-  return flow_spmd.stat_top(cx, node)
+  return flow_spmd.top(cx, node)
 end
 
 return flow_spmd
