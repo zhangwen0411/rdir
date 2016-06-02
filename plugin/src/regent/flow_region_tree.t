@@ -185,7 +185,7 @@ function region_tree:intern_region_point_expr(parent, index, options, span)
   local subregion
   if index then
     assert(false) -- FIXME: This is currently broken.
-    assert(terralib.issymbol(index.value))
+    assert(std.issymbol(index.value))
     subregion = partition:subregion_constant(index.value)
   else
     subregion = partition:subregion_dynamic()

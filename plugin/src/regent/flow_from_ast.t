@@ -2180,6 +2180,14 @@ function flow_from_ast.expr_new(cx, node, privilege_map)
     privilege_map)
 end
 
+function flow_from_ast.expr_null(cx, node, privilege_map)
+  return as_opaque_expr(
+    cx,
+    function() return node end,
+    terralib.newlist(),
+    privilege_map)
+end
+
 function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
