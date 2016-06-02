@@ -1368,6 +1368,20 @@ function analyze_privileges.expr_cross_product(cx, node, privilege_map)
   end))
 end
 
+function analyze_privileges.expr_advance(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.value, reads)
+end
+
+function analyze_privileges.expr_arrive(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.barrier, reads),
+    node.value and analyze_privileges.expr(cx, node.value, reads))
+end
+
+function analyze_privileges.expr_await(cx, node, privilege_map)
+  return analyze_privileges.expr(cx, node.barrier, reads)
+end
+
 function analyze_privileges.expr_copy(cx, node, privilege_map)
   local dst_mode = reads_writes
   if node.op then
@@ -1502,6 +1516,15 @@ function analyze_privileges.expr(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.CrossProduct) then
     return analyze_privileges.expr_cross_product(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Advance) then
+    return analyze_privileges.expr_advance(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Arrive) then
+    return analyze_privileges.expr_arrive(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Await) then
+    return analyze_privileges.expr_await(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Copy) then
     return analyze_privileges.expr_copy(cx, node, privilege_map)
@@ -1659,6 +1682,10 @@ function analyze_privileges.stat_expr(cx, node)
   return analyze_privileges.expr(cx, node.expr, name(node.expr.expr_type))
 end
 
+function analyze_privileges.stat_raw_delete(cx, node)
+  return analyze_privileges.expr(cx, node.value, name(node.value.expr_type))
+end
+
 function analyze_privileges.stat(cx, node)
   if node:is(ast.typed.stat.If) then
     return analyze_privileges.stat_if(cx, node)
@@ -1701,6 +1728,9 @@ function analyze_privileges.stat(cx, node)
 
   elseif node:is(ast.typed.stat.Expr) then
     return analyze_privileges.stat_expr(cx, node)
+
+  elseif node:is(ast.typed.stat.RawDelete) then
+    return analyze_privileges.stat_raw_delete(cx, node)
 
   else
     assert(false, "unexpected node type " .. tostring(node:type()))
@@ -2177,6 +2207,34 @@ function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
     privilege_map)
 end
 
+function flow_from_ast.expr_advance(cx, node, privilege_map)
+  local value = flow_from_ast.expr(cx, node.value, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1) return node { value = v1 } end,
+    terralib.newlist({value}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_arrive(cx, node, privilege_map)
+  local barrier = flow_from_ast.expr(cx, node.barrier, reads)
+  local value = node.value and flow_from_ast.expr(cx, node.value, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1, v2) return node { barrier = v1, value = v2 or false } end,
+    terralib.newlist({barrier, value or nil}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_await(cx, node, privilege_map)
+  local barrier = flow_from_ast.expr(cx, node.barrier, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1) return node { barrier = v1 } end,
+    terralib.newlist({barrier}),
+    privilege_map)
+end
+
 function flow_from_ast.expr_copy(cx, node, privilege_map)
   local dst_mode = reads_writes
   if node.op then
@@ -2333,6 +2391,15 @@ function flow_from_ast.expr(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.CrossProduct) then
     return flow_from_ast.expr_cross_product(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Advance) then
+    return flow_from_ast.expr_advance(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Arrive) then
+    return flow_from_ast.expr_arrive(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Await) then
+    return flow_from_ast.expr_await(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Copy) then
     return flow_from_ast.expr_copy(cx, node, privilege_map)
@@ -2581,6 +2648,10 @@ function flow_from_ast.stat_expr(cx, node)
   end
 end
 
+function flow_from_ast.stat_raw_delete(cx, node)
+  as_opaque_stat(cx, node)
+end
+
 function flow_from_ast.stat(cx, node)
   if node:is(ast.typed.stat.If) then
     flow_from_ast.stat_if(cx, node)
@@ -2623,6 +2694,9 @@ function flow_from_ast.stat(cx, node)
 
   elseif node:is(ast.typed.stat.Expr) then
     flow_from_ast.stat_expr(cx, node)
+
+  elseif node:is(ast.typed.stat.RawDelete) then
+    flow_from_ast.stat_raw_delete(cx, node)
 
   else
     assert(false, "unexpected node type " .. tostring(node:type()))
