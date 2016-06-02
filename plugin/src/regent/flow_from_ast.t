@@ -595,14 +595,6 @@ function analyze_regions.expr(cx)
           cx.tree:intern_region_expr(bound, node.options, node.span)
         end
       end
-    elseif std.is_cross_product(expr_type) then
-      -- FIXME: This is kind of a hack. Cross products aren't really
-      -- first class, but this ought not be necessary.
-      cx.tree:intern_region_expr(
-        expr_type:partition(), node.options, node.span)
-      if node:is(ast.typed.expr.IndexAccess) then
-        cx.tree:attach_region_index(expr_type:partition(), node.index)
-      end
     end
 
     if node:is(ast.typed.expr.Deref) then

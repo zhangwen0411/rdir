@@ -177,6 +177,12 @@ function region_tree:intern_region_expr(expr_type, options, span)
     std.add_constraint(self, partition, region_type, "<=", false)
     self:intern_region_expr(partition, options, span)
   end
+  if std.is_partition(region_type) or std.is_cross_product(region_type) then
+    self:intern_region_expr(region_type:parent_region(), options, span)
+  end
+  if std.is_cross_product(region_type) then
+    self:intern_region_expr(region_type:partition(), options, span)
+  end
 end
 
 function region_tree:intern_region_point_expr(parent, index, options, span)
