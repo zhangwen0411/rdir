@@ -152,6 +152,12 @@ function region_tree:intern_variable(expr_type, symbol, options, span)
       std.add_constraint(self, partition, region_type, "<=", false)
       self:intern_region_expr(partition, options, span)
     end
+    if std.is_partition(value_type) or std.is_cross_product(value_type) then
+      self:intern_region_expr(value_type:parent_region(), options, span)
+    end
+    if std.is_cross_product(value_type) then
+      self:intern_region_expr(value_type:partition(), options, span)
+    end
   end
   return region_type
 end
