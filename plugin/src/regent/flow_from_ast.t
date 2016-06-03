@@ -1233,7 +1233,9 @@ end
 function analyze_privileges.expr_field_access(cx, node, privilege_map)
   local value_type = std.as_read(node.value.expr_type)
   local field_privilege_map = privilege_map:prepend(node.field_name)
-  if std.is_bounded_type(value_type) and value_type:is_ptr() then
+  if std.is_bounded_type(value_type) and value_type:is_ptr() and
+    std.get_field(value_type.points_to_type, node.field_name)
+  then
     local bounds = value_type:bounds()
     local usage
     for _, parent in ipairs(bounds) do
