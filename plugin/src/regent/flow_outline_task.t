@@ -337,7 +337,7 @@ local function gather_return(cx, nid)
       value = ast.typed.expr.Cast {
         fn = ast.typed.expr.Function {
           value = return_type,
-          expr_type = terralib.types.functype({std.untyped}, return_type, false),
+          expr_type = terralib.types.functype(terralib.newlist({std.untyped}), return_type, false),
           options = ast.default_options(),
           span = span,
         },
