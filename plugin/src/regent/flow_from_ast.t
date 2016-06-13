@@ -1179,7 +1179,7 @@ local function attach_result(privilege_map, nid)
   assert(is_field_map(privilege_map))
   local result = new_field_map()
   for k, privilege in privilege_map:items() do
-    if privilege == "reads" then
+    if privilege == "none" or privilege == "reads" then
       result:insert(k, data.newtuple(privilege, nid))
     elseif std.is_reduction_op(privilege) then
       result:insert(k, data.newtuple(privilege, false, nid))
@@ -1253,6 +1253,8 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
     return privilege_meet(
       analyze_privileges.expr(cx, node.value, reads),
       usage)
+  elseif node.field_name == "ispace" then
+    return analyze_privileges.expr(cx, node.value, none)
   else
     return analyze_privileges.expr(cx, node.value, field_privilege_map)
   end
@@ -2029,6 +2031,8 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
       open_region_tree(cx, subregion, nil, field_privilege_map)
     end
     value = flow_from_ast.expr(cx, node.value, reads)
+  elseif node.field_name == "ispace" then
+    value = flow_from_ast.expr(cx, node.value, none)
   else
     value = flow_from_ast.expr(cx, node.value, field_privilege_map)
   end
