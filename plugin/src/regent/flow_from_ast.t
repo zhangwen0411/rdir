@@ -1292,6 +1292,14 @@ function analyze_privileges.expr_call(cx, node, privilege_map)
     usage = privilege_meet(
       usage, analyze_privileges.expr(cx, arg, param_privilege_map))
   end
+  usage = data.reduce(
+      privilege_meet,
+      node.conditions:map(
+        function(condition)
+          return analyze_privileges.expr_condition(cx, condition, reads) or
+            new_field_map()
+        end),
+      usage)
   return usage
 end
 
@@ -2081,6 +2089,11 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
     end
     inputs:insert(flow_from_ast.expr(cx, arg, param_privilege_map))
   end
+  inputs:insertall(
+    node.conditions:map(
+      function(condition)
+        return flow_from_ast.expr_condition(cx, condition, reads)
+      end))
 
   return as_call_expr(
     cx, inputs,

@@ -451,22 +451,26 @@ function flow_to_ast.node_task(cx, nid)
        edge_label = get_arg_edge(outputs, i, false).label
     end
 
-    local condition
-    if edge_label:is(flow.edge.Arrive) then
-      condition = std.arrives
-    elseif edge_label:is(flow.edge.Await) then
-      condition = std.awaits
+    if value:is(ast.typed.expr.Condition) then
+      conditions:insert(value)
     else
-      assert(false)
+      local condition
+      if edge_label:is(flow.edge.Arrive) then
+        condition = std.arrives
+      elseif edge_label:is(flow.edge.Await) then
+        condition = std.awaits
+      else
+        assert(false)
+      end
+      conditions:insert(
+        ast.typed.expr.Condition {
+          conditions = terralib.newlist({condition}),
+          value = value,
+          expr_type = std.as_read(value.expr_type),
+          options = ast.default_options(),
+          span = label.span,
+      })
     end
-    conditions:insert(
-      ast.typed.expr.Condition {
-        conditions = terralib.newlist({condition}),
-        value = value,
-        expr_type = std.as_read(value.expr_type),
-        options = ast.default_options(),
-        span = label.span,
-    })
   end
 
   local action = ast.typed.expr.Call {
@@ -540,22 +544,26 @@ function flow_to_ast.node_copy(cx, nid)
   for i = 3, maxport do
     local edge = get_arg_edge(inputs, i, false)
     local value = cx.ast[edge.from_node]
-    if edge.label:is(flow.edge.Await) then
-      value = ast.typed.expr.Condition {
-        value = value,
-        conditions = terralib.newlist({std.awaits}),
-        expr_type = value.expr_type,
-        options = ast.default_options(),
-        span = value.span,
-      }
-    elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
-      value = ast.typed.expr.Condition {
-        value = value,
-        conditions = terralib.newlist({std.arrives}),
-        expr_type = value.expr_type,
-        options = ast.default_options(),
-        span = value.span,
-      }
+    if not value:is(ast.typed.expr.Condition) then
+      if edge.label:is(flow.edge.Await) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.awaits}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.arrives}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      else
+        assert(false)
+      end
     end
     conditions:insert(value)
   end
@@ -589,7 +597,30 @@ function flow_to_ast.node_fill(cx, nid)
 
   local conditions = terralib.newlist()
   for i = 3, maxport do
-    conditions:insert(cx.ast[get_arg_node(inputs, i, false)])
+    local edge = get_arg_edge(inputs, i, false)
+    local value = cx.ast[edge.from_node]
+    if not value:is(ast.typed.expr.Condition) then
+      if edge.label:is(flow.edge.Await) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.awaits}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.arrives}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      else
+        assert(false)
+      end
+    end
+    conditions:insert(value)
   end
 
   local action = ast.typed.expr.Fill {
