@@ -2256,27 +2256,31 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
   local value_type = std.as_read(node.value.expr_type)
   local value
   local field_privilege_map = privilege_map:prepend(node.field_name)
-  if std.is_bounded_type(value_type) and value_type:is_ptr() then
-    local bounds = value_type:bounds()
-    if #bounds == 1 and std.is_region(bounds[1]) then
-      local parent = bounds[1]
-      local index
-      -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.expr.ID) and
-      --   not std.is_rawref(node.value.expr_type)
-      -- then
-      --   index = node.value
-      -- end
-      local subregion, symbol = cx.tree:intern_region_point_expr(
-        parent, index, node.options, node.span)
-      if not cx:has_region_symbol(subregion) then
-        cx:intern_region_point_expr(node, symbol, subregion)
-      end
+  -- FIXME: This code is very messed up, see expr_deref for an
+  -- explanation.
 
-      open_region_tree(cx, subregion, nil, field_privilege_map)
-    end
-    value = flow_from_ast.expr(cx, node.value, reads)
-  elseif node.field_name == "ispace" then
+  if -- std.is_bounded_type(value_type) and value_type:is_ptr() then
+  --   local bounds = value_type:bounds()
+  --   if #bounds == 1 and std.is_region(bounds[1]) then
+  --     local parent = bounds[1]
+  --     local index
+  --     -- FIXME: This causes issues with some tests.
+  --     -- if node.value:is(ast.typed.expr.ID) and
+  --     --   not std.is_rawref(node.value.expr_type)
+  --     -- then
+  --     --   index = node.value
+  --     -- end
+  --     local subregion, symbol = cx.tree:intern_region_point_expr(
+  --       parent, index, node.options, node.span)
+  --     if not cx:has_region_symbol(subregion) then
+  --       cx:intern_region_point_expr(node, symbol, subregion)
+  --     end
+
+  --     open_region_tree(cx, subregion, nil, field_privilege_map)
+  --   end
+  --   value = flow_from_ast.expr(cx, node.value, reads)
+  -- elseif
+  node.field_name == "ispace" then
     value = flow_from_ast.expr(cx, node.value, none)
   else
     value = flow_from_ast.expr(cx, node.value, field_privilege_map)
@@ -2552,32 +2556,51 @@ end
 
 function flow_from_ast.expr_deref(cx, node, privilege_map)
   local value = flow_from_ast.expr(cx, node.value, reads)
-  local value_type = std.as_read(node.value.expr_type)
-  if std.is_bounded_type(value_type) then
-    local bounds = value_type:bounds()
-    if #bounds == 1 and std.is_region(bounds[1]) then
-      local parent = bounds[1]
-      local index
-      -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.expr.ID) and
-      --   not std.is_rawref(node.value.expr_type)
-      -- then
-      --   index = node.value
-      -- end
-      local subregion, symbol = cx.tree:intern_region_point_expr(
-        parent, index, node.options, node.span)
-      if not cx:has_region_symbol(subregion) then
-        cx:intern_region_point_expr(node, symbol, subregion)
-      end
+  -- FIXME: So it turns out that dereferencing, and point regions in
+  -- general, are very messed up. There are a couple of moving parts
+  -- that make this difficult. First, references correspond to
+  -- implicit references on point regions. But the regions in question
+  -- are virtual, and nothing that expects a reference can actually
+  -- deal with a region. The previous approach was to hack around this
+  -- by creating a fresh symbol (of the type of reference when coerced
+  -- to an r-value), but that has a bunch of issues:
+  --
+  --  1. You can't handle l-values at all.
+  --  2. Struct values break because open_region_tree blasts out all
+  --     the fields and can't put them back together again.
+  --  3. If the value is consumed by an opaque node, you need some way
+  --     of capturing the pointer (and then separately making sure the
+  --     opaque node knows to dereference it).
+  --
+  -- For now I'm going to generate opaque nodes for all dereferences
+  -- and revisit the semantics of point regions at a later time.
 
-      local inputs = terralib.newlist({value})
-      local region = open_region_tree(cx, subregion, nil, privilege_map)
-      as_deref_expr(
-        cx, inputs, as_nid(cx, region),
-        node.expr_type, node.options, node.span, privilege_map)
-      return region
-    end
-  end
+  -- local value_type = std.as_read(node.value.expr_type)
+  -- if std.is_bounded_type(value_type) then
+  --   local bounds = value_type:bounds()
+  --   if #bounds == 1 and std.is_region(bounds[1]) then
+  --     local parent = bounds[1]
+  --     local index
+  --     -- FIXME: This causes issues with some tests.
+  --     -- if node.value:is(ast.typed.expr.ID) and
+  --     --   not std.is_rawref(node.value.expr_type)
+  --     -- then
+  --     --   index = node.value
+  --     -- end
+  --     local subregion, symbol = cx.tree:intern_region_point_expr(
+  --       parent, index, node.options, node.span)
+  --     if not cx:has_region_symbol(subregion) then
+  --       cx:intern_region_point_expr(node, symbol, subregion)
+  --     end
+
+  --     local inputs = terralib.newlist({value})
+  --     local region = open_region_tree(cx, subregion, nil, privilege_map)
+  --     as_deref_expr(
+  --       cx, inputs, as_nid(cx, region),
+  --       node.expr_type, node.options, node.span, privilege_map)
+  --     return region
+  --   end
+  -- end
 
   return as_opaque_expr(
     cx,
