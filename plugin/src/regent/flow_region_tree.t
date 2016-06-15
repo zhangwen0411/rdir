@@ -59,7 +59,6 @@ function flow_region_tree.new_region_tree(constraints, region_universe)
       interned_scalars = {},
 
       -- Region identity and indexing.
-      region_symbols = {},
       region_var_types = {},
       region_option_sets = {},
       region_spans = {},
@@ -69,15 +68,8 @@ function flow_region_tree.new_region_tree(constraints, region_universe)
   }, region_tree)
 end
 
-function region_tree:has_region_symbol(region_type)
-  assert(flow_region_tree.is_region(region_type))
-  return rawget(self.region_symbols, region_type)
-end
-
-function region_tree:region_symbol(region_type)
-  assert(flow_region_tree.is_region(region_type))
-  assert(rawget(self.region_symbols, region_type))
-  return self.region_symbols[region_type]
+function region_tree:has_region(region_type)
+  return self:has_region_span(region_type)
 end
 
 function region_tree:region_var_type(region_type)
@@ -90,6 +82,11 @@ function region_tree:region_options(region_type)
   assert(flow_region_tree.is_region(region_type))
   assert(rawget(self.region_option_sets, region_type))
   return self.region_option_sets[region_type]
+end
+
+function region_tree:has_region_span(region_type)
+  assert(flow_region_tree.is_region(region_type))
+  return rawget(self.region_spans, region_type)
 end
 
 function region_tree:region_span(region_type)
@@ -121,6 +118,32 @@ function region_tree:is_point(region_type)
   return self.region_is_point[region_type]
 end
 
+function region_tree:add_region(region_type, symbol, var_type, options, span, is_point)
+  assert(flow_region_tree.is_region(region_type) and std.is_symbol(symbol) and
+           terralib.types.istype(var_type) and
+           options and span and
+           type(is_point) == "boolean")
+  assert(not self:has_region(region_type))
+  self.region_var_types[region_type] = var_type
+  self.region_option_sets[region_type] = options
+  self.region_spans[region_type] = span
+  self.region_is_point[region_type] = is_point
+
+  local value_type = std.as_read(var_type)
+  if not is_point and std.is_region(value_type) then
+    local partition = std.partition(std.disjoint, symbol)
+    self.region_point_partitions[region_type] = partition
+    std.add_constraint(self, partition, region_type, "<=", false)
+    self:intern_region_expr(partition, options, span)
+  end
+  if std.is_partition(value_type) or std.is_cross_product(value_type) then
+    self:intern_region_expr(value_type:parent_region(), options, span)
+  end
+  if std.is_cross_product(value_type) then
+    self:intern_region_expr(value_type:partition(), options, span)
+  end
+end
+
 function region_tree:intern_variable(expr_type, symbol, options, span)
   -- Assign a fresh region to non-region symbols.
   local value_type = std.as_read(expr_type)
@@ -139,25 +162,8 @@ function region_tree:intern_variable(expr_type, symbol, options, span)
   assert(flow_region_tree.is_region(region_type))
 
   self.region_universe[region_type] = true
-  if not rawget(self.region_symbols, region_type) then
-    assert(not rawget(self.region_spans, region_type))
-    self.region_symbols[region_type] = symbol
-    self.region_var_types[region_type] = expr_type
-    self.region_option_sets[region_type] = options
-    self.region_spans[region_type] = span
-    self.region_is_point[region_type] = false
-    if std.is_region(value_type) then
-      local partition = std.partition(std.disjoint, symbol)
-      self.region_point_partitions[region_type] = partition
-      std.add_constraint(self, partition, region_type, "<=", false)
-      self:intern_region_expr(partition, options, span)
-    end
-    if std.is_partition(value_type) or std.is_cross_product(value_type) then
-      self:intern_region_expr(value_type:parent_region(), options, span)
-    end
-    if std.is_cross_product(value_type) then
-      self:intern_region_expr(value_type:partition(), options, span)
-    end
+  if not self:has_region(region_type) then
+    self:add_region(region_type, symbol, expr_type, options, span, false)
   end
   return region_type
 end
@@ -165,30 +171,14 @@ end
 function region_tree:intern_region_expr(expr_type, options, span)
   local region_type = std.as_read(expr_type)
   assert(flow_region_tree.is_region(region_type))
-  if self:has_region_symbol(region_type) then
-    return self:region_symbol(region_type)
+  if self:has_region(region_type) then
+    return
   end
 
   self.region_universe[region_type] = true
 
   local symbol = std.newsymbol(region_type)
-  self.region_symbols[region_type] = symbol
-  self.region_var_types[region_type] = expr_type
-  self.region_option_sets[region_type] = options
-  self.region_spans[region_type] = span
-  self.region_is_point[region_type] = false
-  if std.is_region(region_type) then
-    local partition = std.partition(std.disjoint, symbol)
-    self.region_point_partitions[region_type] = partition
-    std.add_constraint(self, partition, region_type, "<=", false)
-    self:intern_region_expr(partition, options, span)
-  end
-  if std.is_partition(region_type) or std.is_cross_product(region_type) then
-    self:intern_region_expr(region_type:parent_region(), options, span)
-  end
-  if std.is_cross_product(region_type) then
-    self:intern_region_expr(region_type:partition(), options, span)
-  end
+  self:add_region(region_type, symbol, expr_type, options, span, false)
 end
 
 function region_tree:intern_region_point_expr(parent, index, options, span)
@@ -203,26 +193,22 @@ function region_tree:intern_region_point_expr(parent, index, options, span)
     subregion = partition:subregion_dynamic()
   end
 
-  if self:has_region_symbol(subregion) then
+  if self:has_region(subregion) then
     return subregion
   end
 
   self.region_universe[subregion] = true
 
   local symbol = std.newsymbol(subregion)
-  self.region_symbols[subregion] = symbol
-  self.region_var_types[subregion] = subregion
-  self.region_option_sets[subregion] = options
-  self.region_spans[subregion] = span
-  self.region_is_point[subregion] = true
+  self:add_region(subregion, symbol, subregion, options, span, true)
   std.add_constraint(self, subregion, partition, "<=", false)
   self:attach_region_index(subregion, index)
-  return subregion
+  return subregion, symbol
 end
 
 function region_tree:attach_region_index(region_type, index)
   assert(flow_region_tree.is_region(region_type))
-  assert(self:region_symbol(region_type))
+  assert(self:has_region(region_type))
   self.region_indices[region_type] = index
 end
 
@@ -232,7 +218,7 @@ function region_tree:ensure_variable(expr_type, symbol)
     assert(symbol and rawget(self.interned_scalars, symbol))
     region_type = self.interned_scalars[symbol]
   end
-  assert(self:has_region_symbol(region_type))
+  assert(self:has_region(region_type))
   return region_type
 end
 

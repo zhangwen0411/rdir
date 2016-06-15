@@ -36,6 +36,7 @@ local data = require("regent/data")
 local flow = require("regent/flow")
 local flow_region_tree = require("regent/flow_region_tree")
 local std = require("regent/std")
+local symbol_table = require("regent/symbol_table")
 
 -- Field Sets
 
@@ -105,12 +106,12 @@ function _field_set:__tostring()
   return "{" .. self:hash() .. "}"
 end
 
-function _field_set:mkstring(sep)
-  return self:map(tostring):mkstring(",")
+function _field_set:concat(sep)
+  return self:map(tostring):concat(",")
 end
 
 function _field_set:hash()
-  return self:mkstring(",")
+  return self:concat(",")
 end
 
 -- Field Maps
@@ -208,12 +209,12 @@ local function _field_map_tostring(k, v)
   return tostring(k) .. " = " .. tostring(v)
 end
 
-function _field_map:mkstring(sep)
-  return self:maplist(_field_map_tostring):mkstring(", ")
+function _field_map:concat(sep)
+  return self:maplist(_field_map_tostring):concat(", ")
 end
 
 function _field_map:hash()
-  return self:mkstring(",")
+  return self:concat(",")
 end
 
 -- Context
@@ -236,6 +237,7 @@ function context:new_local_scope(local_var)
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
     tree = self.tree,
+    region_symbols = self.region_symbols:new_local_scope(),
     state_by_field = new_field_map(),
   }
   return setmetatable(cx, context)
@@ -251,14 +253,67 @@ function context:new_task_scope(constraints, region_universe)
     next_epoch = terralib.newlist(),
     next_epoch_opaque = false,
     tree = tree,
+    region_symbols = self.region_symbols:new_local_scope(),
     state_by_field = new_field_map(),
   }
   return setmetatable(cx, context)
 end
 
 function context.new_global_scope()
-  local cx = {}
+  local cx = {
+    region_symbols = symbol_table.new_global_scope({}),
+  }
   return setmetatable(cx, context)
+end
+
+function context:intern_region(node, var_symbol, var_type)
+  local region_type = self.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+  self.region_symbols:insert(node, region_type, var_symbol)
+
+  local value_type = std.as_read(var_type)
+  if std.is_region(value_type) and not self.tree:is_point(region_type) then
+    local partition = self.tree:point_partition(region_type)
+    self:intern_region(node, std.newsymbol(partition), partition)
+  end
+  if std.is_partition(value_type) or std.is_cross_product(value_type) then
+    local parent = value_type:parent_region()
+    if not self:has_region_symbol(parent) then
+      self:intern_region(node, std.newsymbol(parent), parent)
+    end
+  end
+  if std.is_cross_product(value_type) then
+    local partition = value_type:partition()
+    if not self:has_region_symbol(partition) then
+      self:intern_region(node, std.newsymbol(partition), partition)
+    end
+  end
+end
+
+function context:intern_region_point_expr(node, var_symbol, region_type)
+  assert(std.is_symbol(var_symbol) and std.is_region(region_type))
+  assert(self.tree:is_point(region_type))
+
+  self.region_symbols:insert(node, region_type, var_symbol)
+end
+
+function context:has_region_symbol(region_type)
+  assert(flow_region_tree.is_region(region_type))
+
+  return self.region_symbols:safe_lookup(region_type)
+end
+
+function context:region_symbol(region_type)
+  assert(flow_region_tree.is_region(region_type))
+
+  local symbol = self.region_symbols:safe_lookup(region_type)
+  if not symbol then
+    print("undefined region", region_type, self.tree:is_point(region_type))
+    if std.is_partition(region_type) then
+      print(" (point partition?)", region_type:parent_region(), self.tree:point_partition(region_type:parent_region()))
+    end
+  end
+  assert(symbol)
+  return symbol
 end
 
 function context:state(field_path)
@@ -682,10 +737,10 @@ local function privilege_mode(privilege)
 end
 
 local function get_region_label(cx, region_type, field_path)
-  local symbol = cx.tree:region_symbol(region_type)
+  local symbol = cx:region_symbol(region_type)
   local expr_type = cx.tree:region_var_type(region_type)
   local name = ast.typed.expr.ID {
-    value = cx.tree:region_symbol(region_type),
+    value = cx:region_symbol(region_type),
     expr_type = expr_type,
     options = cx.tree:region_options(region_type),
     span = cx.tree:region_span(region_type),
@@ -1054,6 +1109,19 @@ local function strip_indexing(cx, region_type)
   return path[last_index + 1]
 end
 
+local function strip_undefined(cx, region_type)
+  local path = data.newtuple(unpack(cx.tree:ancestors(region_type)))
+  local last_index = 0
+  for index = 1, #path do
+    if not cx:has_region_symbol(path[index]) then
+      last_index = index
+    end
+  end
+  assert(last_index <= #path)
+  if last_index == #path then return end
+  return path[last_index + 1]
+end
+
 local function privilege_summary_region(cx, usage, strip, skip_regions)
   local summary = {}
   if not usage then return summary end
@@ -1062,32 +1130,35 @@ local function privilege_summary_region(cx, usage, strip, skip_regions)
       if strip then
         region_type = strip_indexing(cx, region_type)
       end
+      region_type = strip_undefined(cx, region_type)
 
-      local recorded = false
-      local next_summary = {}
-      for other, other_privilege in pairs(summary) do
-        local ancestor = cx.tree:lowest_common_ancestor(region_type, other)
-        if ancestor and
-          not (privilege == "none" or
-               other_privilege == "none" or
-               (privilege == "reads" and other_privilege == "reads") or
-               (privilege == other_privilege and std.is_reduction_op(privilege)) or
-                 not cx.tree:can_alias(region_type, other))
-        then
-          next_summary[ancestor] = std.meet_privilege(
-            privilege,
-            std.meet_privilege(
-              other_privilege,
-              rawget(next_summary, ancestor)))
-          recorded = true
-        else
-          next_summary[other] = std.meet_privilege(other_privilege, rawget(next_summary, other))
+      if region_type then
+        local recorded = false
+        local next_summary = {}
+        for other, other_privilege in pairs(summary) do
+          local ancestor = cx.tree:lowest_common_ancestor(region_type, other)
+          if ancestor and
+            not (privilege == "none" or
+                 other_privilege == "none" or
+                 (privilege == "reads" and other_privilege == "reads") or
+                 (privilege == other_privilege and std.is_reduction_op(privilege)) or
+                   not cx.tree:can_alias(region_type, other))
+          then
+            next_summary[ancestor] = std.meet_privilege(
+              privilege,
+              std.meet_privilege(
+                other_privilege,
+                rawget(next_summary, ancestor)))
+            recorded = true
+          else
+            next_summary[other] = std.meet_privilege(other_privilege, rawget(next_summary, other))
+          end
         end
+        if not recorded then
+          next_summary[region_type] = std.meet_privilege(privilege, rawget(next_summary, region_type))
+        end
+        summary = next_summary
       end
-      if not recorded then
-        next_summary[region_type] = std.meet_privilege(privilege, rawget(next_summary, region_type))
-      end
-      summary = next_summary
     end
   end
   return setmetatable(summary, region_privileges)
@@ -1265,6 +1336,12 @@ function analyze_privileges.expr_index_access(cx, node, privilege_map)
   local usage
   if flow_region_tree.is_region(expr_type) then
     usage = uses(cx, expr_type, privilege_map)
+
+    -- Make sure a symbol is available.
+    if not cx:has_region_symbol(expr_type) then
+      local symbol = std.newsymbol(expr_type)
+      cx:intern_region(node, symbol, node.expr_type)
+    end
   end
   return privilege_meet(
     analyze_privileges.expr(cx, node.value, name(node.value.expr_type)),
@@ -1320,7 +1397,7 @@ function analyze_privileges.expr_ctor(cx, node, privilege_map)
 end
 
 function analyze_privileges.expr_raw_physical(cx, node, privilege_map)
-  assert(false) -- This case needs special handling.
+  -- assert(false) -- This case needs special handling. -- Elliott: Why?
   return privilege_meet(
     analyze_privileges.expr(cx, node.region, reads_writes))
 end
@@ -1352,7 +1429,7 @@ end
 function analyze_privileges.expr_ispace(cx, node, privilege_map)
   return privilege_meet(
     analyze_privileges.expr(cx, node.extent, reads),
-    node.start and analyze_privileges.expr(cx, node.start, reads))
+    (node.start and analyze_privileges.expr(cx, node.start, reads)) or new_field_map())
 end
 
 function analyze_privileges.expr_region(cx, node, privilege_map)
@@ -1360,7 +1437,36 @@ function analyze_privileges.expr_region(cx, node, privilege_map)
 end
 
 function analyze_privileges.expr_partition(cx, node, privilege_map)
-  return analyze_privileges.expr(cx, node.coloring, reads)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.region, none),
+    analyze_privileges.expr(cx, node.coloring, reads),
+    (node.colors and analyze_privileges.expr(cx, node.colors, reads)) or new_field_map())
+end
+
+function analyze_privileges.expr_partition_equal(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.region, none),
+    analyze_privileges.expr(cx, node.colors, reads))
+end
+
+function analyze_privileges.expr_partition_by_field(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr_region_root(cx, node.region, reads),
+    analyze_privileges.expr(cx, node.colors, reads))
+end
+
+function analyze_privileges.expr_image(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.parent, none),
+    analyze_privileges.expr(cx, node.partition, none),
+    analyze_privileges.expr_region_root(cx, node.region, reads))
+end
+
+function analyze_privileges.expr_preimage(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.parent, none),
+    analyze_privileges.expr(cx, node.partition, none),
+    analyze_privileges.expr_region_root(cx, node.region, reads))
 end
 
 function analyze_privileges.expr_cross_product(cx, node, privilege_map)
@@ -1372,6 +1478,65 @@ function analyze_privileges.expr_cross_product(cx, node, privilege_map)
   end))
 end
 
+function analyze_privileges.expr_cross_product_array(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.lhs, none),
+    analyze_privileges.expr(cx, node.colorings, reads))
+end
+
+function analyze_privileges.expr_list_slice_partition(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.partition, none),
+    analyze_privileges.expr(cx, node.indices, reads))
+end
+
+function analyze_privileges.expr_list_duplicate_partition(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.partition, none),
+    analyze_privileges.expr(cx, node.indices, reads))
+end
+
+function analyze_privileges.expr_list_cross_product(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.lhs, none),
+    analyze_privileges.expr(cx, node.rhs, none))
+end
+
+function analyze_privileges.expr_list_cross_product_complete(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.lhs, none),
+    analyze_privileges.expr(cx, node.product, none))
+end
+
+function analyze_privileges.expr_list_phase_barriers(cx, node)
+  return analyze_privileges.expr(cx, node.product, none)
+end
+
+function analyze_privileges.expr_list_invert(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.lhs, none),
+    analyze_privileges.expr(cx, node.product, none),
+    analyze_privileges.expr(cx, node.barriers, reads))
+end
+
+function analyze_privileges.expr_list_range(cx, node)
+  return privilege_meet(
+    analyze_privileges.expr(cx, node.start, reads),
+    analyze_privileges.expr(cx, node.stop, reads))
+end
+
+function analyze_privileges.expr_phase_barrier(cx, node)
+  return analyze_privileges.expr(cx, node.value, reads)
+end
+
+function analyze_privileges.expr_dynamic_collective(cx, node)
+  return analyze_privileges.expr(cx, node.arrivals, reads)
+end
+
+function analyze_privileges.expr_dynamic_collective_get_result(cx, node)
+  return analyze_privileges.expr(cx, node.value, reads)
+end
+
 function analyze_privileges.expr_advance(cx, node, privilege_map)
   return analyze_privileges.expr(cx, node.value, reads)
 end
@@ -1379,7 +1544,7 @@ end
 function analyze_privileges.expr_arrive(cx, node, privilege_map)
   return privilege_meet(
     analyze_privileges.expr(cx, node.barrier, reads),
-    node.value and analyze_privileges.expr(cx, node.value, reads))
+    (node.value and analyze_privileges.expr(cx, node.value, reads)) or new_field_map())
 end
 
 function analyze_privileges.expr_await(cx, node, privilege_map)
@@ -1453,10 +1618,10 @@ function analyze_privileges.expr(cx, node, privilege_map)
     return analyze_privileges.expr_id(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Constant) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.Function) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.FieldAccess) then
     return analyze_privileges.expr_field_access(cx, node, privilege_map)
@@ -1477,7 +1642,7 @@ function analyze_privileges.expr(cx, node, privilege_map)
     return analyze_privileges.expr_ctor(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.RawContext) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.RawFields) then
     return analyze_privileges.expr_raw_fields(cx, node, privilege_map)
@@ -1486,7 +1651,7 @@ function analyze_privileges.expr(cx, node, privilege_map)
     return analyze_privileges.expr_raw_physical(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.RawRuntime) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.RawValue) then
     return analyze_privileges.expr_raw_value(cx, node, privilege_map)
@@ -1495,10 +1660,10 @@ function analyze_privileges.expr(cx, node, privilege_map)
     return analyze_privileges.expr_isnull(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.New) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.Null) then
-    return nil
+    return new_field_map()
 
   elseif node:is(ast.typed.expr.DynamicCast) then
     return analyze_privileges.expr_dynamic_cast(cx, node, privilege_map)
@@ -1518,8 +1683,53 @@ function analyze_privileges.expr(cx, node, privilege_map)
   elseif node:is(ast.typed.expr.Partition) then
     return analyze_privileges.expr_partition(cx, node, privilege_map)
 
+  elseif node:is(ast.typed.expr.PartitionEqual) then
+    return analyze_privileges.expr_partition_equal(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.PartitionByField) then
+    return analyze_privileges.expr_partition_by_field(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Image) then
+    return analyze_privileges.expr_image(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Preimage) then
+    return analyze_privileges.expr_preimage(cx, node, privilege_map)
+
   elseif node:is(ast.typed.expr.CrossProduct) then
     return analyze_privileges.expr_cross_product(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.CrossProductArray) then
+    return analyze_privileges.expr_cross_product_array(cx, node)
+
+  elseif node:is(ast.typed.expr.ListSlicePartition) then
+    return analyze_privileges.expr_list_slice_partition(cx, node)
+
+  elseif node:is(ast.typed.expr.ListDuplicatePartition) then
+    return analyze_privileges.expr_list_duplicate_partition(cx, node)
+
+  elseif node:is(ast.typed.expr.ListCrossProduct) then
+    return analyze_privileges.expr_list_cross_product(cx, node)
+
+  elseif node:is(ast.typed.expr.ListCrossProductComplete) then
+    return analyze_privileges.expr_list_cross_product_complete(cx, node)
+
+  elseif node:is(ast.typed.expr.ListPhaseBarriers) then
+    return analyze_privileges.expr_list_phase_barriers(cx, node)
+
+  elseif node:is(ast.typed.expr.ListInvert) then
+    return analyze_privileges.expr_list_invert(cx, node)
+
+  elseif node:is(ast.typed.expr.ListRange) then
+    return analyze_privileges.expr_list_range(cx, node)
+
+  elseif node:is(ast.typed.expr.PhaseBarrier) then
+    return analyze_privileges.expr_phase_barrier(cx, node)
+
+  elseif node:is(ast.typed.expr.DynamicCollective) then
+    return analyze_privileges.expr_dynamic_collective(cx, node)
+
+  elseif node:is(ast.typed.expr.DynamicCollectiveGetResult) then
+    return analyze_privileges.expr_dynamic_collective_get_result(cx, node)
 
   elseif node:is(ast.typed.expr.Advance) then
     return analyze_privileges.expr_advance(cx, node, privilege_map)
@@ -1560,27 +1770,39 @@ function analyze_privileges.block(cx, node)
 end
 
 function analyze_privileges.stat_if(cx, node)
+  local then_cx = cx:new_local_scope()
+  local then_privileges = analyze_privileges.block(then_cx, node.then_block)
+  local outer_then_privileges = privilege_summary(cx, then_privileges, false)
+
+  local else_cx = cx:new_local_scope()
+  local else_privileges = analyze_privileges.block(else_cx, node.else_block)
+  local outer_else_privileges = privilege_summary(cx, else_privileges, false)
+
   return
     privilege_meet(
       analyze_privileges.expr(cx, node.cond, reads),
-      analyze_privileges.block(cx, node.then_block),
+      outer_then_privileges,
       data.reduce(
         privilege_meet,
         node.elseif_blocks:map(
           function(block)
             return analyze_privileges.stat_elseif(cx, block) or new_field_map()
           end)),
-      analyze_privileges.block(cx, node.else_block))
+      outer_else_privileges)
 end
 
 function analyze_privileges.stat_elseif(cx, node)
+  local block_cx = cx:new_local_scope()
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, false)
   return privilege_meet(
     analyze_privileges.expr(cx, node.cond, reads),
-    analyze_privileges.block(cx, node.block))
+    outer_privileges)
 end
 
 function analyze_privileges.stat_while(cx, node)
-  local block_privileges = analyze_privileges.block(cx, node.block)
+  local block_cx = cx:new_local_scope()
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
   local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
     analyze_privileges.expr(cx, node.cond, reads),
@@ -1611,13 +1833,19 @@ function analyze_privileges.stat_for_list(cx, node)
 end
 
 function analyze_privileges.stat_repeat(cx, node)
+  local block_cx = cx:new_local_scope()
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, true)
   return privilege_meet(
-    analyze_privileges.block(cx, node.block),
+    outer_privileges,
     analyze_privileges.expr(cx, node.until_cond, reads))
 end
 
 function analyze_privileges.stat_must_epoch(cx, node)
-  return analyze_privileges.block(cx, node.block)
+  local block_cx = cx:new_local_scope()
+  local block_privileges = analyze_privileges.block(block_cx, node.block)
+  local outer_privileges = privilege_summary(cx, block_privileges, false)
+  return outer_privileges
 end
 
 function analyze_privileges.stat_block(cx, node)
@@ -1628,6 +1856,15 @@ function analyze_privileges.stat_block(cx, node)
 end
 
 function analyze_privileges.stat_var(cx, node)
+  for i, var_symbol in ipairs(node.symbols) do
+    local var_type = std.rawref(&node.types[i])
+    if not flow_region_tree.is_region(std.as_read(var_type)) or
+      not cx:has_region_symbol(std.as_read(var_type))
+    then
+      cx:intern_region(node, var_symbol, var_type)
+    end
+  end
+
   return data.reduce(
     privilege_meet,
     node.values:map(
@@ -1637,6 +1874,11 @@ function analyze_privileges.stat_var(cx, node)
 end
 
 function analyze_privileges.stat_var_unpack(cx, node)
+  for i, var_symbol in ipairs(node.symbols) do
+    local var_type = std.rawref(&node.field_types[i])
+    cx:intern_region(node, var_symbol, var_type)
+  end
+
   return analyze_privileges.expr(cx, node.value, name(node.value.expr_type))
 end
 
@@ -2025,8 +2267,11 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(
+      local subregion, symbol = cx.tree:intern_region_point_expr(
         parent, index, node.options, node.span)
+      if not cx:has_region_symbol(subregion) then
+        cx:intern_region_point_expr(node, symbol, subregion)
+      end
 
       open_region_tree(cx, subregion, nil, field_privilege_map)
     end
@@ -2319,8 +2564,11 @@ function flow_from_ast.expr_deref(cx, node, privilege_map)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(
+      local subregion, symbol = cx.tree:intern_region_point_expr(
         parent, index, node.options, node.span)
+      if not cx:has_region_symbol(subregion) then
+        cx:intern_region_point_expr(node, symbol, subregion)
+      end
 
       local inputs = terralib.newlist({value})
       local region = open_region_tree(cx, subregion, nil, privilege_map)
@@ -2457,7 +2705,7 @@ function flow_from_ast.stat_while(cx, node)
   local loop_inner_privileges = index_privileges_by_region(
     privilege_summary(loop_cx, loop_block_privileges, false))
   local loop_outer_privileges = index_privileges_by_region(
-    privilege_summary(loop_cx, loop_block_privileges, true))
+    privilege_summary(cx, loop_block_privileges, true))
   for region_type, privilege_map in pairs(loop_inner_privileges) do
     preopen_region_tree(loop_cx, region_type, privilege_map)
   end
@@ -2467,7 +2715,7 @@ function flow_from_ast.stat_while(cx, node)
   local body_inner_privileges = index_privileges_by_region(
     privilege_summary(body_cx, body_block_privileges, false))
   local body_outer_privileges = index_privileges_by_region(
-    privilege_summary(body_cx, body_block_privileges, true))
+    privilege_summary(loop_cx, body_block_privileges, true))
   for region_type, privilege_map in pairs(body_inner_privileges) do
     preopen_region_tree(body_cx, region_type, privilege_map)
   end
@@ -2475,15 +2723,26 @@ function flow_from_ast.stat_while(cx, node)
 
   local body_inputs = terralib.newlist({cond})
   for region_type, privilege_map in pairs(body_outer_privileges) do
-    body_inputs:insert(
-      open_region_tree(loop_cx, region_type, nil, privilege_map))
+    local region_symbol = cx:region_symbol(region_type)
+    local var_type = cx.tree:region_var_type(region_type)
+    if not flow_region_tree.is_region(std.as_read(var_type)) then
+      region_type = var_type
+    end
+    body_inputs:insert(open_region_tree(
+                         loop_cx, region_type, region_symbol, privilege_map))
   end
   local body = as_while_body_stat(
     loop_cx, body_cx.graph, body_inputs, ast.default_options(), node.span)
 
   local loop_inputs = terralib.newlist()
   for region_type, privilege_map in pairs(loop_outer_privileges) do
-    loop_inputs:insert(open_region_tree(cx, region_type, nil, privilege_map))
+    local region_symbol = cx:region_symbol(region_type)
+    local var_type = cx.tree:region_var_type(region_type)
+    if not flow_region_tree.is_region(std.as_read(var_type)) then
+      region_type = var_type
+    end
+    loop_inputs:insert(open_region_tree(
+                         cx, region_type, region_symbol, privilege_map))
   end
   as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.options, node.span)
 end
@@ -2493,11 +2752,13 @@ function flow_from_ast.stat_for_num(cx, node)
     function(value) return flow_from_ast.expr(cx, value, reads) end)
 
   local block_cx = cx:new_local_scope(node.symbol)
+  block_cx:intern_region(node, node.symbol, node.symbol:gettype())
+
   local block_privileges = analyze_privileges.block(block_cx, node.block)
   local inner_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, false))
   local outer_privileges = index_privileges_by_region(
-    privilege_summary(block_cx, block_privileges, true))
+    privilege_summary(cx, block_privileges, true))
   for region_type, privilege_map in pairs(inner_privileges) do
     local var_type = cx.tree:region_var_type(region_type)
     if flow_region_tree.is_region(std.as_read(var_type)) then
@@ -2510,10 +2771,9 @@ function flow_from_ast.stat_for_num(cx, node)
     assert(#inputs <= 3)
     local i = 4
     for region_type, privilege_map in pairs(outer_privileges) do
+      local region_symbol = cx:region_symbol(region_type)
       local var_type = cx.tree:region_var_type(region_type)
-      local region_symbol
       if not flow_region_tree.is_region(std.as_read(var_type)) then
-        region_symbol = cx.tree:region_symbol(region_type)
         region_type = var_type
       end
       inputs[i] = open_region_tree(
@@ -2530,11 +2790,13 @@ function flow_from_ast.stat_for_list(cx, node)
   local value = flow_from_ast.expr(cx, node.value, name(node.value.expr_type))
 
   local block_cx = cx:new_local_scope(node.symbol)
+  block_cx:intern_region(node, node.symbol, node.symbol:gettype())
+
   local block_privileges = analyze_privileges.block(block_cx, node.block)
   local inner_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, false))
   local outer_privileges = index_privileges_by_region(
-    privilege_summary(block_cx, block_privileges, true))
+    privilege_summary(cx, block_privileges, true))
   for region_type, privilege_map in pairs(inner_privileges) do
     local var_type = cx.tree:region_var_type(region_type)
     if flow_region_tree.is_region(std.as_read(var_type)) then
@@ -2545,10 +2807,9 @@ function flow_from_ast.stat_for_list(cx, node)
 
   local inputs = terralib.newlist({value})
   for region_type, privilege_map in pairs(outer_privileges) do
+    local region_symbol = cx:region_symbol(region_type)
     local var_type = cx.tree:region_var_type(region_type)
-    local region_symbol
     if not flow_region_tree.is_region(std.as_read(var_type)) then
-      region_symbol = cx.tree:region_symbol(region_type)
       region_type = var_type
     end
     inputs:insert(open_region_tree(
@@ -2572,7 +2833,8 @@ function flow_from_ast.stat_block(cx, node)
   local block_privileges = analyze_privileges.block(block_cx, node.block)
   local inner_privileges = index_privileges_by_region(
     privilege_summary(block_cx, block_privileges, false))
-  local outer_privileges = inner_privileges
+  local outer_privileges = index_privileges_by_region(
+    privilege_summary(cx, block_privileges, false))
   for region_type, privilege_map in pairs(inner_privileges) do
     local var_type = cx.tree:region_var_type(region_type)
     if flow_region_tree.is_region(std.as_read(var_type)) then
@@ -2583,10 +2845,9 @@ function flow_from_ast.stat_block(cx, node)
 
   local inputs = terralib.newlist()
   for region_type, privilege_map in pairs(outer_privileges) do
+    local region_symbol = cx:region_symbol(region_type)
     local var_type = cx.tree:region_var_type(region_type)
-    local region_symbol
     if not flow_region_tree.is_region(std.as_read(var_type)) then
-      region_symbol = cx.tree:region_symbol(region_type)
       region_type = var_type
     end
     inputs:insert(open_region_tree(
@@ -2726,7 +2987,13 @@ function flow_from_ast.top_task(cx, node)
   local task = node.prototype
   local cx = cx:new_task_scope(task:get_constraints(),
                                task:get_region_universe())
+  for i, param in ipairs(node.params) do
+    local param_type = std.rawref(&param.param_type)
+    cx:intern_region(param, param.symbol, param_type)
+  end
   analyze_regions.top_task(cx, node)
+  analyze_privileges.block(cx, node.body)
+
   flow_from_ast.block(cx, node.body)
   return node { body = cx.graph }
 end
