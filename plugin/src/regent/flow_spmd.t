@@ -3955,11 +3955,6 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
                       options = ast.default_options(),
                       span = span,
                     },
-                    ast.typed.expr.RawContext {
-                      expr_type = std.c.legion_context_t,
-                      options = ast.default_options(),
-                      span = span,
-                    },
                     ast.typed.expr.FieldAccess {
                       value = ast.typed.expr.RawValue {
                         value = shadow_label.value,
