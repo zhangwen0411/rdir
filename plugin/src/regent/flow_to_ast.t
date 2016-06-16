@@ -498,7 +498,11 @@ function flow_to_ast.node_task(cx, nid)
       -- FIXME: This causes unintended reordering of task calls in
       -- some cases (because the stored AST may be looked up at a
       -- later point, violating the constraints in the graph).
-      if false then
+
+      -- And it breaks index launch optimization to do this, so we'll
+      -- turn it off for the moment (and hope it doesn't break
+      -- anything).
+      if true then -- false then
         cx.ast[nid] = action
         return terralib.newlist()
       else
@@ -716,18 +720,12 @@ function flow_to_ast.node_for_num(cx, nid)
 
   local block = flow_to_ast.graph(cx, label.block)
 
-  local options = label.options
-  if #block.stats > 1 and options.parallel:is(ast.options.Demand) then
-    print("FIXME: downgrading __demand(parallel) because RDIR failed to collapse the loop")
-    options = options { parallel = ast.options.Allow { value = false } }
-  end
-
   return terralib.newlist({
       ast.typed.stat.ForNum {
         symbol = label.symbol,
         values = values,
         block = block,
-        options = options,
+        options = label.options,
         span = label.span,
       },
   })
