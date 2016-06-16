@@ -1335,12 +1335,24 @@ end
 
 function analyze_privileges.expr_field_access(cx, node, privilege_map)
   local value_type = std.as_read(node.value.expr_type)
+  local expr_type = std.as_read(node.expr_type)
+
+  local usage
+  if flow_region_tree.is_region(expr_type) then
+    usage = uses(cx, expr_type, privilege_map)
+
+    -- Make sure a symbol is available.
+    if not cx:has_region_symbol(expr_type) then
+      local symbol = std.newsymbol(expr_type)
+      cx:intern_region(node, symbol, node.expr_type)
+    end
+  end
+
   local field_privilege_map = privilege_map:prepend(node.field_name)
   if std.is_bounded_type(value_type) and value_type:is_ptr() and
     std.get_field(value_type.points_to_type, node.field_name)
   then
     local bounds = value_type:bounds()
-    local usage
     for _, parent in ipairs(bounds) do
       local index
       -- FIXME: This causes issues with some tests.
@@ -1357,9 +1369,9 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
       analyze_privileges.expr(cx, node.value, reads),
       usage)
   elseif node.field_name == "ispace" then
-    return analyze_privileges.expr(cx, node.value, none)
+    return privilege_meet(analyze_privileges.expr(cx, node.value, none), usage)
   else
-    return analyze_privileges.expr(cx, node.value, field_privilege_map)
+    return privilege_meet(analyze_privileges.expr(cx, node.value, field_privilege_map), usage)
   end
 end
 
