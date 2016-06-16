@@ -1158,9 +1158,10 @@ local function privilege_summary_region(cx, usage, strip, skip_regions)
   if not usage then return summary end
   for region_type, privilege in pairs(usage) do
     if privilege ~= "none" or not skip_regions or not rawget(skip_regions, region_type) then
-      if strip then
-        region_type = strip_indexing(cx, region_type)
-      end
+      -- FIXME: This is broken and could probably be removed.
+      -- if strip then
+      --   region_type = strip_indexing(cx, region_type)
+      -- end
       region_type = strip_undefined(cx, region_type)
 
       if region_type then
