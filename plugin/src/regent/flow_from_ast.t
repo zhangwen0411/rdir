@@ -969,19 +969,16 @@ local function open_region_tree_node(cx, path, index, desired_mode, desired_op, 
   return next_nid, fresh
 end
 
-local function open_region_tree_top(cx, path, privilege, field_path)
+local function open_region_tree_top_initialize(cx, path, privilege, field_path)
   local desired_mode, desired_op = privilege_mode(privilege)
-  if not desired_mode then
-    -- Special case for "none" privilege: just create the node and
-    -- exit without linking it up to anything.
-    local next_nid = cx.graph:add_node(get_region_label(cx, path[1], field_path))
-    sequence_depend(cx, next_nid)
-    return data.newtuple(privilege, next_nid)
-  end
-
   local current_nid, fresh = open_region_tree_node(
     cx, path, #path, desired_mode, desired_op, field_path)
   if fresh then sequence_depend(cx, current_nid) end
+  return current_nid
+end
+
+local function open_region_tree_top_finalize(cx, path, privilege, field_path, current_nid)
+  local desired_mode, desired_op = privilege_mode(privilege)
   local next_nid
   if desired_mode == modes.write then
     next_nid = add_node(cx, cx.graph:node_label(current_nid))
@@ -993,13 +990,45 @@ local function open_region_tree_top(cx, path, privilege, field_path)
     next_nid = current_nid
     current_nid = false
   end
+  return current_nid, next_nid
+end
+
+local function open_region_tree_top(cx, path, privilege, field_path, initialize, finalize)
+  local desired_mode, desired_op = privilege_mode(privilege)
+  if not desired_mode then
+    if initialize then
+      -- Special case for "none" privilege: just create the node and
+      -- exit without linking it up to anything.
+      local next_nid = cx.graph:add_node(get_region_label(cx, path[1], field_path))
+      sequence_depend(cx, next_nid)
+      return data.newtuple(privilege, next_nid)
+    else
+      return
+    end
+  end
+
+  local current_nid, next_nid
+  if initialize then
+    current_nid = open_region_tree_top_initialize(cx, path, privilege, field_path)
+  else
+    current_nid = cx:state(field_path):current(path[1])
+  end
+  if finalize then
+    current_nid, next_nid = open_region_tree_top_finalize(
+      cx, path, privilege, field_path, current_nid)
+  end
+
   assert(current_nid or next_nid)
   assert(not current_nid or flow.is_valid_node(current_nid))
   assert(not next_nid or flow.is_valid_node(next_nid))
   return data.newtuple(privilege, current_nid, next_nid)
 end
 
-local function open_region_tree(cx, expr_type, symbol, privilege_map)
+local function open_region_tree(cx, expr_type, symbol, privilege_map, initialize, finalize)
+  if not initialize and not finalize then
+    initialize, finalize = true, true
+  end
+
   local region_type = cx.tree:ensure_variable(expr_type, symbol)
   assert(flow_region_tree.is_region(region_type))
   assert(is_field_map(privilege_map))
@@ -1009,9 +1038,11 @@ local function open_region_tree(cx, expr_type, symbol, privilege_map)
   local path = data.newtuple(unpack(cx.tree:ancestors(region_type)))
   local result = new_field_map()
   for field_path, privilege in privilege_map:items() do
-    result:insert(
-      field_path,
-      open_region_tree_top(cx, path, privilege, field_path))
+    local field_result = open_region_tree_top(
+      cx, path, privilege, field_path, initialize, finalize)
+    if field_result then
+      result:insert(field_path, field_result)
+    end
   end
   return result
 end
@@ -2203,7 +2234,7 @@ local function as_deref_expr(cx, args, result_nid, expr_type, options, span,
   return attach_result(privilege_map, result_nid)
 end
 
-function flow_from_ast.expr_region_root(cx, node, privilege_map)
+function flow_from_ast.expr_region_root(cx, node, privilege_map, init_only)
   local region_fields = std.flatten_struct_fields(
     std.as_read(node.region.expr_type):fspace())
   local privilege_fields = terralib.newlist()
@@ -2223,7 +2254,7 @@ function flow_from_ast.expr_region_root(cx, node, privilege_map)
   return flow_from_ast.expr(cx, node.region, field_privilege_map)
 end
 
-function flow_from_ast.expr_condition(cx, node, privilege_map)
+function flow_from_ast.expr_condition(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
@@ -2232,27 +2263,27 @@ function flow_from_ast.expr_condition(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_id(cx, node, privilege_map)
+function flow_from_ast.expr_id(cx, node, privilege_map, init_only)
   -- FIXME: Why am I getting vars typed as unit?
   if std.as_read(node.expr_type) == terralib.types.unit then
     return new_field_map()
   end
-  return open_region_tree(cx, node.expr_type, node.value, privilege_map)
+  return open_region_tree(cx, node.expr_type, node.value, privilege_map, init_only)
 end
 
-function flow_from_ast.expr_constant(cx, node, privilege_map)
+function flow_from_ast.expr_constant(cx, node, privilege_map, init_only)
   return attach_result(
     privilege_map,
     cx.graph:add_node(flow.node.Constant { value = node }))
 end
 
-function flow_from_ast.expr_function(cx, node, privilege_map)
+function flow_from_ast.expr_function(cx, node, privilege_map, init_only)
   return attach_result(
     privilege_map,
     cx.graph:add_node(flow.node.Function { value = node }))
 end
 
-function flow_from_ast.expr_field_access(cx, node, privilege_map)
+function flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
   local value_type = std.as_read(node.value.expr_type)
   local value
   local field_privilege_map = privilege_map:prepend(node.field_name)
@@ -2292,7 +2323,7 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map)
     field_privilege_map)
 end
 
-function flow_from_ast.expr_index_access(cx, node, privilege_map)
+function flow_from_ast.expr_index_access(cx, node, privilege_map, init_only)
   local expr_type = std.as_read(node.expr_type)
   local value_privilege = reads
   if flow_region_tree.is_region(expr_type) then
@@ -2303,7 +2334,7 @@ function flow_from_ast.expr_index_access(cx, node, privilege_map)
 
   if flow_region_tree.is_region(expr_type) then
     local inputs = terralib.newlist({value, index})
-    local region = open_region_tree(cx, node.expr_type, nil, privilege_map)
+    local region = open_region_tree(cx, node.expr_type, nil, privilege_map, init_only)
     return as_index_expr(
       cx, inputs, region, expr_type, node.options, node.span)
   end
@@ -2315,7 +2346,7 @@ function flow_from_ast.expr_index_access(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_method_call(cx, node, privilege_map)
+function flow_from_ast.expr_method_call(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   local args = node.args:map(function(arg) return flow_from_ast.expr(cx, arg, reads) end)
   local inputs = terralib.newlist({value})
@@ -2329,9 +2360,11 @@ function flow_from_ast.expr_method_call(cx, node, privilege_map)
     inputs, privilege_map)
 end
 
-function flow_from_ast.expr_call(cx, node, privilege_map)
+function flow_from_ast.expr_call(cx, node, privilege_map, init_only)
   local fn = flow_from_ast.expr(cx, node.fn, reads)
   local inputs = terralib.newlist({fn})
+
+  local privileges = terralib.newlist()
   for i, arg in ipairs(node.args) do
     local param_type = node.fn.expr_type.parameters[i]
     local param_privilege_map
@@ -2340,8 +2373,25 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
     else
       param_privilege_map = name(param_type)
     end
-    inputs:insert(flow_from_ast.expr(cx, arg, param_privilege_map))
+    privileges:insert(param_privilege_map)
   end
+
+  -- Perform a two-pass analysis of region arguments. This avoid loops
+  -- in the graph when two inputs are not statically known to be
+  -- disjoint.
+  for i, arg in ipairs(node.args) do
+    local param_privilege_map = privileges[i]
+    inputs[i+1] = flow_from_ast.expr(cx, arg, param_privilege_map, true)
+  end
+  for i, arg in ipairs(node.args) do
+    local param_privilege_map = privileges[i]
+    if arg:is(ast.typed.expr.ID) then
+      inputs[i+1]:insertall(open_region_tree(cx, arg.expr_type, arg.value, param_privilege_map, false, true))
+    elseif flow_region_tree.is_region(std.as_read(arg.expr_type)) then
+      inputs[i+1]:insertall(open_region_tree(cx, arg.expr_type, nil, param_privilege_map, false, true))
+    end
+  end
+
   inputs:insertall(
     node.conditions:map(
       function(condition)
@@ -2355,7 +2405,7 @@ function flow_from_ast.expr_call(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_cast(cx, node, privilege_map)
+function flow_from_ast.expr_cast(cx, node, privilege_map, init_only)
   local fn = flow_from_ast.expr(cx, node.fn, reads)
   local arg = flow_from_ast.expr(cx, node.arg, name(node.arg.expr_type))
   return as_opaque_expr(
@@ -2365,7 +2415,7 @@ function flow_from_ast.expr_cast(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_ctor(cx, node, privilege_map)
+function flow_from_ast.expr_ctor(cx, node, privilege_map, init_only)
   local values = node.fields:map(
     function(field) return flow_from_ast.expr(cx, field.value, name(field.value.expr_type)) end)
   local fields = data.zip(node.fields, values):map(
@@ -2379,7 +2429,7 @@ function flow_from_ast.expr_ctor(cx, node, privilege_map)
     values, privilege_map)
 end
 
-function flow_from_ast.expr_raw_context(cx, node, privilege_map)
+function flow_from_ast.expr_raw_context(cx, node, privilege_map, init_only)
   return as_opaque_expr(
     cx,
     function() return node end,
@@ -2387,7 +2437,7 @@ function flow_from_ast.expr_raw_context(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_raw_fields(cx, node, privilege_map)
+function flow_from_ast.expr_raw_fields(cx, node, privilege_map, init_only)
   local region = flow_from_ast.expr(cx, node.region, none)
   return as_opaque_expr(
     cx,
@@ -2396,7 +2446,7 @@ function flow_from_ast.expr_raw_fields(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_raw_physical(cx, node, privilege_map)
+function flow_from_ast.expr_raw_physical(cx, node, privilege_map, init_only)
   local region = flow_from_ast.expr(cx, node.region, reads_writes)
   return as_opaque_expr(
     cx,
@@ -2405,7 +2455,7 @@ function flow_from_ast.expr_raw_physical(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
+function flow_from_ast.expr_raw_runtime(cx, node, privilege_map, init_only)
   return as_opaque_expr(
     cx,
     function() return node end,
@@ -2413,7 +2463,7 @@ function flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_raw_value(cx, node, privilege_map)
+function flow_from_ast.expr_raw_value(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, name(node.value.expr_type))
   return as_opaque_expr(
     cx,
@@ -2422,7 +2472,7 @@ function flow_from_ast.expr_raw_value(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_isnull(cx, node, privilege_map)
+function flow_from_ast.expr_isnull(cx, node, privilege_map, init_only)
   local pointer = flow_from_ast.expr(cx, node.pointer, reads)
   return as_opaque_expr(
     cx,
@@ -2431,7 +2481,7 @@ function flow_from_ast.expr_isnull(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_new(cx, node, privilege_map)
+function flow_from_ast.expr_new(cx, node, privilege_map, init_only)
   local region = flow_from_ast.expr(cx, node.region, none)
   return as_opaque_expr(
     cx,
@@ -2440,7 +2490,7 @@ function flow_from_ast.expr_new(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_null(cx, node, privilege_map)
+function flow_from_ast.expr_null(cx, node, privilege_map, init_only)
   return as_opaque_expr(
     cx,
     function() return node end,
@@ -2448,7 +2498,7 @@ function flow_from_ast.expr_null(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
+function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
@@ -2457,7 +2507,7 @@ function flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_static_cast(cx, node, privilege_map)
+function flow_from_ast.expr_static_cast(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
@@ -2466,7 +2516,7 @@ function flow_from_ast.expr_static_cast(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
+function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
@@ -2475,7 +2525,7 @@ function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_advance(cx, node, privilege_map)
+function flow_from_ast.expr_advance(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
     cx,
@@ -2484,7 +2534,7 @@ function flow_from_ast.expr_advance(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_arrive(cx, node, privilege_map)
+function flow_from_ast.expr_arrive(cx, node, privilege_map, init_only)
   local barrier = flow_from_ast.expr(cx, node.barrier, reads)
   local value = node.value and flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
@@ -2494,7 +2544,7 @@ function flow_from_ast.expr_arrive(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_await(cx, node, privilege_map)
+function flow_from_ast.expr_await(cx, node, privilege_map, init_only)
   local barrier = flow_from_ast.expr(cx, node.barrier, reads)
   return as_opaque_expr(
     cx,
@@ -2503,7 +2553,7 @@ function flow_from_ast.expr_await(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_copy(cx, node, privilege_map)
+function flow_from_ast.expr_copy(cx, node, privilege_map, init_only)
   local dst_mode = reads_writes
   if node.op then
     dst_mode = get_trivial_field_map(std.reduces(node.op))
@@ -2522,7 +2572,7 @@ function flow_from_ast.expr_copy(cx, node, privilege_map)
     node.options, node.span, privilege_map)
 end
 
-function flow_from_ast.expr_fill(cx, node, privilege_map)
+function flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
   local dst = flow_from_ast.expr_region_root(cx, node.dst, reads_writes)
   local value = flow_from_ast.expr(cx, node.value, reads)
   local conditions = node.conditions:map(
@@ -2536,7 +2586,7 @@ function flow_from_ast.expr_fill(cx, node, privilege_map)
     node.options, node.span, privilege_map)
 end
 
-function flow_from_ast.expr_unary(cx, node, privilege_map)
+function flow_from_ast.expr_unary(cx, node, privilege_map, init_only)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
     cx,
@@ -2545,7 +2595,7 @@ function flow_from_ast.expr_unary(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_binary(cx, node, privilege_map)
+function flow_from_ast.expr_binary(cx, node, privilege_map, init_only)
   local lhs = flow_from_ast.expr(cx, node.lhs, reads)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   local inputs = terralib.newlist({lhs, rhs})
@@ -2554,7 +2604,7 @@ function flow_from_ast.expr_binary(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr_deref(cx, node, privilege_map)
+function flow_from_ast.expr_deref(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   -- FIXME: So it turns out that dereferencing, and point regions in
   -- general, are very messed up. There are a couple of moving parts
@@ -2609,102 +2659,102 @@ function flow_from_ast.expr_deref(cx, node, privilege_map)
     privilege_map)
 end
 
-function flow_from_ast.expr(cx, node, privilege_map)
+function flow_from_ast.expr(cx, node, privilege_map, init_only)
   if node:is(ast.typed.expr.ID) then
-    return flow_from_ast.expr_id(cx, node, privilege_map)
+    return flow_from_ast.expr_id(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Constant) then
-    return flow_from_ast.expr_constant(cx, node, privilege_map)
+    return flow_from_ast.expr_constant(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Function) then
-    return flow_from_ast.expr_function(cx, node, privilege_map)
+    return flow_from_ast.expr_function(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.FieldAccess) then
-    return flow_from_ast.expr_field_access(cx, node, privilege_map)
+    return flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.IndexAccess) then
-    return flow_from_ast.expr_index_access(cx, node, privilege_map)
+    return flow_from_ast.expr_index_access(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.MethodCall) then
-    return flow_from_ast.expr_method_call(cx, node, privilege_map)
+    return flow_from_ast.expr_method_call(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Call) then
-    return flow_from_ast.expr_call(cx, node, privilege_map)
+    return flow_from_ast.expr_call(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Cast) then
-    return flow_from_ast.expr_cast(cx, node, privilege_map)
+    return flow_from_ast.expr_cast(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Ctor) then
-    return flow_from_ast.expr_ctor(cx, node, privilege_map)
+    return flow_from_ast.expr_ctor(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.RawContext) then
-    return flow_from_ast.expr_raw_context(cx, node, privilege_map)
+    return flow_from_ast.expr_raw_context(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.RawFields) then
-    return flow_from_ast.expr_raw_fields(cx, node, privilege_map)
+    return flow_from_ast.expr_raw_fields(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.RawPhysical) then
-    return flow_from_ast.expr_raw_physical(cx, node, privilege_map)
+    return flow_from_ast.expr_raw_physical(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.RawRuntime) then
-    return flow_from_ast.expr_raw_runtime(cx, node, privilege_map)
+    return flow_from_ast.expr_raw_runtime(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.RawValue) then
-    return flow_from_ast.expr_raw_value(cx, node, privilege_map)
+    return flow_from_ast.expr_raw_value(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Isnull) then
-    return flow_from_ast.expr_isnull(cx, node, privilege_map)
+    return flow_from_ast.expr_isnull(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.New) then
-    return flow_from_ast.expr_new(cx, node, privilege_map)
+    return flow_from_ast.expr_new(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Null) then
-    return flow_from_ast.expr_null(cx, node, privilege_map)
+    return flow_from_ast.expr_null(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.DynamicCast) then
-    return flow_from_ast.expr_dynamic_cast(cx, node, privilege_map)
+    return flow_from_ast.expr_dynamic_cast(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.StaticCast) then
-    return flow_from_ast.expr_static_cast(cx, node, privilege_map)
+    return flow_from_ast.expr_static_cast(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.UnsafeCast) then
-    return flow_from_ast.expr_unsafe_cast(cx, node, privilege_map)
+    return flow_from_ast.expr_unsafe_cast(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Ispace) then
-    return flow_from_ast.expr_ispace(cx, node, privilege_map)
+    return flow_from_ast.expr_ispace(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Region) then
-    return flow_from_ast.expr_region(cx, node, privilege_map)
+    return flow_from_ast.expr_region(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Partition) then
-    return flow_from_ast.expr_partition(cx, node, privilege_map)
+    return flow_from_ast.expr_partition(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.CrossProduct) then
-    return flow_from_ast.expr_cross_product(cx, node, privilege_map)
+    return flow_from_ast.expr_cross_product(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Advance) then
-    return flow_from_ast.expr_advance(cx, node, privilege_map)
+    return flow_from_ast.expr_advance(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Arrive) then
-    return flow_from_ast.expr_arrive(cx, node, privilege_map)
+    return flow_from_ast.expr_arrive(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Await) then
-    return flow_from_ast.expr_await(cx, node, privilege_map)
+    return flow_from_ast.expr_await(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Copy) then
-    return flow_from_ast.expr_copy(cx, node, privilege_map)
+    return flow_from_ast.expr_copy(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Fill) then
-    return flow_from_ast.expr_fill(cx, node, privilege_map)
+    return flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Unary) then
-    return flow_from_ast.expr_unary(cx, node, privilege_map)
+    return flow_from_ast.expr_unary(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Binary) then
-    return flow_from_ast.expr_binary(cx, node, privilege_map)
+    return flow_from_ast.expr_binary(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Deref) then
-    return flow_from_ast.expr_deref(cx, node, privilege_map)
+    return flow_from_ast.expr_deref(cx, node, privilege_map, init_only)
 
   else
     assert(false, "unexpected node type " .. tostring(node.node_type))
