@@ -47,6 +47,7 @@ local optimize_loops = require("regent/optimize_loops")
 local optimize_traces = require("regent/optimize_traces")
 local pretty = require("regent/pretty")
 local std = require("regent/std")
+local validate = require("regent/validate")
 local vectorize_loops = require("regent/vectorize_loops")
 
 local context = {}
@@ -429,6 +430,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
   if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
   if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
 
+  if std.config["validate"] then validate.entry(ast) end
   if std.config["pretty"] then print(pretty.entry(ast)) end
   ast = codegen.entry(ast)
   return ast, param_mapping, return_type
