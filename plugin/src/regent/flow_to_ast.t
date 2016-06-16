@@ -200,7 +200,13 @@ function flow_to_ast.node_opaque(cx, nid)
       assert(#input >= 1)
       local input_nid = input[1].from_node
       local input_label = cx.graph:node_label(input_nid)
-      if input_label:is(flow.node.data.Scalar) and input_label.fresh then
+      if input_label:is(flow.node.data.Scalar) and input_label.fresh and
+        -- FIXME: This is required for the workaround for tasks
+        -- producing fresh scalars---we don't want to double-save the
+        -- scalar in question, so we have to check here.
+        not (cx.ast[input_nid]:is(ast.typed.expr.ID) and
+               cx.ast[input_nid].value == input_label.value.value)
+      then
         actions:insert(
           ast.typed.stat.Var {
             symbols = terralib.newlist({ input_label.value.value }),
