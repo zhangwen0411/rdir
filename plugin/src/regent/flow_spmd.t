@@ -458,11 +458,23 @@ local function compute_version_numbers(cx)
     for _, edge in ipairs(edges) do
       local contribute = 0
       local pred_label = cx.graph:node_label(edge.from_node)
-      if (edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Reduce)) and
+
+      -- Writes immediately bump the version.
+      if edge.label:is(flow.edge.Write) and
         not (pred_label:is(flow.node.Open) or pred_label:is(flow.node.Close))
       then
         contribute = 1
+
+      -- Reductions are pending until a subsequent read.
+      elseif edge.label:is(flow.edge.Read) and
+        #cx.graph:filter_immediate_predecessors_by_edges(
+          function(edge) return edge.label:is(flow.edge.Reduce) end,
+          edge.from_node) > 0
+      then
+        contribute = 1
       end
+
+      -- Record the maximum version (after contributions).
       if not edge.label:is(flow.edge.HappensBefore) then
         version = data.max(version, versions[edge.from_node] + contribute)
       end
@@ -578,7 +590,15 @@ local function normalize_communication_subgraph(cx, shard_loop)
         local input_label = block_cx.graph:node_label(input_nid)
         local result_nid = find_matching_output(
           block_cx, close_nid, input_label.region_type, input_label.field_path)
-        if result_nid and versions[result_nid] <= versions[input_nid] then
+        if result_nid and
+          #block_cx.graph:filter_immediate_predecessors_by_edges(
+            function(edge)
+              local label = block_cx.graph:node_label(edge.from_node)
+              return (edge.label:is(flow.edge.Write) or edge.label:is(flow.edge.Reduce)) and
+                not (label:is(flow.node.Open) or label:is(flow.node.Close))
+            end,
+            input_nid) > 0
+        then
           contributor_nids:insert(input_nid)
         end
       end
@@ -633,17 +653,28 @@ local function normalize_communication_subgraph(cx, shard_loop)
     else
       assert(versions_changed == 0)
       -- Bump each region to the next available version.
+      local delete = true
       local input_nids = block_cx.graph:immediate_predecessors(close_nid)
       for _, input_nid in ipairs(input_nids) do
         local input_label = block_cx.graph:node_label(input_nid)
         local result_nid = find_matching_output(
           block_cx, close_nid, input_label.region_type, input_label.field_path)
         if result_nid then
-          block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
-          block_cx.graph:remove_node(result_nid)
+          -- Don't destroy a close that was needed to separate reductions.
+          if #block_cx.graph:filter_immediate_predecessors_by_edges(
+            function(edge) return edge.label:is(flow.edge.Reduce) end,
+            result_nid) > 0
+          then
+            delete = false
+          else
+            block_cx.graph:copy_outgoing_edges(function() return true end, result_nid, input_nid)
+            block_cx.graph:remove_node(result_nid)
+          end
         end
       end
-      block_cx.graph:remove_node(close_nid)
+      if delete then
+        block_cx.graph:remove_node(close_nid)
+      end
     end
   end
 
