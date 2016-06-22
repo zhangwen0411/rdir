@@ -1625,6 +1625,30 @@ function analyze_privileges.expr_fill(cx, node, privilege_map)
         end)))
 end
 
+function analyze_privileges.expr_acquire(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr_region_root(cx, node.region, reads_writes),
+    data.reduce(
+      privilege_meet,
+      node.conditions:map(
+        function(condition)
+          return analyze_privileges.expr_condition(cx, condition, reads) or
+            new_field_map()
+        end)))
+end
+
+function analyze_privileges.expr_release(cx, node, privilege_map)
+  return privilege_meet(
+    analyze_privileges.expr_region_root(cx, node.region, reads_writes),
+    data.reduce(
+      privilege_meet,
+      node.conditions:map(
+        function(condition)
+          return analyze_privileges.expr_condition(cx, condition, reads) or
+            new_field_map()
+        end)))
+end
+
 function analyze_privileges.expr_unary(cx, node, privilege_map)
   return analyze_privileges.expr(cx, node.rhs, reads)
 end
@@ -1789,6 +1813,12 @@ function analyze_privileges.expr(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Fill) then
     return analyze_privileges.expr_fill(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Acquire) then
+    return analyze_privileges.expr_acquire(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Release) then
+    return analyze_privileges.expr_release(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.Unary) then
     return analyze_privileges.expr_unary(cx, node, privilege_map)
@@ -2202,6 +2232,32 @@ local function as_fill_expr(cx, args, dst_field_paths,
   return attach_result(privilege_map, compute_nid)
 end
 
+local function as_acquire_expr(cx, args, field_paths,
+                               options, span, privilege_map)
+  local label = flow.node.Acquire {
+    field_paths = field_paths,
+    options = options,
+    span = span,
+  }
+  local compute_nid = add_node(cx, label)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, compute_nid)
+end
+
+local function as_release_expr(cx, args, field_paths,
+                               options, span, privilege_map)
+  local label = flow.node.Release {
+    field_paths = field_paths,
+    options = options,
+    span = span,
+  }
+  local compute_nid = add_node(cx, label)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, compute_nid)
+end
+
 local function as_binary_expr(cx, op, args, expr_type, options, span,
                               privilege_map)
   local label = flow.node.Binary {
@@ -2599,6 +2655,32 @@ function flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
     node.options, node.span, privilege_map)
 end
 
+function flow_from_ast.expr_acquire(cx, node, privilege_map, init_only)
+  local region = flow_from_ast.expr_region_root(cx, node.region, reads_writes)
+  local conditions = node.conditions:map(
+    function(condition)
+      return flow_from_ast.expr_condition(cx, condition, reads)
+    end)
+
+  local inputs = terralib.newlist({region, unpack(conditions)})
+  return as_acquire_expr(
+    cx, inputs, node.region.fields,
+    node.options, node.span, privilege_map)
+end
+
+function flow_from_ast.expr_release(cx, node, privilege_map, init_only)
+  local region = flow_from_ast.expr_region_root(cx, node.region, reads_writes)
+  local conditions = node.conditions:map(
+    function(condition)
+      return flow_from_ast.expr_condition(cx, condition, reads)
+    end)
+
+  local inputs = terralib.newlist({region, unpack(conditions)})
+  return as_release_expr(
+    cx, inputs, node.region.fields,
+    node.options, node.span, privilege_map)
+end
+
 function flow_from_ast.expr_unary(cx, node, privilege_map, init_only)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   return as_opaque_expr(
@@ -2759,6 +2841,12 @@ function flow_from_ast.expr(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Fill) then
     return flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
+
+  elseif node:is(ast.typed.expr.Acquire) then
+    return flow_from_ast.expr_acquire(cx, node, privilege_map, init_only)
+
+  elseif node:is(ast.typed.expr.Release) then
+    return flow_from_ast.expr_release(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Unary) then
     return flow_from_ast.expr_unary(cx, node, privilege_map, init_only)

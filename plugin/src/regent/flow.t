@@ -109,6 +109,8 @@ function graph:node_minimum_port(node)
     label:is(flow.node.Task) or
     label:is(flow.node.Copy) or
     label:is(flow.node.Fill) or
+    label:is(flow.node.Acquire) or
+    label:is(flow.node.Release) or
     label:is(flow.node.Open) or
     label:is(flow.node.Close)
   then
@@ -897,6 +899,7 @@ function graph:printpretty(ids, types, metadata)
       node:is(flow.node.Assignment) or node:is(flow.node.Reduce) or
       node:is(flow.node.Task) or
       node:is(flow.node.Copy) or node:is(flow.node.Fill) or
+      node:is(flow.node.Acquire) or node:is(flow.node.Release) or
       node:is(flow.node.ctrl)
     then
       shape = "rectangle"
@@ -957,6 +960,8 @@ flow.node:leaf("Task", {"opaque", "expr_type", "options", "span"})
 flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",
                         "op", "options", "span"})
 flow.node:leaf("Fill", {"dst_field_paths", "options", "span"})
+flow.node:leaf("Acquire", {"field_paths", "options", "span"})
+flow.node:leaf("Release", {"field_paths", "options", "span"})
 
 flow.node:leaf("Open", {})
 flow.node:leaf("Close", {})

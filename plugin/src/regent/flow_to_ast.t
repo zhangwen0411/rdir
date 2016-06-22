@@ -651,6 +651,110 @@ function flow_to_ast.node_fill(cx, nid)
   })
 end
 
+function flow_to_ast.node_acquire(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  local maxport = get_maxport(inputs)
+
+  local region = cx.ast[get_arg_node(inputs, 1, true)]
+
+  local conditions = terralib.newlist()
+  for i = 2, maxport do
+    local edge = get_arg_edge(inputs, i, false)
+    local value = cx.ast[edge.from_node]
+    if not value:is(ast.typed.expr.Condition) then
+      if edge.label:is(flow.edge.Await) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.awaits}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.arrives}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      else
+        assert(false)
+      end
+    end
+    conditions:insert(value)
+  end
+
+  local action = ast.typed.expr.Acquire {
+    region = as_expr_region_root(region, label.field_paths),
+    conditions = conditions,
+    expr_type = terralib.types.unit,
+    options = label.options,
+    span = label.span,
+  }
+
+  return terralib.newlist({
+      ast.typed.stat.Expr {
+        expr = action,
+        options = action.options,
+        span = action.span,
+      },
+  })
+end
+
+function flow_to_ast.node_release(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+  local maxport = get_maxport(inputs)
+
+  local region = cx.ast[get_arg_node(inputs, 1, true)]
+
+  local conditions = terralib.newlist()
+  for i = 2, maxport do
+    local edge = get_arg_edge(inputs, i, false)
+    local value = cx.ast[edge.from_node]
+    if not value:is(ast.typed.expr.Condition) then
+      if edge.label:is(flow.edge.Await) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.awaits}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
+        value = ast.typed.expr.Condition {
+          value = value,
+          conditions = terralib.newlist({std.arrives}),
+          expr_type = value.expr_type,
+          options = ast.default_options(),
+          span = value.span,
+        }
+      else
+        assert(false)
+      end
+    end
+    conditions:insert(value)
+  end
+
+  local action = ast.typed.expr.Release {
+    region = as_expr_region_root(region, label.field_paths),
+    conditions = conditions,
+    expr_type = terralib.types.unit,
+    options = label.options,
+    span = label.span,
+  }
+
+  return terralib.newlist({
+      ast.typed.stat.Expr {
+        expr = action,
+        options = action.options,
+        span = action.span,
+      },
+  })
+end
+
 function flow_to_ast.node_block(cx, nid)
   local label = cx.graph:node_label(nid)
   local block = flow_to_ast.graph(cx, label.block)
@@ -874,6 +978,12 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Fill) then
     return flow_to_ast.node_fill(cx, nid)
+
+  elseif label:is(flow.node.Acquire) then
+    return flow_to_ast.node_acquire(cx, nid)
+
+  elseif label:is(flow.node.Release) then
+    return flow_to_ast.node_release(cx, nid)
 
   elseif label:is(flow.node.Open) then
     return
