@@ -395,7 +395,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   -- Follow through with the rest of the compilation pipeline.
   do
     local ast = new_task
-    if std.config["task-inlines"] then ast = inline_tasks.entry(ast) end
+    if std.config["inline"] then ast = inline_tasks.entry(ast) end
     ast = flow_from_ast.entry(ast)
     ast = flow_loop_fusion.entry(ast)
     ast = flow_task_fusion.entry(ast)

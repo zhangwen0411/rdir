@@ -65,7 +65,7 @@ function compile(lex)
     local env = environment_function()
     local ast = specialize.entry(env, node)
     ast = type_check.entry(ast)
-    if std.config["task-inlines"] then ast = inline_tasks.entry(ast) end
+    if std.config["inline"] then ast = inline_tasks.entry(ast) end
     ast = flow_from_ast.entry(ast)
     ast = flow_loop_fusion.entry(ast)
     ast = flow_task_fusion.entry(ast)
