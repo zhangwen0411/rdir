@@ -401,7 +401,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
     ast = flow_task_fusion.entry(ast)
     ast = flow_dead_code_elimination.entry(ast)
     ast = flow_to_ast.entry(ast)
-    if std.config["index-launches"] then ast = optimize_loops.entry(ast) end
+    if std.config["index-launch"] then ast = optimize_loops.entry(ast) end
     if std.config["future"] then ast = optimize_futures.entry(ast) end
     if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
     if std.config["leaf"] then ast = optimize_config_options.entry(ast) end

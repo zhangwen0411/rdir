@@ -421,7 +421,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
   -- cyclic dependence. Name each optimization individually.
 
   -- passes.optimize(ast)
-  if std.config["index-launches"] then ast = optimize_loops.entry(ast) end
+  if std.config["index-launch"] then ast = optimize_loops.entry(ast) end
   if std.config["future"] then ast = optimize_futures.entry(ast) end
   print("FIXME: Inline optimization disabled while outlining task")
   -- if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
