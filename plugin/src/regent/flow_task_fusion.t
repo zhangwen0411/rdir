@@ -43,8 +43,8 @@ local inline_tasks = require("regent/inline_tasks")
 local optimize_config_options = require("regent/optimize_config_options")
 local optimize_divergence = require("regent/optimize_divergence")
 local optimize_futures = require("regent/optimize_futures")
+local optimize_index_launches = require("regent/optimize_index_launches")
 local optimize_inlines = require("regent/optimize_inlines")
-local optimize_loops = require("regent/optimize_loops")
 local std = require("regent/std")
 local vectorize_loops = require("regent/vectorize_loops")
 
@@ -401,7 +401,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
     ast = flow_task_fusion.entry(ast)
     ast = flow_dead_code_elimination.entry(ast)
     ast = flow_to_ast.entry(ast)
-    if std.config["index-launch"] then ast = optimize_loops.entry(ast) end
+    if std.config["index-launch"] then ast = optimize_index_launches.entry(ast) end
     if std.config["future"] then ast = optimize_futures.entry(ast) end
     if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
     if std.config["leaf"] then ast = optimize_config_options.entry(ast) end

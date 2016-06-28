@@ -41,8 +41,8 @@ local flow_to_ast = require("regent/flow_to_ast")
 local optimize_config_options = require("regent/optimize_config_options")
 local optimize_divergence = require("regent/optimize_divergence")
 local optimize_futures = require("regent/optimize_futures")
+local optimize_index_launches = require("regent/optimize_index_launches")
 local optimize_inlines = require("regent/optimize_inlines")
-local optimize_loops = require("regent/optimize_loops")
 local optimize_traces = require("regent/optimize_traces")
 local pretty = require("regent/pretty")
 local log = require("regent/log")
@@ -1816,7 +1816,7 @@ do
     -- cyclic dependence. Name each optimization individually.
 
     -- passes.optimize(ast)
-    if std.config["index-launch"] then ast = optimize_loops.entry(ast) end
+    if std.config["index-launch"] then ast = optimize_index_launches.entry(ast) end
     if std.config["future"] then ast = optimize_futures.entry(ast) end
     print("FIXME: Inline optimization disabled while generating empty task")
     -- if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
