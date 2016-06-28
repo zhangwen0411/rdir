@@ -128,7 +128,7 @@ local function gather_params(cx, nid)
           ast.typed.top.TaskParam {
             symbol = label.value.value,
             param_type = std.as_read(label.value.expr_type),
-            options = label.value.options,
+            annotations = label.value.annotations,
             span = label.value.span,
         })
       end
@@ -327,7 +327,7 @@ local function gather_return(cx, nid)
       name = field_name,
       value = result_label.value,
       expr_type = field_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = result_label.value.span,
     })
     span = result_label.value.span
@@ -339,21 +339,21 @@ local function gather_return(cx, nid)
         fn = ast.typed.expr.Function {
           value = return_type,
           expr_type = terralib.types.functype(terralib.newlist({std.untyped}), return_type, false),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = span,
         },
         arg = ast.typed.expr.Ctor {
           fields = fields,
           named = true,
           expr_type = std.ctor(return_type.entries),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = span,
         },
         expr_type = return_type,
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = span,
       },
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = span,
     }
   }
@@ -413,7 +413,7 @@ local function extract_task(cx, nid, prefix, force_read_write)
     },
     region_divergence = false,
     prototype = prototype,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = label.span,
   }
   ast = flow_to_ast.entry(ast)
@@ -441,7 +441,7 @@ local function add_call_node(cx, nid, return_type)
   local label = flow.node.Task {
     opaque = false,
     expr_type = return_type,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = original_label.span,
   }
   return cx.graph:add_node(label)
@@ -453,7 +453,7 @@ local function add_task_arg(cx, call_nid, task)
     value = ast.typed.expr.Function {
       value = task,
       expr_type = task:gettype(),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = call_label.span,
     }
   }
@@ -568,7 +568,7 @@ local function add_result(cx, original_nid, call_nid, return_type)
       action = ast.typed.stat.Assignment {
         lhs = terralib.newlist({output_label.value}),
         rhs = terralib.newlist({tmp_label.value}),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = output_label.value.span,
       }
     }

@@ -214,7 +214,7 @@ function flow_to_ast.node_opaque(cx, nid)
             values = terralib.newlist({
                 cx.ast[input_nid],
             }),
-            options = input_label.value.options,
+            annotations = input_label.value.annotations,
             span = input_label.value.span,
         })
       elseif input_label:is(flow.node.data) and
@@ -226,7 +226,7 @@ function flow_to_ast.node_opaque(cx, nid)
           symbols = terralib.newlist({ input_label.value.value }),
           types = terralib.newlist({ std.as_read(region_ast.expr_type) }),
           values = terralib.newlist({ region_ast }),
-          options = region_ast.options,
+          annotations = region_ast.annotations,
           span = region_ast.span,
         }
         actions:insert(action)
@@ -243,7 +243,7 @@ function flow_to_ast.node_opaque(cx, nid)
       actions:insert(
         ast.typed.stat.Expr {
           expr = label.action,
-          options = label.action.options,
+          annotations = label.action.annotations,
           span = label.action.span,
       })
     elseif label.action:is(ast.typed.stat) then
@@ -261,7 +261,7 @@ function flow_to_ast.node_opaque(cx, nid)
       actions:insert(
         ast.typed.stat.Expr {
           expr = label.action,
-          options = label.action.options,
+          annotations = label.action.annotations,
           span = label.action.span,
       })
       return actions
@@ -284,7 +284,7 @@ function make_expr_result(cx, nid, action)
     return terralib.newlist({
         ast.typed.stat.Expr {
           expr = action,
-          options = action.options,
+          annotations = action.annotations,
           span = action.span,
         },
     })
@@ -293,7 +293,7 @@ function make_expr_result(cx, nid, action)
         ast.typed.stat.Assignment {
           lhs = terralib.newlist({result_label.value}),
           rhs = terralib.newlist({action}),
-          options = action.options,
+          annotations = action.annotations,
           span = action.span,
         },
     })
@@ -312,7 +312,7 @@ function flow_to_ast.node_binary(cx, nid)
     rhs = rhs,
     op = label.op,
     expr_type = label.expr_type,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
@@ -330,7 +330,7 @@ function flow_to_ast.node_index_access(cx, nid)
     value = value,
     index = index,
     expr_type = label.expr_type,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
@@ -346,7 +346,7 @@ function flow_to_ast.node_deref(cx, nid)
   local action = ast.typed.expr.Deref {
     value = value,
     expr_type = label.expr_type,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
@@ -362,7 +362,7 @@ function flow_to_ast.node_advance(cx, nid)
   local action = ast.typed.expr.Advance {
     value = value,
     expr_type = label.expr_type,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
@@ -392,7 +392,7 @@ function flow_to_ast.node_assignment(cx, nid)
   local action = ast.typed.stat.Assignment {
     lhs = lhs,
     rhs = rhs,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
   return terralib.newlist({action})
@@ -422,7 +422,7 @@ function flow_to_ast.node_reduce(cx, nid)
     lhs = lhs,
     rhs = rhs,
     op = label.op,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
   return terralib.newlist({action})
@@ -473,7 +473,7 @@ function flow_to_ast.node_task(cx, nid)
           conditions = terralib.newlist({condition}),
           value = value,
           expr_type = std.as_read(value.expr_type),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = label.span,
       })
     end
@@ -484,7 +484,7 @@ function flow_to_ast.node_task(cx, nid)
     args = args,
     conditions = conditions,
     expr_type = label.expr_type,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
@@ -514,7 +514,7 @@ function flow_to_ast.node_task(cx, nid)
             values = terralib.newlist({
                 action
             }),
-            options = action.options,
+            annotations = action.annotations,
             span = action.span,
           }
         })
@@ -525,7 +525,7 @@ function flow_to_ast.node_task(cx, nid)
   return terralib.newlist({
       ast.typed.stat.Expr {
         expr = action,
-        options = action.options,
+        annotations = action.annotations,
         span = action.span,
       },
   })
@@ -536,7 +536,7 @@ local function as_expr_region_root(value, fields)
     region = value,
     fields = fields,
     expr_type = value.expr_type,
-    options = value.options,
+    annotations = value.annotations,
     span = value.span,
   }
 end
@@ -560,7 +560,7 @@ function flow_to_ast.node_copy(cx, nid)
           value = value,
           conditions = terralib.newlist({std.awaits}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
@@ -568,7 +568,7 @@ function flow_to_ast.node_copy(cx, nid)
           value = value,
           conditions = terralib.newlist({std.arrives}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       else
@@ -584,14 +584,14 @@ function flow_to_ast.node_copy(cx, nid)
     op = label.op,
     conditions = conditions,
     expr_type = terralib.types.unit,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
   return terralib.newlist({
       ast.typed.stat.Expr {
         expr = action,
-        options = action.options,
+        annotations = action.annotations,
         span = action.span,
       },
   })
@@ -615,7 +615,7 @@ function flow_to_ast.node_fill(cx, nid)
           value = value,
           conditions = terralib.newlist({std.awaits}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
@@ -623,7 +623,7 @@ function flow_to_ast.node_fill(cx, nid)
           value = value,
           conditions = terralib.newlist({std.arrives}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       else
@@ -638,14 +638,14 @@ function flow_to_ast.node_fill(cx, nid)
     value = value,
     conditions = conditions,
     expr_type = terralib.types.unit,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
   return terralib.newlist({
       ast.typed.stat.Expr {
         expr = action,
-        options = action.options,
+        annotations = action.annotations,
         span = action.span,
       },
   })
@@ -668,7 +668,7 @@ function flow_to_ast.node_acquire(cx, nid)
           value = value,
           conditions = terralib.newlist({std.awaits}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
@@ -676,7 +676,7 @@ function flow_to_ast.node_acquire(cx, nid)
           value = value,
           conditions = terralib.newlist({std.arrives}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       else
@@ -690,14 +690,14 @@ function flow_to_ast.node_acquire(cx, nid)
     region = as_expr_region_root(region, label.field_paths),
     conditions = conditions,
     expr_type = terralib.types.unit,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
   return terralib.newlist({
       ast.typed.stat.Expr {
         expr = action,
-        options = action.options,
+        annotations = action.annotations,
         span = action.span,
       },
   })
@@ -720,7 +720,7 @@ function flow_to_ast.node_release(cx, nid)
           value = value,
           conditions = terralib.newlist({std.awaits}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       elseif get_arg_edge(outputs, i, false).label:is(flow.edge.Arrive) then
@@ -728,7 +728,7 @@ function flow_to_ast.node_release(cx, nid)
           value = value,
           conditions = terralib.newlist({std.arrives}),
           expr_type = value.expr_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = value.span,
         }
       else
@@ -742,14 +742,14 @@ function flow_to_ast.node_release(cx, nid)
     region = as_expr_region_root(region, label.field_paths),
     conditions = conditions,
     expr_type = terralib.types.unit,
-    options = label.options,
+    annotations = label.annotations,
     span = label.span,
   }
 
   return terralib.newlist({
       ast.typed.stat.Expr {
         expr = action,
-        options = action.options,
+        annotations = action.annotations,
         span = action.span,
       },
   })
@@ -762,7 +762,7 @@ function flow_to_ast.node_block(cx, nid)
   return terralib.newlist({
       ast.typed.stat.Block {
         block = block,
-        options = label.options,
+        annotations = label.annotations,
         span = label.span,
       },
   })
@@ -799,7 +799,7 @@ function flow_to_ast.node_while_body(cx, nid)
       ast.typed.stat.While {
         cond = cond,
         block = block,
-        options = label.options,
+        annotations = label.annotations,
         span = label.span,
       },
   })
@@ -829,7 +829,7 @@ function flow_to_ast.node_for_num(cx, nid)
         symbol = label.symbol,
         values = values,
         block = block,
-        options = label.options,
+        annotations = label.annotations,
         span = label.span,
       },
   })
@@ -849,7 +849,7 @@ function flow_to_ast.node_for_list(cx, nid)
         symbol = label.symbol,
         value = value,
         block = block,
-        options = label.options,
+        annotations = label.annotations,
         span = label.span,
       },
   })
@@ -862,7 +862,7 @@ function flow_to_ast.node_must_epoch(cx, nid)
   return terralib.newlist({
       ast.typed.stat.MustEpoch {
         block = block,
-        options = label.options,
+        annotations = label.annotations,
         span = label.span,
       },
   })
@@ -891,7 +891,7 @@ function flow_to_ast.node_data(cx, nid)
               symbols = terralib.newlist({label.value.value}),
               types = terralib.newlist({std.as_read(label.value.expr_type)}),
               values = terralib.newlist({cx.ast[inputs[0][1].from_node]}),
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = label.value.span,
         }})
       else

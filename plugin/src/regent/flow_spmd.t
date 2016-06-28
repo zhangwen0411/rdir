@@ -94,7 +94,7 @@ end
 
 local function has_demand_spmd(cx, nid)
   local label = cx.graph:node_label(nid)
-  return label.options.spmd:is(ast.options.Demand)
+  return label.annotations.spmd:is(ast.annotation.Demand)
 end
 
 local function whitelist_node_types(cx, loop_nid)
@@ -427,11 +427,11 @@ local function make_variable_label(cx, var_symbol, var_type, span)
   local node = ast.typed.expr.ID {
     value = var_symbol,
     expr_type = std.rawref(&var_type),
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
   local var_region = cx.tree:intern_variable(
-    node.expr_type, node.value, node.options, node.span)
+    node.expr_type, node.value, node.annotations, node.span)
   return flow.node.data.Scalar {
     value = node,
     region_type = var_region,
@@ -444,7 +444,7 @@ local function make_constant(value, value_type, span)
   return ast.typed.expr.Constant {
     value = value,
     expr_type = value_type,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
 end
@@ -1061,7 +1061,7 @@ local function rewrite_shard_partitions(cx)
             std.add_constraint(cx.tree, expr_type, other_region, "*", true)
           end
         end
-        cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+        cx.tree:intern_region_expr(expr_type, ast.default_annotations(), span)
         return expr_type
       end
     elseif std.is_cross_product(value_type) then
@@ -1168,11 +1168,11 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
       local expr_type = std.region(
         std.newsymbol(std.ispace(value_type:ispace().index_type)),
         value_type:fspace())
-      cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+      cx.tree:intern_region_expr(expr_type, ast.default_annotations(), span)
       return expr_type
     elseif std.is_list_of_regions(value_type) then
       local expr_type = value_type:slice()
-      cx.tree:intern_region_expr(expr_type, ast.default_options(), span)
+      cx.tree:intern_region_expr(expr_type, ast.default_annotations(), span)
       return expr_type
     else
       assert(false)
@@ -1207,12 +1207,12 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
         region = name_label,
         fields = terralib.newlist({field_path}),
         expr_type = name_label.expr_type,
-        options = old_label.value.options,
+        annotations = old_label.value.annotations,
         span = old_label.value.span,
       },
       field_ids = fid_label.value,
       expr_type = name_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = old_label.value.span,
     }
   end
@@ -1227,7 +1227,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
       symbols = terralib.newlist({new_symbol}),
       types = terralib.newlist({new_type}),
       values = terralib.newlist({name_label}),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = old_label.value.span,
     }
   }
@@ -1302,7 +1302,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
     local init_nid = cx.graph:add_node(init_label)
     local fill_label = flow.node.Fill {
       dst_field_paths = terralib.newlist({field_path}),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = old_label.value.span,
     }
     local fill_nid = cx.graph:add_node(fill_label)
@@ -1364,15 +1364,15 @@ local function issue_allocate_scratch_fields(cx, shard_loop, scratch_fields)
                   region = region_label.value,
                   fields = terralib.newlist({field_path}),
                   expr_type = region_label.value.expr_type,
-                  options = ast.default_options(),
+                  annotations = ast.default_annotations(),
                   span = region_label.value.span,
                 },
                 expr_type = std.as_read(fid_label.value.expr_type),
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = fid_label.value.span,
               },
           }),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = fid_label.value.span,
         },
       }
@@ -1500,7 +1500,7 @@ local function issue_self_copy(cx, src_nid, dst_in_nid, dst_out_nid, op)
     src_field_paths = field_paths,
     dst_field_paths = field_paths,
     op = op,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = src_label.value.span,
   }
   local copy_nid = cx.graph:add_node(copy)
@@ -1574,7 +1574,7 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid, op,
     src_field_paths = field_paths,
     dst_field_paths = field_paths,
     op = op,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = src_label.value.span,
   }
   local copy_nid = cx.graph:add_node(copy)
@@ -1599,7 +1599,7 @@ local function issue_barrier_advance(cx, v0_nid)
 
   local advance = flow.node.Advance {
     expr_type = std.as_read(v0.value.expr_type),
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = v0.value.span,
   }
   local advance_nid = cx.graph:add_node(advance)
@@ -1619,7 +1619,7 @@ local function issue_barrier_preadvance(cx, v1_nid)
 
   local advance = flow.node.Advance {
     expr_type = std.as_read(v1.value.expr_type),
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = v1.value.span,
   }
   local advance_nid = cx.graph:add_node(advance)
@@ -1658,7 +1658,7 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
   local block_index_bar_nid = cx.graph:add_node(
     flow.node.IndexAccess {
       expr_type = bar_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = bar_label.value.span,
     })
   cx.graph:add_edge(
@@ -1792,10 +1792,10 @@ do
               value = ast.typed.expr.Constant {
                 value = 0,
                 expr_type = return_type,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = span,
               },
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = span,
             },
         }),
@@ -1808,7 +1808,7 @@ do
       },
       region_divergence = false,
       prototype = prototype,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = span,
     }
 
@@ -1855,12 +1855,12 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
             ast.typed.expr.Constant {
               value = 0,
               expr_type = var_type,
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = use_label.span,
             }
         }),
         types = terralib.newlist({var_type}),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = use_label.span,
       }
     }
@@ -1875,7 +1875,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
       value = ast.typed.expr.Function {
         value = block_on_future,
         expr_type = wait_for:gettype(),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = use_label.span,
       }
     }
@@ -1884,7 +1884,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
     local consume_label = flow.node.Task {
       opaque = true,
       expr_type = terralib.types.unit,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = use_label.span,
     }
     local consume_nid = cx.graph:add_node(consume_label)
@@ -1912,7 +1912,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
     value = ast.typed.expr.Function {
       value = empty_task,
       expr_type = empty_task:gettype(),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = use_label.span,
     }
   }
@@ -1926,7 +1926,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
   local call_label = flow.node.Task {
     opaque = false,
     expr_type = scratch_type,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = use_label.span,
   }
   local call_nid = cx.graph:add_node(call_label)
@@ -1942,7 +1942,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
 
   local reduce_label = flow.node.Reduce {
     op = "+",
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = use_label.span,
   }
   local reduce_nid = cx.graph:add_node(reduce_label)
@@ -2442,7 +2442,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
         types = terralib.newlist({target_type}),
         values = terralib.newlist({
             make_constant(init_value, target_type, target_label.value.span)}),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = target_label.value.span,
       }
     }
@@ -2485,10 +2485,10 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
           barrier = collective_label.value,
           value = local_label.value,
           expr_type = collective_type,
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = target_label.value.span,
         },
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = target_label.value.span,
       }
     }
@@ -2505,7 +2505,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     -- 6. Advance the collective.
     local advance_label = flow.node.Advance {
       expr_type = collective_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = target_label.value.span,
     }
     local advance_nid = cx.graph:add_node(advance_label)
@@ -2533,7 +2533,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
       action = ast.typed.expr.DynamicCollectiveGetResult {
         value = collective_label.value,
         expr_type = target_type,
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = target_label.value.span,
       }
     }
@@ -2549,7 +2549,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
 
     local reduce_label = flow.node.Reduce {
       op = op,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = target_label.value.span,
     }
     local reduce_nid = cx.graph:add_node(reduce_label)
@@ -2647,11 +2647,11 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
                   expr_type = std.type_sub(intersection_label.value.expr_type, mapping),
                 },
                 expr_type = intersection_type,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = intersection_label.value.span,
               },
           }),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = intersection_label.value.span,
         }
       }
@@ -2718,11 +2718,11 @@ local function rewrite_inner_loop_bounds(cx, loop_nid, start)
             rhs = start.value,
             op = "-",
             expr_type = index_type,
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = global_index.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = global_index.value.span,
     }
   }
@@ -2883,10 +2883,10 @@ local function synchronize_shard_start(cx, shard_loop)
                 barrier = barrier_label.value,
                 value = false,
                 expr_type = barrier_type,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = shard_label.span,
               },
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = shard_label.span,
             },
             ast.typed.stat.Assignment {
@@ -2895,27 +2895,27 @@ local function synchronize_shard_start(cx, shard_loop)
                   ast.typed.expr.Advance {
                     value = barrier_label.value,
                     expr_type = barrier_type,
-                    options = ast.default_options(),
+                    annotations = ast.default_annotations(),
                     span = shard_label.span,
                   }
               }),
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = shard_label.span,
             },
             ast.typed.stat.Expr {
               expr = ast.typed.expr.Await {
                 barrier = barrier_label.value,
                 expr_type = terralib.types.unit,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = shard_label.span,
               },
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = shard_label.span,
             },
         }),
         span = shard_label.span,
       },
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = shard_label.span,
     }
   }
@@ -2998,7 +2998,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
       local new_type = std.list(list_type.element_type, list_type.partition_type, nil, original_type:parent_region())
       local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
       cx.tree:intern_region_expr(
-        new_type, ast.default_options(), list_label.value.span)
+        new_type, ast.default_annotations(), list_label.value.span)
 
       elided_mapping[list_type] = new_type
 
@@ -3055,7 +3055,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
           old_type.shallow)
         local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
         cx.tree:intern_region_expr(
-          new_type, ast.default_options(), old_label.value.span)
+          new_type, ast.default_annotations(), old_label.value.span)
 
         elided_mapping[old_type] = new_type
 
@@ -3134,7 +3134,7 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
       end
     end
     cx.tree:intern_region_expr(
-      parent_list_type, ast.default_options(), label.value.span)
+      parent_list_type, ast.default_annotations(), label.value.span)
 
     local parent_list_symbol = std.newsymbol(
       parent_list_type,
@@ -3147,7 +3147,7 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
       "parent_" .. tostring(label.value.value))
     local parent_list_region = cx.tree:intern_variable(
       parent_list_type, parent_list_symbol,
-      ast.default_options(), label.value.span)
+      ast.default_annotations(), label.value.span)
     return parent_list_type, parent_list_region, parent_list_symbol
   end
 end
@@ -3188,21 +3188,21 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
               rhs = stride_label.value,
               op = "+",
               expr_type = std.as_read(index_label.value.expr_type),
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = index_label.value.span,
             },
             rhs = original_bounds[2].value,
             op = "min",
             expr_type = std.as_read(index_label.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = index_label.value.span,
           },
           expr_type = std.list(int),
-          options = ast.default_options(),
+          annotations = ast.default_annotations(),
           span = first_list.value.span,
         },
         expr_type = std.as_read(first_list.value.expr_type),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = first_list.value.span,
       },
     }
@@ -3280,17 +3280,17 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
               rhs = stride_label.value,
               op = "+",
               expr_type = std.as_read(index_label.value.expr_type),
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = index_label.value.span,
             },
             rhs = original_bounds[2].value,
             op = "min",
             expr_type = std.as_read(index_label.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = index_label.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = index_label.value.span,
     }
   }
@@ -3438,7 +3438,7 @@ end
 local function make_block(cx, block, mapping, span)
   local label = flow.node.ctrl.Block {
     block = block,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
   local nid = cx.graph:add_node(label)
@@ -3452,7 +3452,7 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
   local label = flow.node.ctrl.ForNum {
     symbol = shard_index.value.value,
     block = block,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
   local nid = cx.graph:add_node(label)
@@ -3491,10 +3491,10 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
   return nid
 end
 
-local function make_must_epoch(cx, block, options, span)
+local function make_must_epoch(cx, block, annotations, span)
   local label = flow.node.ctrl.MustEpoch {
     block = block,
-    options = options { spmd = ast.options.Forbid { value = false } },
+    annotations = annotations { spmd = ast.annotation.Forbid { value = false } },
     span = span,
   }
   local nid = cx.graph:add_node(label)
@@ -3771,7 +3771,7 @@ local function issue_zipped_copy_interior(
   local copy_loop = flow.node.ctrl.ForNum {
     symbol = index_symbol,
     block = block_cx.graph,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
   local copy_loop_nid = cx.graph:add_node(copy_loop)
@@ -3855,7 +3855,7 @@ local function issue_zipped_copy_interior(
   local block_index_src_nid = block_cx.graph:add_node(
     flow.node.IndexAccess {
       expr_type = block_src_i_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = span,
     })
   for field_path, block_src_nid in block_src_nids:items() do
@@ -3879,7 +3879,7 @@ local function issue_zipped_copy_interior(
   local block_index_dst_in_nid = block_cx.graph:add_node(
     flow.node.IndexAccess {
       expr_type = block_dst_i_type,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = span,
     })
   for field_path, block_dst_in_nid in block_dst_in_nids:items() do
@@ -3909,7 +3909,7 @@ local function issue_zipped_copy_interior(
     src_field_paths = field_paths,
     dst_field_paths = field_paths,
     op = false,
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = span,
   }
   local block_copy_nid = block_cx.graph:add_node(block_copy)
@@ -3970,46 +3970,46 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
               fn = ast.typed.expr.Function {
                 value = int,
                 expr_type = {std.untyped} -> int,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = span,
               },
               arg = ast.typed.expr.Call {
                 fn = ast.typed.expr.Function {
                   value = std.c.legion_index_partition_is_complete,
                   expr_type = std.c.legion_index_partition_is_complete:gettype(),
-                  options = ast.default_options(),
+                  annotations = ast.default_annotations(),
                   span = span,
                 },
                 args = terralib.newlist({
                     ast.typed.expr.RawRuntime {
                       expr_type = std.c.legion_runtime_t,
-                      options = ast.default_options(),
+                      annotations = ast.default_annotations(),
                       span = span,
                     },
                     ast.typed.expr.FieldAccess {
                       value = ast.typed.expr.RawValue {
                         value = shadow_label.value,
                         expr_type = std.c.legion_logical_partition_t,
-                        options = ast.default_options(),
+                        annotations = ast.default_annotations(),
                         span = span,
                       },
                       field_name = "index_partition",
                       expr_type = std.c.legion_index_partition_t,
-                      options = ast.default_options(),
+                      annotations = ast.default_annotations(),
                       span = span,
                     },
                 }),
                 conditions = terralib.newlist({}),
                 expr_type = bool,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = span,
               },
               expr_type = int,
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = span,
             },
         }),
-        options = ast.default_options(),
+        annotations = ast.default_annotations(),
         span = span,
       }
     }
@@ -4033,7 +4033,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
     local copy_loop = flow.node.ctrl.ForNum {
       symbol = index_symbol,
       block = block_cx.graph,
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = span,
     }
     local copy_loop_nid = cx.graph:add_node(copy_loop)
@@ -4125,14 +4125,14 @@ local function issue_input_copies_partition(
     start = bounds[1].value,
     stop = bounds[2].value,
     expr_type = std.list(int),
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = first_partition_label.value.span,
   }
   local duplicated = slice {
     partition = first_partition_label.value,
     indices = indices,
     expr_type = std.as_read(first_new_label.value.expr_type),
-    options = ast.default_options(),
+    annotations = ast.default_annotations(),
     span = first_partition_label.value.span,
   }
   local duplicate = flow.node.Opaque {
@@ -4140,7 +4140,7 @@ local function issue_input_copies_partition(
       symbols = terralib.newlist({ first_new_label.value.value }),
       types = terralib.newlist({ region_type }),
       values = terralib.newlist({ duplicated }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = first_partition_label.value.span,
     }
   }
@@ -4204,15 +4204,15 @@ local function issue_input_copies_cross_product(
               start = bounds[1].value,
               stop = bounds[2].value,
               expr_type = std.list(int),
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = first_product_label.value.span,
             },
             expr_type = std.as_read(first_new_label.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = first_product_label.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = first_product_label.value.span,
     }
   }
@@ -4345,11 +4345,11 @@ local function issue_intersection_creation(cx, intersection_nids,
             rhs = rhs.value,
             shallow = true,
             expr_type = std.as_read(first_intersection.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = first_intersection.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = first_intersection.value.span,
     }
   }
@@ -4387,11 +4387,11 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
           ast.typed.expr.ListPhaseBarriers {
             product = intersection.value,
             expr_type = std.as_read(barrier_out.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = barrier_out.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = barrier_out.value.span,
     }
   }
@@ -4418,11 +4418,11 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
             product = intersection.value,
             barriers = barrier_out.value,
             expr_type = std.as_read(barrier_in.value.expr_type),
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = barrier_in.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = barrier_in.value.span,
     }
   }
@@ -4463,29 +4463,29 @@ local function issue_collective_creation(cx, loop_nid, collective_nid, op, bound
                   rhs = bounds[1].value,
                   op = "-",
                   expr_type = int,
-                  options = ast.default_options(),
+                  annotations = ast.default_annotations(),
                   span = collective.value.span,
                 },
                 rhs = stride_minus_1,
                 op = "+",
                 expr_type = int,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = collective.value.span,
               },
               rhs = stride,
               op = "/",
               expr_type = int,
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = collective.value.span,
             },
             op = op,
             value_type = value_type,
             expr_type = collective_type,
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = collective.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = collective.value.span,
     }
   }
@@ -4530,27 +4530,27 @@ local function issue_single_barrier_creation(cx, loop_nid, barrier_nid, bounds)
                   rhs = bounds[1].value,
                   op = "-",
                   expr_type = int,
-                  options = ast.default_options(),
+                  annotations = ast.default_annotations(),
                   span = barrier.value.span,
                 },
                 rhs = stride_minus_1,
                 op = "+",
                 expr_type = int,
-                options = ast.default_options(),
+                annotations = ast.default_annotations(),
                 span = barrier.value.span,
               },
               rhs = stride,
               op = "/",
               expr_type = int,
-              options = ast.default_options(),
+              annotations = ast.default_annotations(),
               span = barrier.value.span,
             },
             expr_type = barrier_type,
-            options = ast.default_options(),
+            annotations = ast.default_annotations(),
             span = barrier.value.span,
           },
       }),
-      options = ast.default_options(),
+      annotations = ast.default_annotations(),
       span = barrier.value.span,
     }
   }
@@ -4874,7 +4874,7 @@ local function spmdize(cx, loop)
   -- 14. Rewrite inputs/outputs.
 
   local span = cx.graph:node_label(loop).span
-  local options = cx.graph:node_label(loop).options
+  local annotations = cx.graph:node_label(loop).annotations
 
   local shard_graph, shard_loop = flow_extract_subgraph.entry(cx.graph, loop)
 
@@ -4910,7 +4910,7 @@ local function spmdize(cx, loop)
     compose_mapping(elided_mapping, slice_mapping), span)
   downgrade_simultaneous_coherence(dist_cx)
 
-  local epoch_loop = make_must_epoch(cx, dist_cx.graph, options, span)
+  local epoch_loop = make_must_epoch(cx, dist_cx.graph, annotations, span)
 
   local inputs_mapping = compose_mapping(
     mapping, compose_mapping(elided_mapping, slice_mapping))

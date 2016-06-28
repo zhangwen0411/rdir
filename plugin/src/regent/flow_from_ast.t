@@ -267,7 +267,7 @@ function context.new_global_scope()
 end
 
 function context:intern_region(node, var_symbol, var_type)
-  local region_type = self.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+  local region_type = self.tree:intern_variable(var_type, var_symbol, node.annotations, node.span)
   self.region_symbols:insert(node, region_type, var_symbol)
 
   local value_type = std.as_read(var_type)
@@ -437,17 +437,17 @@ local function add_args(cx, compute_nid, args)
   end
 end
 
-local function add_result(cx, from_nid, expr_type, options, span)
+local function add_result(cx, from_nid, expr_type, annotations, span)
   if expr_type == terralib.types.unit then
     return from_nid
   end
 
   local symbol = std.newsymbol(expr_type)
-  local region_type = cx.tree:intern_variable(expr_type, symbol, options, span)
+  local region_type = cx.tree:intern_variable(expr_type, symbol, annotations, span)
   local label = ast.typed.expr.ID {
     value = symbol,
     expr_type = expr_type,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local result_nid = cx.graph:add_node(
@@ -610,22 +610,22 @@ function analyze_regions.vars(cx)
     if node:is(ast.typed.stat.Var) then
       for i, var_symbol in ipairs(node.symbols) do
         local var_type = std.rawref(&node.types[i])
-        cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+        cx.tree:intern_variable(var_type, var_symbol, node.annotations, node.span)
       end
     elseif node:is(ast.typed.stat.VarUnpack) then
       for i, var_symbol in ipairs(node.symbols) do
         local var_type = std.rawref(&node.field_types[i])
-        cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+        cx.tree:intern_variable(var_type, var_symbol, node.annotations, node.span)
       end
     elseif node:is(ast.typed.stat.ForNum) or node:is(ast.typed.stat.ForList) then
       local var_symbol = node.symbol
       local var_type = node.symbol:gettype()
-      cx.tree:intern_variable(var_type, var_symbol, node.options, node.span)
+      cx.tree:intern_variable(var_type, var_symbol, node.annotations, node.span)
     elseif node:is(ast.typed.top.Task) then
       for i, param in ipairs(node.params) do
         local param_type = std.rawref(&param.param_type)
         cx.tree:intern_variable(
-          param_type, param.symbol, param.options, param.span)
+          param_type, param.symbol, param.annotations, param.span)
       end
     end
   end
@@ -635,7 +635,7 @@ function analyze_regions.expr(cx)
   return function(node)
     local expr_type = std.as_read(node.expr_type)
     if flow_region_tree.is_region(expr_type) then
-      cx.tree:intern_region_expr(node.expr_type, node.options, node.span)
+      cx.tree:intern_region_expr(node.expr_type, node.annotations, node.span)
       if node:is(ast.typed.expr.IndexAccess) and
         not std.is_list_of_regions(std.as_read(node.value.expr_type))
       then
@@ -647,7 +647,7 @@ function analyze_regions.expr(cx)
       -- in case.
       for _, bound in ipairs(expr_type:bounds()) do
         if flow_region_tree.is_region(bound) then
-          cx.tree:intern_region_expr(bound, node.options, node.span)
+          cx.tree:intern_region_expr(bound, node.annotations, node.span)
         end
       end
     end
@@ -665,7 +665,7 @@ function analyze_regions.expr(cx)
           --   index = node.value
           -- end
           cx.tree:intern_region_point_expr(
-            parent, index, node.options, node.span)
+            parent, index, node.annotations, node.span)
         end
       end
     end
@@ -742,7 +742,7 @@ local function get_region_label(cx, region_type, field_path)
   local name = ast.typed.expr.ID {
     value = cx:region_symbol(region_type),
     expr_type = expr_type,
-    options = cx.tree:region_options(region_type),
+    annotations = cx.tree:region_annotations(region_type),
     span = cx.tree:region_span(region_type),
   }
   if std.is_region(std.as_read(expr_type)) then
@@ -1327,7 +1327,7 @@ function analyze_privileges.expr_id(cx, node, privilege_map)
   else
     if not cx.local_vars[node.value] then
       local region_type = cx.tree:intern_variable(
-        node.expr_type, node.value, node.options, node.span)
+        node.expr_type, node.value, node.annotations, node.span)
       return uses(cx, region_type, privilege_map)
     end
   end
@@ -1362,7 +1362,7 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
       --   index = node.value
       -- end
       local subregion = cx.tree:intern_region_point_expr(
-        parent, index, node.options, node.span)
+        parent, index, node.annotations, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, field_privilege_map))
     end
     return privilege_meet(
@@ -1672,7 +1672,7 @@ function analyze_privileges.expr_deref(cx, node, privilege_map)
       --   index = node.value
       -- end
       local subregion = cx.tree:intern_region_point_expr(
-        parent, index, node.options, node.span)
+        parent, index, node.annotations, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
     end
   end
@@ -2072,59 +2072,59 @@ local function as_opaque_stat(cx, node)
   return as_stat(cx, terralib.newlist(), flow.node.Opaque { action = node })
 end
 
-local function as_block_stat(cx, block, args, options, span)
+local function as_block_stat(cx, block, args, annotations, span)
   return as_stat(cx, args, flow.node.ctrl.Block {
     block = block,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_while_body_stat(cx, block, args, options, span)
+local function as_while_body_stat(cx, block, args, annotations, span)
   return as_stat(cx, args, flow.node.ctrl.WhileBody {
     block = block,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_while_loop_stat(cx, block, args, options, span)
+local function as_while_loop_stat(cx, block, args, annotations, span)
   return as_stat(cx, args, flow.node.ctrl.WhileLoop {
     block = block,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_fornum_stat(cx, symbol, block, args, options, span)
+local function as_fornum_stat(cx, symbol, block, args, annotations, span)
   return as_stat(cx, args, flow.node.ctrl.ForNum {
     symbol = symbol,
     block = block,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_forlist_stat(cx, symbol, block, args, options, span)
+local function as_forlist_stat(cx, symbol, block, args, annotations, span)
   return as_stat(cx, args, flow.node.ctrl.ForList {
     symbol = symbol,
     block = block,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_assignment_stat(cx, args, options, span)
+local function as_assignment_stat(cx, args, annotations, span)
   return as_stat(cx, args, flow.node.Assignment {
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
 
-local function as_reduce_stat(cx, op, args, options, span)
+local function as_reduce_stat(cx, op, args, annotations, span)
   return as_stat(cx, args, flow.node.Reduce {
     op = op,
-    options = options,
+    annotations = annotations,
     span = span,
   })
 end
@@ -2133,7 +2133,7 @@ local function as_raw_opaque_expr(cx, node, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
-    cx, compute_nid, std.as_read(node.expr_type), node.options, node.span)
+    cx, compute_nid, std.as_read(node.expr_type), node.annotations, node.span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return attach_result(privilege_map, result_nid)
@@ -2166,7 +2166,7 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
   local label = flow.node.Opaque { action = node }
   local compute_nid = add_node(cx, label)
   local result_nid = add_result(
-    cx, compute_nid, std.as_read(node.expr_type), node.options, node.span)
+    cx, compute_nid, std.as_read(node.expr_type), node.annotations, node.span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   local next_port = #args + 1
@@ -2190,27 +2190,27 @@ local function as_opaque_expr(cx, generator, args, privilege_map)
   return attach_result(privilege_map, result_nid)
 end
 
-local function as_call_expr(cx, args, opaque, expr_type, options, span, privilege_map)
+local function as_call_expr(cx, args, opaque, expr_type, annotations, span, privilege_map)
   local label = flow.node.Task {
     opaque = opaque,
     expr_type = expr_type,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  local result_nid = add_result(cx, compute_nid, expr_type, options, span)
+  local result_nid = add_result(cx, compute_nid, expr_type, annotations, span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return attach_result(privilege_map, result_nid)
 end
 
 local function as_copy_expr(cx, args, src_field_paths, dst_field_paths,
-                            op, options, span, privilege_map)
+                            op, annotations, span, privilege_map)
   local label = flow.node.Copy {
     src_field_paths = src_field_paths,
     dst_field_paths = dst_field_paths,
     op = op,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2220,10 +2220,10 @@ local function as_copy_expr(cx, args, src_field_paths, dst_field_paths,
 end
 
 local function as_fill_expr(cx, args, dst_field_paths,
-                            options, span, privilege_map)
+                            annotations, span, privilege_map)
   local label = flow.node.Fill {
     dst_field_paths = dst_field_paths,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2233,10 +2233,10 @@ local function as_fill_expr(cx, args, dst_field_paths,
 end
 
 local function as_acquire_expr(cx, args, field_paths,
-                               options, span, privilege_map)
+                               annotations, span, privilege_map)
   local label = flow.node.Acquire {
     field_paths = field_paths,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2246,10 +2246,10 @@ local function as_acquire_expr(cx, args, field_paths,
 end
 
 local function as_release_expr(cx, args, field_paths,
-                               options, span, privilege_map)
+                               annotations, span, privilege_map)
   local label = flow.node.Release {
     field_paths = field_paths,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2258,25 +2258,25 @@ local function as_release_expr(cx, args, field_paths,
   return attach_result(privilege_map, compute_nid)
 end
 
-local function as_binary_expr(cx, op, args, expr_type, options, span,
+local function as_binary_expr(cx, op, args, expr_type, annotations, span,
                               privilege_map)
   local label = flow.node.Binary {
     op = op,
     expr_type = expr_type,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
-  local result_nid = add_result(cx, compute_nid, expr_type, options, span)
+  local result_nid = add_result(cx, compute_nid, expr_type, annotations, span)
   add_args(cx, compute_nid, args)
   sequence_depend(cx, compute_nid)
   return attach_result(privilege_map, result_nid)
 end
 
-local function as_index_expr(cx, args, result, expr_type, options, span)
+local function as_index_expr(cx, args, result, expr_type, annotations, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2289,11 +2289,11 @@ local function as_index_expr(cx, args, result, expr_type, options, span)
   return result
 end
 
-local function as_deref_expr(cx, args, result_nid, expr_type, options, span,
+local function as_deref_expr(cx, args, result_nid, expr_type, annotations, span,
                              privilege_map)
   local label = flow.node.Deref {
     expr_type = expr_type,
-    options = options,
+    annotations = annotations,
     span = span,
   }
   local compute_nid = add_node(cx, label)
@@ -2371,7 +2371,7 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
   --     --   index = node.value
   --     -- end
   --     local subregion, symbol = cx.tree:intern_region_point_expr(
-  --       parent, index, node.options, node.span)
+  --       parent, index, node.annotations, node.span)
   --     if not cx:has_region_symbol(subregion) then
   --       cx:intern_region_point_expr(node, symbol, subregion)
   --     end
@@ -2405,7 +2405,7 @@ function flow_from_ast.expr_index_access(cx, node, privilege_map, init_only)
     local inputs = terralib.newlist({value, index})
     local region = open_region_tree(cx, node.expr_type, nil, privilege_map, init_only)
     return as_index_expr(
-      cx, inputs, region, expr_type, node.options, node.span)
+      cx, inputs, region, expr_type, node.annotations, node.span)
   end
 
   return as_opaque_expr(
@@ -2470,7 +2470,7 @@ function flow_from_ast.expr_call(cx, node, privilege_map, init_only)
   return as_call_expr(
     cx, inputs,
     not std.is_task(node.fn.value), std.as_read(node.expr_type),
-    node.options, node.span,
+    node.annotations, node.span,
     privilege_map)
 end
 
@@ -2638,7 +2638,7 @@ function flow_from_ast.expr_copy(cx, node, privilege_map, init_only)
   local inputs = terralib.newlist({src, dst, unpack(conditions)})
   return as_copy_expr(
     cx, inputs, node.src.fields, node.dst.fields, node.op,
-    node.options, node.span, privilege_map)
+    node.annotations, node.span, privilege_map)
 end
 
 function flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
@@ -2652,7 +2652,7 @@ function flow_from_ast.expr_fill(cx, node, privilege_map, init_only)
   local inputs = terralib.newlist({dst, value, unpack(conditions)})
   return as_fill_expr(
     cx, inputs, node.dst.fields,
-    node.options, node.span, privilege_map)
+    node.annotations, node.span, privilege_map)
 end
 
 function flow_from_ast.expr_acquire(cx, node, privilege_map, init_only)
@@ -2665,7 +2665,7 @@ function flow_from_ast.expr_acquire(cx, node, privilege_map, init_only)
   local inputs = terralib.newlist({region, unpack(conditions)})
   return as_acquire_expr(
     cx, inputs, node.region.fields,
-    node.options, node.span, privilege_map)
+    node.annotations, node.span, privilege_map)
 end
 
 function flow_from_ast.expr_release(cx, node, privilege_map, init_only)
@@ -2678,7 +2678,7 @@ function flow_from_ast.expr_release(cx, node, privilege_map, init_only)
   local inputs = terralib.newlist({region, unpack(conditions)})
   return as_release_expr(
     cx, inputs, node.region.fields,
-    node.options, node.span, privilege_map)
+    node.annotations, node.span, privilege_map)
 end
 
 function flow_from_ast.expr_unary(cx, node, privilege_map, init_only)
@@ -2695,7 +2695,7 @@ function flow_from_ast.expr_binary(cx, node, privilege_map, init_only)
   local rhs = flow_from_ast.expr(cx, node.rhs, reads)
   local inputs = terralib.newlist({lhs, rhs})
   return as_binary_expr(
-    cx, node.op, inputs, node.expr_type, node.options, node.span,
+    cx, node.op, inputs, node.expr_type, node.annotations, node.span,
     privilege_map)
 end
 
@@ -2733,7 +2733,7 @@ function flow_from_ast.expr_deref(cx, node, privilege_map, init_only)
   --     --   index = node.value
   --     -- end
   --     local subregion, symbol = cx.tree:intern_region_point_expr(
-  --       parent, index, node.options, node.span)
+  --       parent, index, node.annotations, node.span)
   --     if not cx:has_region_symbol(subregion) then
   --       cx:intern_region_point_expr(node, symbol, subregion)
   --     end
@@ -2742,7 +2742,7 @@ function flow_from_ast.expr_deref(cx, node, privilege_map, init_only)
   --     local region = open_region_tree(cx, subregion, nil, privilege_map)
   --     as_deref_expr(
   --       cx, inputs, as_nid(cx, region),
-  --       node.expr_type, node.options, node.span, privilege_map)
+  --       node.expr_type, node.annotations, node.span, privilege_map)
   --     return region
   --   end
   -- end
@@ -2906,7 +2906,7 @@ function flow_from_ast.stat_while(cx, node)
                          loop_cx, region_type, region_symbol, privilege_map))
   end
   local body = as_while_body_stat(
-    loop_cx, body_cx.graph, body_inputs, ast.default_options(), node.span)
+    loop_cx, body_cx.graph, body_inputs, ast.default_annotations(), node.span)
 
   local loop_inputs = terralib.newlist()
   for region_type, privilege_map in pairs(loop_outer_privileges) do
@@ -2918,7 +2918,7 @@ function flow_from_ast.stat_while(cx, node)
     loop_inputs:insert(open_region_tree(
                          cx, region_type, region_symbol, privilege_map))
   end
-  as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.options, node.span)
+  as_while_loop_stat(cx, loop_cx.graph, loop_inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_for_num(cx, node)
@@ -2957,7 +2957,7 @@ function flow_from_ast.stat_for_num(cx, node)
   end
 
   as_fornum_stat(
-    cx, node.symbol, block_cx.graph, inputs, node.options, node.span)
+    cx, node.symbol, block_cx.graph, inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_for_list(cx, node)
@@ -2991,7 +2991,7 @@ function flow_from_ast.stat_for_list(cx, node)
   end
 
   as_forlist_stat(
-    cx, node.symbol, block_cx.graph, inputs, node.options, node.span)
+    cx, node.symbol, block_cx.graph, inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_repeat(cx, node)
@@ -3029,7 +3029,7 @@ function flow_from_ast.stat_block(cx, node)
   end
 
   as_block_stat(
-    cx, block_cx.graph, inputs, node.options, node.span)
+    cx, block_cx.graph, inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_var(cx, node)
@@ -3073,7 +3073,7 @@ function flow_from_ast.stat_assignment(cx, node)
   inputs:insertall(lhs)
   inputs:insertall(rhs)
 
-  as_assignment_stat(cx, inputs, node.options, node.span)
+  as_assignment_stat(cx, inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_reduce(cx, node)
@@ -3087,7 +3087,7 @@ function flow_from_ast.stat_reduce(cx, node)
   inputs:insertall(lhs)
   inputs:insertall(rhs)
 
-  as_reduce_stat(cx, node.op, inputs, node.options, node.span)
+  as_reduce_stat(cx, node.op, inputs, node.annotations, node.span)
 end
 
 function flow_from_ast.stat_expr(cx, node)
