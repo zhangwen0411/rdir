@@ -2594,6 +2594,135 @@ function flow_from_ast.expr_unsafe_cast(cx, node, privilege_map, init_only)
     privilege_map)
 end
 
+function flow_from_ast.expr_ispace(cx, node, privilege_map, init_only)
+  local extent = flow_from_ast.expr(cx, node.extent, reads)
+  local start = node.start and flow_from_ast.expr(cx, node.start, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1, v2) return node { extent = v1, start = v2 or false } end,
+    terralib.newlist({extent, start or nil}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_region(cx, node, privilege_map, init_only)
+  local ispace = flow_from_ast.expr(cx, node.ispace, reads)
+  return as_opaque_expr(
+    cx,
+    function(v1) return node { ispace = v1 } end,
+    terralib.newlist({ispace}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_partition(cx, node, privilege_map, init_only)
+  local region = flow_from_ast.expr(cx, node.region, none)
+  local coloring = flow_from_ast.expr(cx, node.coloring, reads)
+  local colors = flow_from_ast.expr(cx, node.colors, reads)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(v1, v2, v3) return node { region = v1, coloring = v2, colors = v3 } end,
+    terralib.newlist({region, coloring, colors}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_partition_equal(cx, node, privilege_map, init_only)
+  local region = flow_from_ast.expr(cx, node.region, none)
+  local colors = flow_from_ast.expr(cx, node.colors, reads)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(v1, v2) return node { region = v1, colors = v2 } end,
+    terralib.newlist({region, colors}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_partition_by_field(cx, node, privilege_map, init_only)
+  local region = flow_from_ast.expr_region_root(cx, node.region, none)
+  local colors = flow_from_ast.expr(cx, node.colors, reads)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(v1, v2) return node { region = v1, colors = v2 } end,
+    terralib.newlist({region, colors}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_image(cx, node, privilege_map, init_only)
+  local parent = flow_from_ast.expr(cx, node.parent, none)
+  local partition = flow_from_ast.expr(cx, node.partition, none)
+  local region = flow_from_ast.expr_region_root(cx, node.region, reads)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(v1, v2, v3) return node { parent = v1, partition = v2, region = v3 } end,
+    terralib.newlist({parent, partition, region}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_preimage(cx, node, privilege_map, init_only)
+  local parent = flow_from_ast.expr(cx, node.parent, none)
+  local partition = flow_from_ast.expr(cx, node.partition, none)
+  local region = flow_from_ast.expr_region_root(cx, node.region, reads)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(v1, v2, v3) return node { parent = v1, partition = v2, region = v3 } end,
+    terralib.newlist({parent, partition, region}),
+    privilege_map)
+end
+
+function flow_from_ast.expr_cross_product(cx, node, privilege_map, init_only)
+  local args = node.args:map(function(arg) return flow_from_ast.expr(cx, arg, none) end)
+
+  -- Make sure a symbol is available.
+  local expr_type = std.as_read(node.expr_type)
+  if not cx:has_region_symbol(expr_type) then
+    local symbol = std.newsymbol(expr_type)
+    cx:intern_region(node, symbol, node.expr_type)
+  end
+
+  return as_opaque_expr(
+    cx,
+    function(...) return node { args = terralib.newlist({...}) } end,
+    args,
+    privilege_map)
+end
+
 function flow_from_ast.expr_advance(cx, node, privilege_map, init_only)
   local value = flow_from_ast.expr(cx, node.value, reads)
   return as_opaque_expr(
@@ -2823,6 +2952,18 @@ function flow_from_ast.expr(cx, node, privilege_map, init_only)
 
   elseif node:is(ast.typed.expr.Partition) then
     return flow_from_ast.expr_partition(cx, node, privilege_map, init_only)
+
+  elseif node:is(ast.typed.expr.PartitionEqual) then
+    return flow_from_ast.expr_partition_equal(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.PartitionByField) then
+    return flow_from_ast.expr_partition_by_field(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Image) then
+    return flow_from_ast.expr_image(cx, node, privilege_map)
+
+  elseif node:is(ast.typed.expr.Preimage) then
+    return flow_from_ast.expr_preimage(cx, node, privilege_map)
 
   elseif node:is(ast.typed.expr.CrossProduct) then
     return flow_from_ast.expr_cross_product(cx, node, privilege_map, init_only)
