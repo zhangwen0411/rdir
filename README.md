@@ -16,9 +16,9 @@ sample optimizations which demonstrate how to use the plug-in.
  1. Install LLVM *with headers*. (Tested with LLVM 3.5.)
  2. Download and install Regent:
 
-        git clone -b rdir --recursive https://github.com/StanfordLegion/legion.git
+        git clone -b master https://github.com/StanfordLegion/legion.git
         cd legion/language
-        ./install.py --debug
+        ./install.py --debug --rdir=auto
 
     Note: In some cases, Terra may fail to auto-detect CUDA. If so
     (and assuming you want to use CUDA), recompile Terra with CUDA
@@ -27,22 +27,6 @@ sample optimizations which demonstrate how to use the plug-in.
         cd terra
         make clean
         CUDA_HOME=.../path/to/cuda ENABLE_CUDA=1 make
-
-## Usage
-
-The following test is included which exercises the optimizations
-included with RDIR. Both CPU and GPU code paths should be
-working. (GPUs are enabled with the flag -ll:gpu N where N is the
-number of GPUs to use.)
-
-Running the following commands will produce output reporting bandwidth
-and compute throughput on a simple streaming benchmark. In general,
-inc1 and inc2 should achieve roughly the same bandwidth. When the RDIR
-optimizations are functioning propertly, inc2 will achieve 2x the
-compute throughput as inc1 (due to loop and task fusion).
-
-    ./regent.py src/rdir/examples/inc.rg -fcuda 1 -ll:csize 4096
-    ./regent.py src/rdir/examples/inc.rg -fcuda 1 -ll:gpu 1 -ll:csize 4096 -ll:fsize 4096
 
 # Open Source License
 
