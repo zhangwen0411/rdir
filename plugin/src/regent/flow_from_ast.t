@@ -35,6 +35,7 @@ local ast = require("regent/ast")
 local data = require("regent/data")
 local flow = require("regent/flow")
 local flow_region_tree = require("regent/flow_region_tree")
+local passes_hooks = require("regent/passes_hooks")
 local std = require("regent/std")
 local symbol_table = require("regent/symbol_table")
 
@@ -3326,5 +3327,9 @@ function flow_from_ast.entry(node)
   local cx = context.new_global_scope()
   return flow_from_ast.top(cx, node)
 end
+
+flow_from_ast.pass_name = "flow_from_ast"
+
+if std.config["flow"] then passes_hooks.add_optimization(10, flow_from_ast) end
 
 return flow_from_ast

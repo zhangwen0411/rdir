@@ -44,6 +44,7 @@ local optimize_futures = require("regent/optimize_futures")
 local optimize_index_launches = require("regent/optimize_index_launches")
 local optimize_inlines = require("regent/optimize_inlines")
 local optimize_traces = require("regent/optimize_traces")
+local passes_hooks = require("regent/passes_hooks")
 local pretty = require("regent/pretty")
 local log = require("regent/log")
 local std = require("regent/std")
@@ -4982,6 +4983,10 @@ function flow_spmd.entry(node)
   local cx = context.new_global_scope()
   return flow_spmd.top(cx, node)
 end
+
+flow_spmd.pass_name = "flow_spmd"
+
+if std.config["flow"] and std.config["flow-spmd"] then passes_hooks.add_optimization(11, flow_spmd) end
 
 return flow_spmd
 
