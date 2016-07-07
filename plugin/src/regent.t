@@ -38,7 +38,7 @@ local optimize_config_options = require("regent/optimize_config_options")
 local optimize_divergence = require("regent/optimize_divergence")
 local optimize_futures = require("regent/optimize_futures")
 local optimize_index_launches = require("regent/optimize_index_launches")
-local optimize_inlines = require("regent/optimize_inlines")
+local optimize_mapping = require("regent/optimize_mapping")
 local parser = require("regent/parser")
 local specialize = require("regent/specialize")
 local std = require("regent/std")
@@ -73,7 +73,7 @@ function compile(lex)
     ast = flow_to_ast.entry(ast)
     if std.config["index-launch"] then ast = optimize_index_launches.entry(ast) end
     if std.config["future"] then ast = optimize_futures.entry(ast) end
-    if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
+    if std.config["mapping"] then ast = optimize_mapping.entry(ast) end
     if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
     if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
     if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end

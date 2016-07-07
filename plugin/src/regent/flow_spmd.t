@@ -42,7 +42,7 @@ local optimize_config_options = require("regent/optimize_config_options")
 local optimize_divergence = require("regent/optimize_divergence")
 local optimize_futures = require("regent/optimize_futures")
 local optimize_index_launches = require("regent/optimize_index_launches")
-local optimize_inlines = require("regent/optimize_inlines")
+local optimize_mapping = require("regent/optimize_mapping")
 local optimize_traces = require("regent/optimize_traces")
 local passes_hooks = require("regent/passes_hooks")
 local pretty = require("regent/pretty")
@@ -1819,8 +1819,8 @@ do
     -- passes.optimize(ast)
     if std.config["index-launch"] then ast = optimize_index_launches.entry(ast) end
     if std.config["future"] then ast = optimize_futures.entry(ast) end
-    print("FIXME: Inline optimization disabled while generating empty task")
-    -- if std.config["mapping"] then ast = optimize_inlines.entry(ast) end
+    print("FIXME: Mapping optimization disabled while generating empty task")
+    -- if std.config["mapping"] then ast = optimize_mapping.entry(ast) end
     if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
     if std.config["trace"] then ast = optimize_traces.entry(ast) end
     if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
