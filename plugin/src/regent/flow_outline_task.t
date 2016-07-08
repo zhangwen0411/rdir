@@ -345,7 +345,7 @@ local function gather_return(cx, nid)
         arg = ast.typed.expr.Ctor {
           fields = fields,
           named = true,
-          expr_type = std.ctor(return_type.entries),
+          expr_type = std.ctor_named(return_type.entries),
           annotations = ast.default_annotations(),
           span = span,
         },
