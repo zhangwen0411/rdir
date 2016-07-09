@@ -320,6 +320,24 @@ function flow_to_ast.node_binary(cx, nid)
   return make_expr_result(cx, nid, action)
 end
 
+function flow_to_ast.node_cast(cx, nid)
+  local label = cx.graph:node_label(nid)
+  local inputs = cx.graph:incoming_edges_by_port(nid)
+
+  local fn = cx.ast[get_arg_node(inputs, 1, false)]
+  local arg = cx.ast[get_arg_node(inputs, 2, false)]
+
+  local action = ast.typed.expr.Cast {
+    fn = fn,
+    arg = arg,
+    expr_type = label.expr_type,
+    annotations = label.annotations,
+    span = label.span,
+  }
+
+  return make_expr_result(cx, nid, action)
+end
+
 function flow_to_ast.node_index_access(cx, nid)
   local label = cx.graph:node_label(nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
@@ -955,6 +973,9 @@ function flow_to_ast.node(cx, nid)
 
   elseif label:is(flow.node.Binary) then
     return flow_to_ast.node_binary(cx, nid)
+
+  elseif label:is(flow.node.Cast) then
+    return flow_to_ast.node_cast(cx, nid)
 
   elseif label:is(flow.node.IndexAccess) then
     return flow_to_ast.node_index_access(cx, nid)

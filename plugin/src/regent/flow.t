@@ -951,6 +951,7 @@ flow:inner("node")
 flow.node:leaf("Opaque", {"action"})
 
 flow.node:leaf("Binary", {"op", "expr_type", "annotations", "span"})
+flow.node:leaf("Cast", {"expr_type", "annotations", "span"})
 flow.node:leaf("IndexAccess", {"expr_type", "annotations", "span"})
 flow.node:leaf("Deref", {"expr_type", "annotations", "span"})
 flow.node:leaf("Advance", {"expr_type", "annotations", "span"})

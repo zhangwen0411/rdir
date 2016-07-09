@@ -2274,6 +2274,20 @@ local function as_binary_expr(cx, op, args, expr_type, annotations, span,
   return attach_result(privilege_map, result_nid)
 end
 
+local function as_cast_expr(cx, args, expr_type, annotations, span,
+                            privilege_map)
+  local label = flow.node.Cast {
+    expr_type = expr_type,
+    annotations = annotations,
+    span = span,
+  }
+  local compute_nid = add_node(cx, label)
+  local result_nid = add_result(cx, compute_nid, expr_type, annotations, span)
+  add_args(cx, compute_nid, args)
+  sequence_depend(cx, compute_nid)
+  return attach_result(privilege_map, result_nid)
+end
+
 local function as_index_expr(cx, args, result, expr_type, annotations, span)
   local label = flow.node.IndexAccess {
     expr_type = expr_type,
@@ -2478,10 +2492,9 @@ end
 function flow_from_ast.expr_cast(cx, node, privilege_map, init_only)
   local fn = flow_from_ast.expr(cx, node.fn, reads)
   local arg = flow_from_ast.expr(cx, node.arg, name(node.arg.expr_type))
-  return as_opaque_expr(
-    cx,
-    function(v1, v2) return node { fn = v1, arg = v2 } end,
-    terralib.newlist({fn, arg}),
+  local inputs = terralib.newlist({fn, arg})
+  return as_cast_expr(
+    cx, inputs, node.expr_type, node.annotations, node.span,
     privilege_map)
 end
 
