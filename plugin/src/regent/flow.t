@@ -893,7 +893,9 @@ function graph:printpretty(ids, types, metadata)
     if metadata then label = label .. " " .. tostring(metadata[i]) end
     local shape
     if node:is(flow.node.Opaque) or
-      node:is(flow.node.Binary) or node:is(flow.node.IndexAccess) or
+      node:is(flow.node.Binary) or
+      node:is(flow.node.Cast) or
+      node:is(flow.node.IndexAccess) or
       node:is(flow.node.Deref) or
       node:is(flow.node.Advance) or
       node:is(flow.node.Assignment) or node:is(flow.node.Reduce) or
