@@ -710,6 +710,7 @@ local function normalize_communication_subgraph(cx, shard_loop)
   end
 
   -- Check for and update out-of-date data.
+  local final_close_nids = terralib.newlist()
   for region_type, r1 in region_nids:items() do
     for field_path, _ in r1:items() do
       local newer_regions = terralib.newlist()
@@ -738,7 +739,6 @@ local function normalize_communication_subgraph(cx, shard_loop)
           function(nid) return not block_cx.graph:node_label(nid):is(flow.node.Close) end,
           block_cx.graph:outgoing_read_set(first_nid))
         if #reads > 0 then
-
           for _, newer_region_type in ipairs(newer_regions) do
             local close_nid = block_cx.graph:add_node(flow.node.Close {})
             local next_nid = block_cx.graph:add_node(current_label)
@@ -756,6 +756,14 @@ local function normalize_communication_subgraph(cx, shard_loop)
               flow.edge.Read(flow.default_mode()),
               other_nid, block_cx.graph:node_result_port(other_nid),
               close_nid, block_cx.graph:node_available_port(close_nid))
+
+            for _, nid in ipairs(final_close_nids) do
+              block_cx.graph:add_edge(
+                flow.edge.HappensBefore {},
+                close_nid, block_cx.graph:node_sync_port(close_nid),
+                nid, block_cx.graph:node_sync_port(nid))
+            end
+            final_close_nids:insert(close_nid)
 
             current_nid = next_nid
           end
