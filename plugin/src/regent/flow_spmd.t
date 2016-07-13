@@ -104,7 +104,8 @@ local function whitelist_node_types(cx, loop_nid)
   return block_cx.graph:traverse_nodes_recursive(
     function(_, _, label)
       return (
-        label:is(flow.node.Binary) or label:is(flow.node.IndexAccess) or
+        label:is(flow.node.Binary) or label:is(flow.node.Cast) or
+          label:is(flow.node.IndexAccess) or
           label:is(flow.node.Assignment) or label:is(flow.node.Reduce) or
           (label:is(flow.node.Task) and not label.opaque) or
           label:is(flow.node.Open) or label:is(flow.node.Close) or
@@ -191,7 +192,12 @@ local function is_parallel_loop(cx, loop_nid)
     if block_cx.tree:has_region_index(region1) then
       -- Is it indexed by the loop variable? (No? Then it interferes.)
       local index = block_cx.tree:region_index(region1)
-      if not (index:is(ast.typed.expr.ID) and index.value == loop_label.symbol) then
+      if not (
+        (index:is(ast.typed.expr.ID) and index.value == loop_label.symbol) or
+          (index:is(ast.typed.expr.Cast) and
+             index.arg:is(ast.typed.expr.ID) and
+             index.arg.value == loop_label.symbol))
+      then
         return true
       end
 
@@ -2756,7 +2762,13 @@ local function rewrite_inner_loop_bounds(cx, loop_nid, start)
     end)
   for _, index_access_nid in ipairs(index_access_nids) do
     block_cx.graph:copy_outgoing_edges(
-      function(edge) return edge.to_node == index_access_nid end,
+      function(edge)
+        return block_cx.graph:reachable(
+          edge.to_node, index_access_nid,
+          function(edge)
+            return not edge.label:is(flow.edge.HappensBefore)
+          end)
+      end,
     global_index_nid,
     local_index_nid,
     true)
