@@ -2395,7 +2395,7 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
   --   end
   --   value = flow_from_ast.expr(cx, node.value, reads)
   -- elseif
-  node.field_name == "ispace" then
+  node.field_name == "ispace" or node.field_name == "bounds" then
     value = flow_from_ast.expr(cx, node.value, none)
   else
     value = flow_from_ast.expr(cx, node.value, field_privilege_map)
