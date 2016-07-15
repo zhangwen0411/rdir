@@ -1369,7 +1369,7 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
     return privilege_meet(
       analyze_privileges.expr(cx, node.value, reads),
       usage)
-  elseif node.field_name == "ispace" then
+  elseif node.field_name == "ispace" or node.field_name == "bounds" then
     return privilege_meet(analyze_privileges.expr(cx, node.value, none), usage)
   else
     return privilege_meet(analyze_privileges.expr(cx, node.value, field_privilege_map), usage)
