@@ -1369,7 +1369,9 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
     return privilege_meet(
       analyze_privileges.expr(cx, node.value, reads),
       usage)
-  elseif node.field_name == "ispace" or node.field_name == "bounds" then
+  elseif node.field_name == "ispace" or
+         node.field_name == "bounds" or
+         node.field_name == "colors" then
     return privilege_meet(analyze_privileges.expr(cx, node.value, none), usage)
   else
     return privilege_meet(analyze_privileges.expr(cx, node.value, field_privilege_map), usage)
@@ -2395,7 +2397,9 @@ function flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
   --   end
   --   value = flow_from_ast.expr(cx, node.value, reads)
   -- elseif
-  node.field_name == "ispace" or node.field_name == "bounds" then
+  node.field_name == "ispace" or
+  node.field_name == "bounds" or
+  node.field_name == "colors" then
     value = flow_from_ast.expr(cx, node.value, none)
   else
     value = flow_from_ast.expr(cx, node.value, field_privilege_map)
