@@ -78,7 +78,8 @@ local flow_spmd = {}
 
 local function is_leaf(cx, nid)
   local label = cx.graph:node_label(nid)
-  if not label:is(flow.node.ctrl.ForNum) then return false end
+  if not label:is(flow.node.ctrl.ForNum) and
+     not label:is(flow.node.ctrl.ForList) then return false end
 
   local block_cx = cx:new_graph_scope(label.block)
   local inner = block_cx.graph:any_nodes(
@@ -274,6 +275,24 @@ local function find_last_instance(cx, value_label, optional)
   assert(optional)
 end
 
+-- Returns labels for the loop's bounds as a Terra list, consisting of two
+-- labels for a ForNum loop (lower, upper) or one label for a ForList loop.
+local function find_bounds_labels(cx, loop_nid, loop_label)
+  local inputs = cx.graph:incoming_edges_by_port(loop_nid)
+  if loop_label:is(flow.node.ctrl.ForNum) then
+    return terralib.newlist({  -- Lower and upper bounds.
+      cx.graph:node_label(get_input(inputs, 1)),
+      cx.graph:node_label(get_input(inputs, 2)),
+    })
+  elseif loop_label:is(flow.node.ctrl.ForList) then
+    return terralib.newlist({  -- The ispace/region/list iterated over.
+      cx.graph:node_label(get_input(inputs, 1)),
+    })
+  else
+    assert(false)
+  end
+end
+
 local function loops_are_compatible(cx, loop_nid)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
@@ -290,32 +309,41 @@ local function loops_are_compatible(cx, loop_nid)
   if not check then return false end
 
   -- Check that leaves use compatible bounds.
-  local label1, label2
+  local bounds_labels
   local check = block_cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
       local inner_cx = block_cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
-        local inputs = inner_cx.graph:incoming_edges_by_port(nid)
-        if not label1 and not label2 then
-          label1 = inner_cx.graph:node_label(get_input(inputs, 1))
-          label2 = inner_cx.graph:node_label(get_input(inputs, 2))
+        local curr_bounds_labels = find_bounds_labels(inner_cx, nid, label)
+        -- TODO(zhangwen): what about ForList over region/lists?
+
+        if not bounds_labels then
+          bounds_labels = curr_bounds_labels
         else
-          assert(label1 and label2)
-          return bounds_eq(label1, inner_cx.graph:node_label(get_input(inputs, 1))) and
-            bounds_eq(label2, inner_cx.graph:node_label(get_input(inputs, 2))) and
-            nil
+          local labels_equal
+          if #bounds_labels ~= #curr_bounds_labels then
+            -- Loops should either all be ForNum or all be ForList, i.e. have same number of
+            -- bounds.
+            labels_equal = false
+          else
+            labels_equal = true
+            for i = 1, #bounds_labels do
+              labels_equal = labels_equal and bounds_eq(bounds_labels[i], curr_bounds_labels[i])
+            end
+          end
+          return labels_equal and nil
         end
       end
     end) == nil
   if not check then return false end
-  assert(label1 and label2)
+  assert(bounds_labels)
 
   -- Check that bounds are never written.
-  local nid1 = label1:is(flow.node.data) and find_last_instance(block_cx, label1)
-  local nid2 = label2:is(flow.node.data) and find_last_instance(block_cx, label2)
-
-  return (not nid1 or #block_cx.graph:incoming_mutate_set(nid1) == 0) and
-    (not nid2 or #block_cx.graph:incoming_mutate_set(nid2) == 0)
+  for _, bound_label in ipairs(bounds_labels) do
+    local nid = bound_label:is(flow.node.data) and find_last_instance(block_cx, bound_label)
+    if nid and #block_cx.graph:incoming_mutate_set(nid) > 0 then return false end
+  end
+  return true
 end
 
 local function can_spmdize(cx, loop)
@@ -2702,62 +2730,63 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
   return shallow_intersections, mapping
 end
 
-local function rewrite_inner_loop_bounds(cx, loop_nid, start)
+local function rewrite_inner_fornum_loop_bounds(cx, loop_nid, part_indices)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
 
-  -- First compute the local index by subtracting the shard start from
-  -- the global index.
+  -- Find the old loop variable, which we'll keep as the global index.
   local global_index_nid = block_cx.graph:find_node(
     function(_, label)
       return label:is(flow.node.data.Scalar) and
         label.value.value == loop_label.symbol
   end)
   local global_index = block_cx.graph:node_label(global_index_nid)
-
   local index_type = std.as_read(global_index.value.expr_type)
+
+  -- Make a new symbol to use as loop variable.
   local local_index = make_variable_label(
     block_cx, std.newsymbol(index_type, "local_index"),
     index_type, global_index.value.span)
   local local_index_nid = block_cx.graph:add_node(local_index)
+  -- Swap in the new loop variable.
+  loop_label.symbol = local_index.value.value
 
-  local start_nid = block_cx.graph:add_node(start)
-
-  local compute_local_index = flow.node.Opaque {
-    action = ast.typed.stat.Var {
-      symbols = terralib.newlist({local_index.value.value}),
+  -- Compute global index (original loop variable) by indexing into the
+  -- `part_indices` list.
+  local part_indices_nid = block_cx.graph:add_node(part_indices)
+  local compute_global_index = flow.node.Opaque {
+    action = ast.typed.stat.Var {  -- var global_index = part_indices[local_index]
+      symbols = terralib.newlist({global_index.value.value}),
       types = terralib.newlist({index_type}),
       values = terralib.newlist({
-          ast.typed.expr.Binary {
-            lhs = global_index.value,
-            rhs = start.value,
-            op = "-",
-            expr_type = index_type,
-            annotations = ast.default_annotations(),
-            span = global_index.value.span,
-          },
+        ast.typed.expr.IndexAccess {
+          value = part_indices.value,
+          index = local_index.value,
+          expr_type = index_type,
+          annotations = ast.default_annotations(),
+          span = global_index.value.span
+        },
       }),
       annotations = ast.default_annotations(),
       span = global_index.value.span,
     }
   }
-  local compute_local_index_nid = block_cx.graph:add_node(compute_local_index)
+  local compute_global_index_nid = block_cx.graph:add_node(compute_global_index)
 
   block_cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    global_index_nid, block_cx.graph:node_result_port(global_index_nid),
-    compute_local_index_nid, 1)
+    part_indices_nid, block_cx.graph:node_result_port(part_indices_nid),
+    compute_global_index_nid, 1)
   block_cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    start_nid, block_cx.graph:node_result_port(start_nid),
-    compute_local_index_nid, 2)
+    local_index_nid, block_cx.graph:node_result_port(local_index_nid),
+    compute_global_index_nid, 2)
   block_cx.graph:add_edge(
     flow.edge.HappensBefore {},
-    compute_local_index_nid, block_cx.graph:node_sync_port(compute_local_index_nid),
-    local_index_nid, block_cx.graph:node_sync_port(local_index_nid))
+    compute_global_index_nid, block_cx.graph:node_sync_port(compute_global_index_nid),
+    global_index_nid, block_cx.graph:node_sync_port(global_index_nid))
 
-  -- Second, find any index accesses to lists and rewire them to use
-  -- the local index.
+  -- Find any index accesses to lists and rewire them to use the local index.
   local index_access_nids = block_cx.graph:filter_nodes(
     function(nid, label)
       return label:is(flow.node.IndexAccess) and
@@ -2781,9 +2810,11 @@ local function rewrite_inner_loop_bounds(cx, loop_nid, start)
     local_index_nid,
     true)
   end
+
+  -- TODO(zhangwen): list access with int1d instead of int?
 end
 
-local function rewrite_shard_loop_bounds(cx, shard_loop)
+local function rewrite_fornum_loop_in_shard(cx, shard_loop)
   local shard_label = cx.graph:node_label(shard_loop)
 
   -- Find the current loop bounds.
@@ -2793,6 +2824,7 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
     function(graph, nid, label)
       local inner_cx = cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
+        assert(label:is(flow.node.ctrl.ForNum))
         local inputs = inner_cx.graph:incoming_edges_by_port(nid)
         local value1 = inner_cx.graph:node_label(get_input(inputs, 1))
         local value2 = inner_cx.graph:node_label(get_input(inputs, 2))
@@ -2812,28 +2844,33 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
     end)
   assert(original_bounds_labels and bounds_type)
 
-  -- Make labels for the new bounds.
-  local bounds_labels = terralib.newlist()
-  for i = 1, 2 do
-    local bound_label = make_variable_label(
-      cx, std.newsymbol(bounds_type, "shard_bound" .. i),
-      bounds_type, shard_label.span)
-    bounds_labels:insert(bound_label)
-  end
+  -- Make labels for shard-specific variables.
+  local shard_nparts_label = make_variable_label(
+    cx, std.newsymbol(bounds_type, "shard_nparts"), bounds_type, shard_label.span)
+  local shard_part_indices_label = make_variable_label(
+    cx, std.newsymbol(std.list(bounds_type), "shard_part_indices"),
+    std.list(bounds_type), shard_label.span)
 
   -- Replace old bounds with new.
-  local bounds = {}
+  local cached_nids = {}
   cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
       local inner_cx = cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
-        if not bounds[graph] then
-          bounds[graph] = terralib.newlist()
-          for i = 1, 2 do
-            bounds[graph]:insert(inner_cx.graph:add_node(bounds_labels[i]))
-          end
+        if not cached_nids[graph] then
+          cached_nids[graph] = {
+            shard_nparts = inner_cx.graph:add_node(shard_nparts_label),
+            shard_part_indices = inner_cx.graph:add_node(shard_part_indices_label),
+          }
         end
 
+        local new_bounds = terralib.newlist({
+          inner_cx.graph:add_node(flow.node.Constant {
+            value = make_constant(0, bounds_type, shard_nparts_label.value.span),
+          }), -- Lower bound (constant 0).
+          cached_nids[graph].shard_nparts -- Upper bound.
+        })
+        -- Change bounds.
         local inputs = inner_cx.graph:incoming_edges_by_port(nid)
         for i = 1, 2 do
           local value_nid, edge = get_input(inputs, i)
@@ -2843,45 +2880,75 @@ local function rewrite_shard_loop_bounds(cx, shard_loop)
               assert(false)
             end
           end
-          inner_cx.graph:replace_edges(edge.to_node, edge.from_node, bounds[graph][i])
+          inner_cx.graph:replace_edges(edge.to_node, edge.from_node, new_bounds[i])
           if #inner_cx.graph:outgoing_edges(value_nid) == 0 then
             inner_cx.graph:remove_node(value_nid)
           end
         end
+        -- At this point, the loop variable has a different meaning since it
+        -- loops over a different set of bounds--it is now the local index
+        -- rather than the global index.  Its usage within the loop will be
+        -- fixed in the next step.
+
+        -- Loop may also read from `shard_part_indices`.
+        local shard_part_indices_nid = cached_nids[graph].shard_part_indices
+        inner_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          shard_part_indices_nid, inner_cx.graph:node_result_port(shard_part_indices_nid),
+          nid, inner_cx.graph:node_available_port(nid))
       end
     end)
 
-  -- Bubble new bounds up to parent context.
-  cx.graph:traverse_nodes_recursive(
-    function(graph, nid, label)
-      local inner_cx = cx:new_graph_scope(graph)
-      if is_inner(inner_cx, nid) then
-        if not bounds[graph] then
-          bounds[graph] = terralib.newlist()
-          for i = 1, 2 do
-            bounds[graph]:insert(inner_cx.graph:add_node(bounds_labels[i]))
-          end
-        end
-
-        for _, bound_nid in ipairs(bounds[graph]) do
-          inner_cx.graph:add_edge(
-            flow.edge.Read(flow.default_mode()),
-            bound_nid, inner_cx.graph:node_result_port(bound_nid),
-            nid, inner_cx.graph:node_available_port(nid))
-        end
-      end
-    end)
-
+  -- Rewrite usage of loop variable inside of loops:
   -- Rewrite bounds used for accessing lists inside of loops.
   cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
       local inner_cx = cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
-        rewrite_inner_loop_bounds(inner_cx, nid, bounds_labels[1])
+        rewrite_inner_fornum_loop_bounds(inner_cx, nid, shard_part_indices_label)
       end
     end)
 
-  return bounds_labels, original_bounds_labels
+  -- Propagate shard-specific variables to parent contexts.
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        if not cached_nids[graph] then
+          cached_nids[graph] = {
+            shard_nparts = inner_cx.graph:add_node(shard_nparts_label),
+            shard_part_indices = inner_cx.graph:add_node(shard_part_indices_label),
+          }
+        end
+
+        local shard_nparts_nid = cached_nids[graph].shard_nparts
+        inner_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          shard_nparts_nid, inner_cx.graph:node_result_port(shard_nparts_nid),
+          nid, inner_cx.graph:node_available_port(nid))
+
+        local shard_part_indices_nid = cached_nids[graph].shard_part_indices
+        inner_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          shard_part_indices_nid, inner_cx.graph:node_result_port(shard_part_indices_nid),
+          nid, inner_cx.graph:node_available_port(nid))
+      end
+    end)
+
+  local shard_vars = { nparts = shard_nparts_label, part_indices = shard_part_indices_label }
+  return shard_vars, original_bounds_labels
+end
+
+local function make_global_vars(cx, shard_vars, span)
+  local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
+  local nparts_label = make_variable_label(
+    cx, std.newsymbol(bounds_type, "nparts"), bounds_type, span)
+
+  local part_indices_type = std.as_read(shard_vars.part_indices.value.expr_type)
+  local part_indices_label = make_variable_label(
+    cx, std.newsymbol(part_indices_type, "part_indices"), part_indices_type, span)
+
+  return { nparts = nparts_label, part_indices = part_indices_label }
 end
 
 local function synchronize_shard_start(cx, shard_loop)
@@ -3194,8 +3261,8 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
   end
 end
 
-local function build_slice(cx, region_type, list_type, index_nid, index_label,
-                           stride_nid, stride_label, original_bounds,
+local function build_slice(cx, region_type, list_type,
+                           shard_list_indices_nid, shard_list_indices_label,
                            bounds_type, slice_mapping)
   local list_nids = cx.graph:filter_nodes(
     function(nid, label)
@@ -3218,31 +3285,10 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
       }
     }
 
-    -- FIXME: Need to connect up the value of original_bounds[2].
     local compute_list = flow.node.Opaque {
       action = ast.typed.expr.IndexAccess {
         value = first_parent_list.value,
-        index = ast.typed.expr.ListRange {
-          start = index_label.value,
-          stop = ast.typed.expr.Binary {
-            lhs = ast.typed.expr.Binary {
-              lhs = index_label.value,
-              rhs = stride_label.value,
-              op = "+",
-              expr_type = std.as_read(index_label.value.expr_type),
-              annotations = ast.default_annotations(),
-              span = index_label.value.span,
-            },
-            rhs = original_bounds[2].value,
-            op = "min",
-            expr_type = std.as_read(index_label.value.expr_type),
-            annotations = ast.default_annotations(),
-            span = index_label.value.span,
-          },
-          expr_type = std.list(int),
-          annotations = ast.default_annotations(),
-          span = first_list.value.span,
-        },
+        index = shard_list_indices_label.value,
         expr_type = std.as_read(first_list.value.expr_type),
         annotations = ast.default_annotations(),
         span = first_list.value.span,
@@ -3270,26 +3316,23 @@ local function build_slice(cx, region_type, list_type, index_nid, index_label,
         compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     end
     cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), index_nid, cx.graph:node_result_port(index_nid),
-      compute_list_nid, cx.graph:node_available_port(compute_list_nid))
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), stride_nid, cx.graph:node_result_port(stride_nid),
+      flow.edge.Read(flow.default_mode()),
+      shard_list_indices_nid, cx.graph:node_result_port(shard_list_indices_nid),
       compute_list_nid, cx.graph:node_available_port(compute_list_nid))
     return first_parent_list
   end
 end
 
-local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
-                                    intersections, barriers, mapping)
-  assert(#bounds == 2)
-
+local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
+                                    intersections, barriers, shard_task_nid, mapping)
   local slice_mapping = {}
 
   -- Build the actual shard index.
-  local bounds_type = std.as_read(bounds[1].value.expr_type)
+  local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
+  -- TODO(zhangwen): the spans have mostly been arbitrarily picked.
   local index_label = make_variable_label(
     cx, std.newsymbol(bounds_type, "shard_index"),
-    bounds_type, bounds[1].value.span)
+    bounds_type, shard_vars.nparts.value.span)
   local index_nid = cx.graph:add_node(index_label)
 
   -- Build shard stride (i.e. size of each shard). Currently constant.
@@ -3298,21 +3341,25 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
   }
   local stride_nid = cx.graph:add_node(stride_label)
 
-  -- Use index and stride to compute shard bounds.
-  local bound_nids = bounds:map(
-    function(bound)
-      return cx.graph:find_node(
-        function(nid, label)
-          return label:is(flow.node.data.Scalar) and
-            label.region_type == bound.region_type
-        end)
+  -- Make labels for shard bounds.
+  local bound_labels = terralib.newlist()
+  for i = 1, 2 do
+    local bound_label = make_variable_label(
+      cx, std.newsymbol(bounds_type, "shard_bound" .. i),
+      bounds_type, index_label.value.span)
+    bound_labels:insert(bound_label)
+  end
+  local bound_nids = bound_labels:map(
+    function(bound_label)
+      return cx.graph:add_node(bound_label)
     end)
 
-  -- FIXME: Need to connect up the value of original_bounds[2].
+  -- Use index and stride to compute shard bounds.
+  local nparts_nid = cx.graph:add_node(global_vars.nparts)
   local compute_bounds = flow.node.Opaque {
     action = ast.typed.stat.Var {
-      symbols = bounds:map(function(bound) return bound.value.value end),
-      types = bounds:map(
+      symbols = bound_labels:map(function(bound) return bound.value.value end),
+      types = bound_labels:map(
         function(bound) return std.as_read(bound.value.expr_type) end),
       values = terralib.newlist({
           index_label.value,
@@ -3325,7 +3372,7 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
               annotations = ast.default_annotations(),
               span = index_label.value.span,
             },
-            rhs = original_bounds[2].value,
+            rhs = global_vars.nparts.value,
             op = "min",
             expr_type = std.as_read(index_label.value.expr_type),
             annotations = ast.default_annotations(),
@@ -3345,23 +3392,139 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
   end
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()), index_nid, cx.graph:node_result_port(index_nid),
-    compute_bounds_nid, 1)
+    compute_bounds_nid, cx.graph:node_available_port(compute_bounds_nid))
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()), stride_nid, cx.graph:node_result_port(stride_nid),
-    compute_bounds_nid, 2)
+    compute_bounds_nid, cx.graph:node_available_port(compute_bounds_nid))
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()), nparts_nid, cx.graph:node_result_port(nparts_nid),
+    compute_bounds_nid, cx.graph:node_available_port(nparts_nid))
+
+  -- Compute `shard_nparts = shard_bound2 - shard_bound1`.
+  local shard_nparts_nid = find_matching_input(cx, shard_task_nid,
+    shard_vars.nparts.region_type, shard_vars.nparts.field_path)
+  -- The `shard_nparts` node should have been added to this context when the
+  -- leaf loops are rewrited.
+  assert(shard_nparts_nid)
+  local compute_shard_nparts_nid = cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({shard_vars.nparts.value.value}),
+      types = terralib.newlist({bounds_type}),
+      values = terralib.newlist({
+        ast.typed.expr.Binary {
+          lhs = bound_labels[2].value,
+          rhs = bound_labels[1].value,
+          op = "-",
+          expr_type = bounds_type,
+          annotations = ast.default_annotations(),
+          span = index_label.value.span,
+        },
+      }),
+      annotations = ast.default_annotations(),
+      span = index_label.value.span,
+    }
+  })
+  for i, bound_nid in ipairs(bound_nids) do
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      bound_nid, cx.graph:node_result_port(compute_bounds_nid),
+      compute_shard_nparts_nid, i)
+  end
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    compute_shard_nparts_nid, cx.graph:node_sync_port(compute_shard_nparts_nid),
+    shard_nparts_nid, cx.graph:node_sync_port(shard_nparts_nid))
+
+  -- Make a list of 1d indices (shard_bound1 .. shard_bound2) for shard.
+  local shard_list_indices_type = std.list(bounds_type)
+  local shard_list_indices_label = make_variable_label(
+    cx, std.newsymbol(shard_list_indices_type, "shard_list_indices"),
+    shard_list_indices_type, shard_vars.nparts.value.span)
+  local shard_list_indices_nid = cx.graph:add_node(shard_list_indices_label)
+  local compute_shard_list_indices_nid = cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({shard_list_indices_label.value.value}),
+      types = terralib.newlist({shard_list_indices_type}),
+      values = terralib.newlist({
+        ast.typed.expr.ListRange {
+          start = bound_labels[1].value,
+          stop = bound_labels[2].value,
+          expr_type = shard_list_indices_type,
+          annotations = ast.default_annotations(),
+          span = index_label.value.span,
+        }
+      }),
+      annotations = ast.default_annotations(),
+      span = index_label.value.span,
+    }
+  })
+  for _, bound_nid in ipairs(bound_nids) do
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()), bound_nid, cx.graph:node_result_port(bound_nid),
+      compute_shard_list_indices_nid, cx.graph:node_available_port(compute_shard_list_indices_nid))
+  end
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    compute_shard_list_indices_nid, cx.graph:node_sync_port(compute_shard_list_indices_nid),
+    shard_list_indices_nid, cx.graph:node_sync_port(shard_list_indices_nid))
+
+  -- Slice the global `part_indices` to make list of partition indices for shard.
+  local shard_part_indices_label = shard_vars.part_indices
+  local shard_part_indices_nid = find_matching_input(cx, shard_task_nid,
+    shard_part_indices_label.region_type, shard_part_indices_label.field_path)
+  -- The `shard_part_indices` node should also have been added to this context when the
+  -- leaf loops are rewrited.
+  assert(shard_part_indices_nid)
+  local shard_part_indices_type = std.as_read(shard_part_indices_label.value.expr_type)
+  local compute_shard_part_indices_nid = cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({shard_part_indices_label.value.value}),
+      types = terralib.newlist({shard_part_indices_type}),
+      values = terralib.newlist({
+        ast.typed.expr.IndexAccess {
+          value = global_vars.part_indices.value,
+          index = shard_list_indices_label.value,
+          expr_type = shard_part_indices_type,
+          annotations = ast.default_annotations(),
+          span = index_label.value.span,
+        },
+      }),
+      annotations = ast.default_annotations(),
+      span = index_label.value.span,
+    }
+  })
+  local part_indices_nid = cx.graph:add_node(global_vars.part_indices)
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    part_indices_nid, cx.graph:node_result_port(part_indices_nid),
+    compute_shard_part_indices_nid,
+    cx.graph:node_available_port(compute_shard_part_indices_nid))
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    shard_list_indices_nid, cx.graph:node_result_port(shard_list_indices_nid),
+    compute_shard_part_indices_nid,
+    cx.graph:node_available_port(compute_shard_part_indices_nid))
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    compute_shard_part_indices_nid, cx.graph:node_sync_port(compute_shard_part_indices_nid),
+    shard_part_indices_nid, cx.graph:node_sync_port(shard_part_indices_nid))
 
   -- Kill local bounds in the slice mapping.
+  slice_mapping[shard_vars.nparts.region_type] = false
+  slice_mapping[shard_vars.part_indices.region_type] = false
   slice_mapping[index_label.region_type] = false
-  bounds:map(
-    function(bound)
-      slice_mapping[bound.region_type] = false
+  slice_mapping[shard_list_indices_label.region_type] = false
+  bound_labels:map(
+    function(bound_label)
+      slice_mapping[bound_label.region_type] = false
     end)
+  -- TODO(zhangwen): we might need to kill other things.
 
   -- Build list slices for original lists.
   for _, list_type in lists:keys() do
-    build_slice(
-      cx, list_type, list_type, index_nid, index_label, stride_nid, stride_label,
-      original_bounds, bounds_type, slice_mapping)
+    build_slice(cx, list_type, list_type,
+      shard_list_indices_nid, shard_list_indices_label,
+      bounds_type, slice_mapping)
   end
 
   -- Build list slices for intersections.
@@ -3375,9 +3538,9 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
       end
       assert(list_type)
 
-      local parent = build_slice(
-        cx, list_type, list_type, index_nid, index_label,
-        stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
+      local parent = build_slice(cx, list_type, list_type,
+        shard_list_indices_nid, shard_list_indices_label,
+        bounds_type, slice_mapping)
       assert(parent)
 
       for field_path, intersection_label in i2:items() do
@@ -3396,26 +3559,30 @@ local function rewrite_shard_slices(cx, bounds, original_bounds, lists,
         local empty_in_type = std.as_read(empty_in.value.expr_type)
         local empty_in_region = empty_in.region_type
         local empty_in_parent = build_slice(
-          cx, empty_in_region, empty_in_type, index_nid, index_label,
-          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
+          cx, empty_in_region, empty_in_type,
+          shard_list_indices_nid, shard_list_indices_label,
+          bounds_type, slice_mapping)
 
         local empty_out_type = std.as_read(empty_out.value.expr_type)
         local empty_out_region = empty_out.region_type
         local empty_out_parent = build_slice(
-          cx, empty_out_region, empty_out_type, index_nid, index_label,
-          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
+          cx, empty_out_region, empty_out_type,
+          shard_list_indices_nid, shard_list_indices_label,
+          bounds_type, slice_mapping)
 
         local full_in_type = std.as_read(full_in.value.expr_type)
         local full_in_region = full_in.region_type
         local full_in_parent = build_slice(
-          cx, full_in_region, full_in_type, index_nid, index_label,
-          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
+          cx, full_in_region, full_in_type,
+          shard_list_indices_nid, shard_list_indices_label,
+          bounds_type, slice_mapping)
 
         local full_out_type = std.as_read(full_out.value.expr_type)
         local full_out_region = full_out.region_type
         local full_out_parent = build_slice(
-          cx, full_out_region, full_out_type, index_nid, index_label,
-          stride_nid, stride_label, original_bounds, bounds_type, slice_mapping)
+          cx, full_out_region, full_out_type,
+          shard_list_indices_nid, shard_list_indices_label,
+          bounds_type, slice_mapping)
 
         assert(empty_in_parent and empty_out_parent and
                  full_in_parent and full_out_parent)
@@ -3489,8 +3656,7 @@ local function make_block(cx, block, mapping, span)
 end
 
 local function make_distribution_loop(cx, block, shard_index, shard_stride,
-                                      original_bounds, slice_mapping, span)
-  assert(#original_bounds == 2)
+                                      global_vars, slice_mapping, span)
   local label = flow.node.ctrl.ForNum {
     symbol = shard_index.value.value,
     block = block,
@@ -3498,27 +3664,24 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
     span = span,
   }
   local nid = cx.graph:add_node(label)
+  -- TODO(zhangwen): watch out for extra nodes!
   flow_summarize_subgraph.entry(cx.graph, nid, slice_mapping)
 
   -- Add loop bounds.
-  data.zip(data.range(1, 1 + #original_bounds), original_bounds):map(
-    function(i_bound)
-      local i, bound = unpack(i_bound)
-      local bound_nid
-
-      -- Reuse the node if it exists.
-      if bound:is(flow.node.data) then
-        bound_nid = find_matching_input(cx, nid, bound.region_type)
-      end
-
-      -- Otherwise build a new one.
-      if not bound_nid then
-        bound_nid = cx.graph:add_node(bound)
-      end
-      cx.graph:add_edge(
-        flow.edge.Read(flow.default_mode()), bound_nid, cx.graph:node_result_port(bound_nid),
-        nid, i)
-    end)
+  local lower_bound_nid = cx.graph:add_node(flow.node.Constant {
+    value = make_constant(0, global_vars.nparts.value.expr_type, span)
+  })
+  local upper_bound_nid =
+    find_matching_input(cx, nid, global_vars.nparts.region_type) or
+    cx.graph:add_node(global_vars.nparts)
+  cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
+    lower_bound_nid, cx.graph:node_result_port(lower_bound_nid),
+    nid, 1)
+  cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
+    upper_bound_nid, cx.graph:node_result_port(upper_bound_nid),
+    nid, 2)
+  -- TODO(zhangwen): if the input node already exists, it would now have two
+  -- nodes going into the loop.  ok?
 
   -- Add loop stride.
   if shard_stride:is(flow.node.Constant) then
@@ -3574,7 +3737,8 @@ local function find_nid_mapping(cx, old_loop, new_loop,
                                 intersection_types,
                                 barriers_empty_in, barriers_empty_out,
                                 barriers_full_in, barriers_full_out,
-                                collective_types, start_barrier, mapping)
+                                collective_types, start_barrier,
+                                global_vars, mapping)
   local function matches(new_label)
     return function(nid, label)
       if label:is(flow.node.data) then
@@ -3608,8 +3772,11 @@ local function find_nid_mapping(cx, old_loop, new_loop,
                  barriers_full_in[new_input.region_type] or
                  barriers_full_out[new_input.region_type] or
                  collective_types[new_input.region_type] or
-                 new_input.region_type == start_barrier.region_type)
-        -- Skip intersections, phase barriers, collectives.
+                 new_input.region_type == start_barrier.region_type or
+                 new_input.region_type == global_vars.nparts.region_type or
+                 new_input.region_type == global_vars.part_indices.region_type)
+          -- Skip intersections, phase barriers, collectives, and newly created
+          -- global variables.
       else
         input_nid_mapping[new_input.region_type][new_input.field_path][
           old_input_nid] = new_input_nid
@@ -3798,7 +3965,9 @@ end
 
 local function issue_zipped_copy_interior(
     cx, src_nids, dst_in_nids, dst_out_nids,
-    src_type, dst_type, bounds, span)
+    src_type, dst_type, nparts_nid, part_indices_nid, span)
+
+  local part_indices_label = cx.graph:node_label(part_indices_nid)
 
   -- Build the copy loop.
   local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
@@ -3817,16 +3986,23 @@ local function issue_zipped_copy_interior(
     span = span,
   }
   local copy_loop_nid = cx.graph:add_node(copy_loop)
-  local bound1_nid = cx.graph:add_node(bounds[1])
-  local bound2_nid = cx.graph:add_node(bounds[2])
+
+  local lower_bound_nid = cx.graph:add_node(flow.node.Constant {
+    value = make_constant(0, int, span),
+  })
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    bound1_nid, cx.graph:node_result_port(bound1_nid),
+    lower_bound_nid, cx.graph:node_result_port(lower_bound_nid),
     copy_loop_nid, 1)
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    bound2_nid, cx.graph:node_result_port(bound2_nid),
+    nparts_nid, cx.graph:node_result_port(nparts_nid),
     copy_loop_nid, 2)
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    part_indices_nid, cx.graph:node_result_port(part_indices_nid),
+    copy_loop_nid, cx.graph:node_available_port(copy_loop_nid))
+    
   local copy_loop_src_port = cx.graph:node_available_port(copy_loop_nid)
   for field_path, src_nid in src_nids:items() do
     cx.graph:add_edge(
@@ -3845,6 +4021,45 @@ local function issue_zipped_copy_interior(
   end
 
   -- Interior of the loop:
+  -- TODO(zhangwen): document this function.
+  local function get_index_access_index_nid(cx, value_type, part_indices_label,
+                                            index_nid)
+    assert(cx.graph:has_node(index_nid))
+    if std.is_list(value_type) then
+      -- Just use `index_nid` to index into the List.
+      return index_nid
+    elseif std.is_partition(value_type) then
+      -- Otherwise, we need `part_indices[index]` to index into a Partition.
+      local part_index_type =
+        std.as_read(part_indices_label.value.expr_type).element_type
+      local compute_part_index_nid = cx.graph:add_node(
+        flow.node.IndexAccess {
+          expr_type = part_index_type,
+          annotations = ast.default_annotations(),
+          span = span,
+        })
+      local part_indices_nid_block = cx.graph:add_node(part_indices_label)
+      block_cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), -- TODO(zhangwen): Read or None?
+        part_indices_nid_block, cx.graph:node_result_port(part_indices_nid_block),
+        compute_part_index_nid, 1)
+      block_cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()),
+        index_nid, cx.graph:node_result_port(index_nid),
+        compute_part_index_nid, 2)
+      local part_index_nid = block_cx.graph:add_node(
+        make_variable_label(block_cx, std.newsymbol(part_index_type),
+          part_index_type, span) { fresh = true })
+      block_cx.graph:add_edge(
+        flow.edge.Write(flow.default_mode()),
+        compute_part_index_nid, block_cx.graph:node_result_port(compute_part_index_nid),
+        part_index_nid, 0)
+      return part_index_nid
+    else
+      assert(false) -- TODO(zhangwen): really?
+    end
+  end
+
   local block_src_i_type = src_type:subregion_dynamic()
   if std.is_partition(src_type) then
     std.add_constraint(
@@ -3902,13 +4117,16 @@ local function issue_zipped_copy_interior(
     })
   for field_path, block_src_nid in block_src_nids:items() do
     block_cx.graph:add_edge(
-      flow.edge.None(flow.default_mode()),
+      flow.edge.None(flow.default_mode()), -- TODO(zhangwen): why None?
       block_src_nid, block_cx.graph:node_result_port(block_src_nid),
       block_index_src_nid, 1)
   end
+  -- TODO(zhangwen): cast from int to int1d for structured case?
+  local src_index_nid = get_index_access_index_nid(block_cx, src_type,
+    part_indices_label, index_nid)
   block_cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    index_nid, block_cx.graph:node_result_port(index_nid),
+    src_index_nid, block_cx.graph:node_result_port(src_index_nid),
     block_index_src_nid, 2)
   for field_path, block_src_i_nid in block_src_i_nids:items() do
     block_cx.graph:add_edge(
@@ -3930,9 +4148,12 @@ local function issue_zipped_copy_interior(
       block_dst_in_nid, block_cx.graph:node_result_port(block_dst_in_nid),
       block_index_dst_in_nid, 1)
   end
+  -- TODO(zhangwen): we might create two nodes for `part_indices` in block?
+  local dst_index_nid = get_index_access_index_nid(block_cx, dst_type,
+    part_indices_label, index_nid)
   block_cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    index_nid, block_cx.graph:node_result_port(index_nid),
+    dst_index_nid, block_cx.graph:node_result_port(dst_index_nid),
     block_index_dst_in_nid, 2)
   for field_path, block_dst_in_i_nid in
     block_dst_in_i_nids:items()
@@ -3981,11 +4202,12 @@ end
 
 
 local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
-                                 src_type, dst_type, bounds, shadow, span)
+                                 src_type, dst_type, nparts_nid,
+                                 part_indices_nid, shadow, span)
   if not shadow then
     return issue_zipped_copy_interior(
       cx, src_nids, dst_in_nids, dst_out_nids,
-      src_type, dst_type, bounds, span)
+      src_type, dst_type, nparts_nid, part_indices_nid, span)
   else
     local shadow_label
     for field_path, label in shadow:items() do
@@ -4127,15 +4349,27 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
       inner_dst_out_nids[field_path] = inner_dst_out_nid
     end
 
+    -- Propagate `nparts` and `part_indices` to inner graph.
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      nparts_nid, cx.graph:node_result_port(nparts_nid),
+      copy_loop_nid, cx.graph:node_available_port(copy_loop_nid))
+    cx.graph:add_edge(
+      flow.edge.Read(flow.default_mode()),
+      part_indices_nid, cx.graph:node_result_port(part_indices_nid),
+      copy_loop_nid, cx.graph:node_available_port(copy_loop_nid))
+    local inner_nparts_nid = block_cx.graph:add_node(cx.graph:node_label(nparts_nid))
+    local inner_part_indices_nid = block_cx.graph:add_node(cx.graph:node_label(part_indices_nid))
+
     return issue_zipped_copy_interior(
       block_cx, inner_src_nids, inner_dst_in_nids, inner_dst_out_nids,
-      src_type, dst_type, bounds, span)
+      src_type, dst_type, inner_nparts_nid, inner_part_indices_nid, span)
   end
 end
 
 local function issue_input_copies_partition(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
     find_partition_nids(
@@ -4163,13 +4397,7 @@ local function issue_input_copies_partition(
     slice = ast.typed.expr.ListSlicePartition
   end
 
-  local indices = ast.typed.expr.ListRange {
-    start = bounds[1].value,
-    stop = bounds[2].value,
-    expr_type = std.list(int),
-    annotations = ast.default_annotations(),
-    span = first_partition_label.value.span,
-  }
+  local indices = cx.graph:node_label(part_indices_nid).value
   local duplicated = slice {
     partition = first_partition_label.value,
     indices = indices,
@@ -4193,6 +4421,10 @@ local function issue_input_copies_partition(
       flow.edge.None(flow.default_mode()), partition_nid, cx.graph:node_result_port(),
       duplicate_nid, duplicate_port)
   end
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    part_indices_nid, cx.graph:node_result_port(part_indices_nid),
+    duplicate_nid, cx.graph:node_available_port(duplicate_nid))
   for field_path, name_nid in name_nids:items() do
     cx.graph:add_edge(
       flow.edge.HappensBefore {},
@@ -4206,7 +4438,7 @@ local function issue_input_copies_partition(
     local copy_nid = issue_zipped_copy(
       cx, partition_nids, name_nids, new_nids,
       std.as_read(first_partition_label.value.expr_type), region_type,
-      bounds, shadow, first_new_label.value.span)
+      nparts_nid, part_indices_nid, shadow, first_new_label.value.span)
     cx.graph:copy_incoming_edges(
       function(edge) return edge.label:is(flow.edge.HappensBefore) end,
       old_loop, copy_nid)
@@ -4214,8 +4446,8 @@ local function issue_input_copies_partition(
 end
 
 local function issue_input_copies_cross_product(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   assert(std.is_list_of_partitions(region_type))
   local old_nids, new_nids, product_nids, first_product_label, first_new_label =
     find_cross_product_nids(
@@ -4231,6 +4463,7 @@ local function issue_input_copies_cross_product(
   end
 
   -- Duplicate the product.
+  local part_indices_label = cx.graph:node_label(part_indices_nid)
   local duplicate = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({
@@ -4242,13 +4475,7 @@ local function issue_input_copies_cross_product(
       values = terralib.newlist({
           ast.typed.expr.ListSliceCrossProduct {
             product = first_product_label.value,
-            indices = ast.typed.expr.ListRange {
-              start = bounds[1].value,
-              stop = bounds[2].value,
-              expr_type = std.list(int),
-              annotations = ast.default_annotations(),
-              span = first_product_label.value.span,
-            },
+            indices = part_indices_label.value,
             expr_type = std.as_read(first_new_label.value.expr_type),
             annotations = ast.default_annotations(),
             span = first_product_label.value.span,
@@ -4265,6 +4492,10 @@ local function issue_input_copies_cross_product(
       flow.edge.None(flow.default_mode()), product_nid, cx.graph:node_result_port(),
       duplicate_nid, duplicate_port)
   end
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    part_indices_nid, cx.graph:node_result_port(part_indices_nid),
+    duplicate_nid, cx.graph:node_available_port(duplicate_nid))
   for field_path, new_nid in new_nids:items() do
     cx.graph:add_edge(
       flow.edge.HappensBefore {},
@@ -4274,24 +4505,24 @@ local function issue_input_copies_cross_product(
 end
 
 local function issue_input_copies(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   if std.is_list_of_regions(region_type) then
     issue_input_copies_partition(
       cx, region_type, need_copy, elide, shadow, partitions, old_loop,
-      bounds, opened_nids)
+      nparts_nid, part_indices_nid, opened_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_input_copies_cross_product(
       cx, region_type, need_copy, elide, shadow, partitions, old_loop,
-      bounds, opened_nids)
+      nparts_nid, part_indices_nid, opened_nids)
   else
     assert(false)
   end
 end
 
 local function issue_output_copies_partition(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   assert(std.is_list_of_regions(region_type))
   local old_nids, new_nids, partition_nids, first_partition_label, first_new_label =
     find_partition_nids(
@@ -4320,7 +4551,7 @@ local function issue_output_copies_partition(
     local copy_nid = issue_zipped_copy(
       cx, new_nids, opened_partition_nids, partition_nids,
       region_type, std.as_read(first_partition_label.value.expr_type),
-      bounds, shadow, first_new_label.value.span)
+      nparts_nid, part_indices_nid, shadow, first_new_label.value.span)
     cx.graph:copy_outgoing_edges(
       function(edge) return edge.label:is(flow.edge.HappensBefore) end,
       old_loop, copy_nid)
@@ -4345,23 +4576,23 @@ local function issue_output_copies_partition(
 end
 
 local function issue_output_copies_cross_product(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   assert(std.is_list_of_partitions(region_type))
   assert(false)
 end
 
 local function issue_output_copies(
-    cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-    opened_nids)
+    cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+    nparts_nid, part_indices_nid, opened_nids)
   if std.is_list_of_regions(region_type) then
     issue_output_copies_partition(
-      cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-      opened_nids)
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+      nparts_nid, part_indices_nid, opened_nids)
   elseif std.is_list_of_partitions(region_type) then
     issue_output_copies_cross_product(
-      cx, region_type, need_copy, elide, shadow, partitions, old_loop, bounds,
-      opened_nids)
+      cx, region_type, need_copy, elide, shadow, partitions, old_loop,
+      nparts_nid, part_indices_nid, opened_nids)
   else
     assert(false)
   end
@@ -4484,7 +4715,7 @@ local function issue_barrier_creation(cx, rhs_nid, intersection_nid,
     barrier_in_nid, cx.graph:node_sync_port(barrier_in_nid))
 end
 
-local function issue_collective_creation(cx, loop_nid, collective_nid, op, bounds)
+local function issue_collective_creation(cx, loop_nid, collective_nid, op, nparts_nid)
   local collective = cx.graph:node_label(collective_nid)
   local collective_type = std.as_read(collective.value.expr_type)
   local value_type = collective_type.result_type
@@ -4492,28 +4723,15 @@ local function issue_collective_creation(cx, loop_nid, collective_nid, op, bound
   local stride = make_constant(shard_size, int, collective.value.span)
   local stride_minus_1 = make_constant(shard_size - 1, int, collective.value.span)
 
+  local nparts_label = cx.graph:node_label(nparts_nid)
   local create_label = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({collective.value.value}),
       types = terralib.newlist({collective_type}),
       values = terralib.newlist({
-          ast.typed.expr.DynamicCollective {
+          ast.typed.expr.DynamicCollective { -- TODO(zhangwen): what is this??
             arrivals = ast.typed.expr.Binary {
-              lhs = ast.typed.expr.Binary {
-                lhs = ast.typed.expr.Binary {
-                  lhs = bounds[2].value,
-                  rhs = bounds[1].value,
-                  op = "-",
-                  expr_type = int,
-                  annotations = ast.default_annotations(),
-                  span = collective.value.span,
-                },
-                rhs = stride_minus_1,
-                op = "+",
-                expr_type = int,
-                annotations = ast.default_annotations(),
-                span = collective.value.span,
-              },
+              lhs = nparts_label.value,
               rhs = stride,
               op = "/",
               expr_type = int,
@@ -4533,32 +4751,24 @@ local function issue_collective_creation(cx, loop_nid, collective_nid, op, bound
   }
   local create_nid = cx.graph:add_node(create_label)
 
-  if bounds[1]:is(flow.node.data) then
-    local bound1_nid = find_matching_input(cx, loop_nid, bounds[1].region_type, bounds[1].field_path)
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), bound1_nid, cx.graph:node_result_port(bound1_nid),
-      create_nid, cx.graph:node_available_port(create_nid))
-  end
-
-  if bounds[2]:is(flow.node.data) then
-    local bound2_nid = find_matching_input(cx, loop_nid, bounds[2].region_type, bounds[2].field_path)
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), bound2_nid, cx.graph:node_result_port(bound2_nid),
-      create_nid, cx.graph:node_available_port(create_nid))
-  end
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    nparts_nid, cx.graph:node_result_port(nparts_nid),
+    create_nid, cx.graph:node_available_port(create_nid))
 
   cx.graph:add_edge(
     flow.edge.HappensBefore {}, create_nid, cx.graph:node_sync_port(create_nid),
     collective_nid, cx.graph:node_sync_port(collective_nid))
 end
 
-local function issue_single_barrier_creation(cx, loop_nid, barrier_nid, bounds)
+local function issue_single_barrier_creation(cx, barrier_nid, nparts_nid)
   local barrier = cx.graph:node_label(barrier_nid)
   local barrier_type = std.as_read(barrier.value.expr_type)
 
   local stride = make_constant(shard_size, int, barrier.value.span)
   local stride_minus_1 = make_constant(shard_size - 1, int, barrier.value.span)
 
+  local nparts_label = cx.graph:node_label(nparts_nid)
   local create_label = flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({barrier.value.value}),
@@ -4567,14 +4777,7 @@ local function issue_single_barrier_creation(cx, loop_nid, barrier_nid, bounds)
           ast.typed.expr.PhaseBarrier {
             value = ast.typed.expr.Binary {
               lhs = ast.typed.expr.Binary {
-                lhs = ast.typed.expr.Binary {
-                  lhs = bounds[2].value,
-                  rhs = bounds[1].value,
-                  op = "-",
-                  expr_type = int,
-                  annotations = ast.default_annotations(),
-                  span = barrier.value.span,
-                },
+                lhs = nparts_label.value,
                 rhs = stride_minus_1,
                 op = "+",
                 expr_type = int,
@@ -4597,24 +4800,83 @@ local function issue_single_barrier_creation(cx, loop_nid, barrier_nid, bounds)
     }
   }
   local create_nid = cx.graph:add_node(create_label)
-
-  if bounds[1]:is(flow.node.data) then
-    local bound1_nid = find_matching_input(cx, loop_nid, bounds[1].region_type, bounds[1].field_path)
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), bound1_nid, cx.graph:node_result_port(bound1_nid),
-      create_nid, cx.graph:node_available_port(create_nid))
-  end
-
-  if bounds[2]:is(flow.node.data) then
-    local bound2_nid = find_matching_input(cx, loop_nid, bounds[2].region_type, bounds[2].field_path)
-    cx.graph:add_edge(
-      flow.edge.Read(flow.default_mode()), bound2_nid, cx.graph:node_result_port(bound2_nid),
-      create_nid, cx.graph:node_available_port(create_nid))
-  end
-
+  cx.graph:add_edge(
+    flow.edge.Read(flow.default_mode()),
+    nparts_nid, cx.graph:node_result_port(nparts_nid),
+    create_nid, cx.graph:node_available_port(create_nid))
   cx.graph:add_edge(
     flow.edge.HappensBefore {}, create_nid, cx.graph:node_sync_port(create_nid),
     barrier_nid, cx.graph:node_sync_port(barrier_nid))
+end
+
+local function issue_global_vars_creation(cx, loop_nid, nparts_nid,
+                                          part_indices_nid, original_bounds)
+
+  -- `var nparts = orig_bound2 - orig_bound1`.
+  local nparts_label = cx.graph:node_label(nparts_nid)
+  local span = nparts_label.value.span
+  local nparts_type = std.as_read(nparts_label.value.expr_type)
+  local compute_nparts_nid = cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({nparts_label.value.value}),
+      types = terralib.newlist({nparts_type}),
+      values = terralib.newlist({
+        ast.typed.expr.Binary {
+          lhs = original_bounds[2].value,
+          rhs = original_bounds[1].value,
+          op = "-",
+          expr_type = nparts_type,
+          annotations = ast.default_annotations(),
+          span = span,
+        },
+      }),
+      annotations = ast.default_annotations(),
+      span = span,
+    }
+  })
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    compute_nparts_nid, cx.graph:node_sync_port(compute_nparts_nid),
+    nparts_nid, cx.graph:node_sync_port(nparts_nid))
+
+  -- `var part_indices = list_range(orig_bound1, orig_bound2)`.
+  local part_indices_label = cx.graph:node_label(part_indices_nid)
+  local part_indices_type = std.as_read(part_indices_label.value.expr_type)
+  local compute_part_indices_nid = cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {
+      symbols = terralib.newlist({part_indices_label.value.value}),
+      types = terralib.newlist({part_indices_type}),
+      values = terralib.newlist({
+        ast.typed.expr.ListRange {
+          start = original_bounds[1].value,
+          stop = original_bounds[2].value,
+          expr_type = part_indices_type,
+          annotations = ast.default_annotations(),
+          span = span,
+        },
+      }),
+      annotations = ast.default_annotations(),
+      span = span,
+    }
+  })
+  cx.graph:add_edge(
+    flow.edge.HappensBefore {},
+    compute_part_indices_nid, cx.graph:node_sync_port(compute_part_indices_nid),
+    part_indices_nid, cx.graph:node_sync_port(part_indices_nid))
+
+  -- Wire original bounds as inputs to the new nodes.
+  for _, bound_label in ipairs(original_bounds) do
+    if bound_label:is(flow.node.data) then
+      local bound_nid = find_matching_input(cx, loop_nid,
+        bound_label.region_type, bound_label.field_path)
+      cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), bound_nid, cx.graph:node_result_port(bound_nid),
+        compute_nparts_nid, cx.graph:node_available_port(compute_nparts_nid))
+      cx.graph:add_edge(
+        flow.edge.Read(flow.default_mode()), bound_nid, cx.graph:node_result_port(bound_nid),
+        compute_part_indices_nid, cx.graph:node_available_port(compute_part_indices_nid))
+    end
+  end
 end
 
 local function merge_open_nids(cx)
@@ -4687,7 +4949,8 @@ end
 local function rewrite_inputs(cx, old_loop, new_loop,
                               original_partitions, original_bounds,
                               elide_copy, shadowed_partitions, intersections, barriers, collectives,
-                              start_barrier, mapping)
+                              start_barrier, global_vars, mapping)
+  -- TODO(zhangwen): update comments.
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
@@ -4695,6 +4958,13 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   --          i. Insert copies and opens/closes to make data consistent.
   --  3. Merge open and close nodes for racing copies.
   --  4. Copy happens-before edges for the loop node itself.
+
+  -- Make global variables `nparts` and `part_indices`.
+  local nparts_nid = find_matching_input(cx, new_loop,
+    global_vars.nparts.region_type, global_vars.nparts.field_path)
+  local part_indices_nid = find_matching_input(cx, new_loop,
+    global_vars.part_indices.region_type, global_vars.part_indices.field_path)
+  issue_global_vars_creation(cx, old_loop, nparts_nid, part_indices_nid, original_bounds)
 
   -- Compute more useful indexes for intersections and phase barriers.
   local partitions = data.new_recursive_map(1)
@@ -4749,7 +5019,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   local input_nid_mapping, output_nid_mapping = find_nid_mapping(
     cx, old_loop, new_loop, intersection_types,
     barriers_empty_in, barriers_empty_out, barriers_full_in, barriers_full_out,
-    collective_types, start_barrier, mapping)
+    collective_types, start_barrier, global_vars, mapping)
 
   -- Rewrite inputs.
   local opened_nids = data.new_recursive_map(1)
@@ -4778,7 +5048,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       local shadow_label = shadow and partitions[mapping[shadow]]
       issue_input_copies(
         cx, region_type, need_copy, elide, shadow_label, partitions,
-        old_loop, original_bounds, opened_nids)
+        old_loop, nparts_nid, part_indices_nid, opened_nids)
     end
   end
 
@@ -4808,7 +5078,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
       local shadow_label = shadow and partitions[mapping[shadow]]
       issue_output_copies(
         cx, region_type, need_copy, elide, shadow_label, partitions,
-        old_loop, original_bounds, opened_nids)
+        old_loop, nparts_nid, part_indices_nid, opened_nids)
     end
   end
 
@@ -4860,12 +5130,12 @@ local function rewrite_inputs(cx, old_loop, new_loop,
     local collective, op = unpack(c)
     local collective_nid = find_matching_input(
       cx, new_loop, collective.region_type, collective.field_path)
-    issue_collective_creation(cx, old_loop, collective_nid, op, original_bounds)
+    issue_collective_creation(cx, old_loop, collective_nid, op, nparts_nid)
   end
 
   local start_barrier_nid = find_matching_input(
     cx, new_loop, start_barrier.region_type, start_barrier.field_path)
-  issue_single_barrier_creation(cx, old_loop, start_barrier_nid, original_bounds)
+  issue_single_barrier_creation(cx, start_barrier_nid, nparts_nid)
 
   -- Merge open and close nodes for racing copies.
 
@@ -4876,6 +5146,7 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   -- visibly racing. Therefore, merge the open and close operations to
   -- avoid the appearance of a race.
 
+  -- TODO(zhangwen): what is this?
   merge_open_nids(cx)
   merge_close_nids(cx)
 
@@ -4928,7 +5199,8 @@ local function spmdize(cx, loop)
   local scratch_field_mapping = rewrite_reduction_scratch_fields(shard_cx, shard_loop)
   local intersections, intersection_mapping = rewrite_shard_intersections(
     shard_cx, shard_loop, original_intersections)
-  local bounds, original_bounds = rewrite_shard_loop_bounds(shard_cx, shard_loop)
+  local shard_vars, original_bounds = rewrite_fornum_loop_in_shard(shard_cx, shard_loop)
+  local global_vars = make_global_vars(cx, shard_vars, original_bounds, span)
   local start_barrier = synchronize_shard_start(shard_cx, shard_loop)
 
   local shard_mapping = compose_mapping(scratch_field_mapping, intersection_mapping)
@@ -4943,12 +5215,12 @@ local function spmdize(cx, loop)
     rewrite_list_elision(outer_shard_cx, lists, intersections, barriers, mapping)
   local shard_index, shard_stride, slice_mapping,
       new_intersections, new_barriers = rewrite_shard_slices(
-      outer_shard_cx, bounds, original_bounds, elided_lists, elided_intersections,
-      elided_barriers, compose_mapping(mapping, elided_mapping))
+      outer_shard_cx, shard_vars, global_vars, elided_lists, elided_intersections,
+      elided_barriers, shard_task, compose_mapping(mapping, elided_mapping))
 
   local dist_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
   local dist_loop = make_distribution_loop(
-    dist_cx, outer_shard_cx.graph, shard_index, shard_stride, original_bounds,
+    dist_cx, outer_shard_cx.graph, shard_index, shard_stride, global_vars,
     compose_mapping(elided_mapping, slice_mapping), span)
   downgrade_simultaneous_coherence(dist_cx)
 
@@ -4959,7 +5231,7 @@ local function spmdize(cx, loop)
 
   rewrite_inputs(cx, loop, epoch_loop, original_partitions, original_bounds,
                  elide_copy, shadowed_partitions, new_intersections, new_barriers, collectives,
-                 start_barrier, inputs_mapping)
+                 start_barrier, global_vars, inputs_mapping)
 
   return epoch_loop
 end
