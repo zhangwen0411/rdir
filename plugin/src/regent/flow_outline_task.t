@@ -423,9 +423,9 @@ local function extract_task(cx, nid, prefix, force_read_write)
   -- passes.optimize(ast)
   if std.config["index-launch"] then ast = optimize_index_launches.entry(ast) end
   if std.config["future"] then ast = optimize_futures.entry(ast) end
+  if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
   print("FIXME: Mapping optimization disabled while outlining task")
   -- if std.config["mapping"] then ast = optimize_mapping.entry(ast) end
-  if std.config["leaf"] then ast = optimize_config_options.entry(ast) end
   if std.config["trace"] then ast = optimize_traces.entry(ast) end
   if std.config["no-dynamic-branches"] then ast = optimize_divergence.entry(ast) end
   if std.config["vectorize"] then ast = vectorize_loops.entry(ast) end
