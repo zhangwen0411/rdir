@@ -2967,22 +2967,37 @@ local function select_copy_elision(cx, lists, inverse_mapping)
   -- duplication, copies can also be avoided.
 
   local elide_copy = data.newmap()
+  local elide_none = data.newmap()
   for _, list_type in lists:keys() do
-    local old_type = inverse_mapping[list_type]
-    if std.is_list_of_regions(list_type) and
-      std.is_partition(old_type) and old_type:is_disjoint()
-    then
-      local aliased = false
-      for other_type, _ in elide_copy:items() do
-        if std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
-          cx.tree:can_alias(old_type, other_type)
-        then
-          aliased = true
-          break
+    if std.is_list_of_regions(list_type) then
+      local list_nids = cx.graph:filter_nodes(
+        function(nid, label)
+          return label:is(flow.node.data) and std.type_eq(label.region_type, list_type) end)
+      local has_privilege = data.any(
+        unpack(
+          list_nids:map(
+            function(nid)
+              return #cx.graph:incoming_mutate_set(nid) > 0 or #cx.graph:outgoing_read_set(nid) > 0
+            end)))
+
+      local old_type = inverse_mapping[list_type]
+      if not has_privilege then
+        -- Keep these in a separate list for now. Don't want to
+        -- accidentally shadow something.
+        elide_none[old_type] = true
+      elseif std.is_partition(old_type) and old_type:is_disjoint() then
+        local aliased = false
+        for other_type, _ in elide_copy:items() do
+          if std.type_maybe_eq(old_type:fspace(), other_type:fspace()) and
+            cx.tree:can_alias(old_type, other_type)
+          then
+            aliased = true
+            break
+          end
         end
-      end
-      if not aliased then
-        elide_copy[old_type] = true
+        if not aliased then
+          elide_copy[old_type] = true
+        end
       end
     end
   end
@@ -3003,11 +3018,17 @@ local function select_copy_elision(cx, lists, inverse_mapping)
       end
     end
   end
+
+  -- Apply none-privilege list to elided copies.
+  for old_type, _ in elide_none:items() do
+    elide_copy[old_type] = true
+  end
+
   return elide_copy, shadowed_partitions
 end
 
 local function rewrite_elided_lists(cx, lists, intersections, barriers,
-                                    inverse_mapping, elide_copy, elide_mapping)
+                                    inverse_mapping, elide_copy)
   local elided_lists = data.new_recursive_map(1)
   local elided_mapping = {}
   for list_type, list in lists:items() do
