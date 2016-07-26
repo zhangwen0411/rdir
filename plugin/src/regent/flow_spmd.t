@@ -1889,7 +1889,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
     local sink_label = flow.node.Function {
       value = ast.typed.expr.Function {
         value = block_on_future,
-        expr_type = wait_for:gettype(),
+        expr_type = block_on_future:gettype(),
         annotations = ast.default_annotations(),
         span = use_label.span,
       }
