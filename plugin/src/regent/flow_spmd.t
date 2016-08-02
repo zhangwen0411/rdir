@@ -308,7 +308,6 @@ local function loops_are_compatible(cx, loop_nid)
     end) == nil
   if not check then return false end
 
-
   -- Check that leaves use compatible bounds.
   local bounds_labels
   local check = block_cx.graph:traverse_nodes_recursive(
@@ -316,7 +315,6 @@ local function loops_are_compatible(cx, loop_nid)
       local inner_cx = block_cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
         local curr_bounds_labels = find_bounds_labels(inner_cx, nid, label)
-        -- TODO(zhangwen): what about ForList over region/lists?
 
         if not bounds_labels then
           bounds_labels = curr_bounds_labels
@@ -367,19 +365,6 @@ local function can_spmdize(cx, loop)
   --      b. Open and close ops
   --      c. Data nodes (regions, partitions, scalars) of any kinds
   --      d. Any variables updated must be updated uniformly (not checked yet)
-
-  --[[
-  if not has_demand_spmd(cx, loop) then return false end
-  print("A")
-  if not whitelist_node_types(cx, loop) then return false end
-  print("B")
-  if not has_leaves(cx, loop) then return false end
-  print("C")
-  if not leaves_are_parallel_loops(cx, loop) then return false end
-  print("D")
-  if not loops_are_compatible(cx, loop) then return false end
-  print("E")
-  ]]
 
   return has_demand_spmd(cx, loop) and
     whitelist_node_types(cx, loop) and
@@ -541,6 +526,8 @@ local function compute_version_numbers(cx)
   return versions
 end
 
+-- Returns the leaf loops' type (ForList or ForNum).
+-- Assumes that all leaf nodes are loops of the same type.
 local function find_leaf_loop_type(cx, loop_nid)
   local loop_label = cx.graph:node_label(loop_nid)
   local block_cx = cx:new_graph_scope(loop_label.block)
@@ -2765,48 +2752,60 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
   return shallow_intersections, mapping
 end
 
-local function rewrite_inner_fornum_loop_bounds(cx, loop_nid, part_indices)
-  local loop_label = cx.graph:node_label(loop_nid)
-  local block_cx = cx:new_graph_scope(loop_label.block)
+-- Returns nids of IndexAccess nodes that access lists.
+local function find_list_index_accesses(cx)
+  return cx.graph:filter_nodes(
+    function(nid, label)
+      return label:is(flow.node.IndexAccess) and
+        #cx.graph:filter_immediate_predecessors_by_edges(
+          function(edge, label)
+            return edge.to_port == 1 and label:is(flow.node.data) and
+              std.is_list(std.as_read(label.value.expr_type))
+          end,
+          nid) > 0
+    end)
+end
+
+-- Makes nodes that compute the global index in a loop body.
+-- If `local_index_symbol == nil`, a new symbol will be created for the local index.
+local function compute_global_index(block_cx, loop_label, global_index_symbol,
+                                    local_index_symbol, shard_part_indices_label)
+  if not local_index_symbol then
+    local_index_symbol = std.newsymbol(loop_label.symbol.symbol_type, "local_index")
+  end
+  local local_index_label = make_variable_label(
+    block_cx, local_index_symbol, local_index_symbol.symbol_type, loop_label.span)
+  local local_index_nid = block_cx.graph:add_node(local_index_label)
 
   -- Find the old loop variable, which we'll keep as the global index.
   local global_index_nid = block_cx.graph:find_node(
     function(_, label)
       return label:is(flow.node.data.Scalar) and
-        label.value.value == loop_label.symbol
+        label.value.value == global_index_symbol
   end)
-  local global_index = block_cx.graph:node_label(global_index_nid)
-  local index_type = std.as_read(global_index.value.expr_type)
-
-  -- Make a new symbol to use as loop variable.
-  local local_index = make_variable_label(
-    block_cx, std.newsymbol(index_type, "local_index"),
-    index_type, global_index.value.span)
-  local local_index_nid = block_cx.graph:add_node(local_index)
-  -- Swap in the new loop variable.
-  loop_label.symbol = local_index.value.value
+  local global_index_label = block_cx.graph:node_label(global_index_nid)
+  local global_index_type = global_index_label.value.expr_type
 
   -- Compute global index (original loop variable) by indexing into the
-  -- `part_indices` list.
-  local part_indices_nid = block_cx.graph:add_node(part_indices)
-  local compute_global_index = flow.node.Opaque {
-    action = ast.typed.stat.Var {  -- var global_index = part_indices[local_index]
-      symbols = terralib.newlist({global_index.value.value}),
-      types = terralib.newlist({index_type}),
+  -- `shard_part_indices` list.
+  local part_indices_nid = block_cx.graph:add_node(shard_part_indices_label)
+  local compute_global_index_nid = block_cx.graph:add_node(flow.node.Opaque {
+    action = ast.typed.stat.Var {  -- var global_index = shard_part_indices[local_index]
+      symbols = terralib.newlist({global_index_symbol}),
+      types = terralib.newlist({global_index_type}),
       values = terralib.newlist({
         ast.typed.expr.IndexAccess {
-          value = part_indices.value,
-          index = local_index.value,
-          expr_type = index_type,
+          value = shard_part_indices_label.value,
+          index = local_index_label.value,
+          expr_type = global_index_type,
           annotations = ast.default_annotations(),
-          span = global_index.value.span
+          span = global_index_label.value.span
         },
       }),
       annotations = ast.default_annotations(),
-      span = global_index.value.span,
+      span = global_index_label.value.span,
     }
-  }
-  local compute_global_index_nid = block_cx.graph:add_node(compute_global_index)
+  })
 
   block_cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
@@ -2821,17 +2820,20 @@ local function rewrite_inner_fornum_loop_bounds(cx, loop_nid, part_indices)
     compute_global_index_nid, block_cx.graph:node_sync_port(compute_global_index_nid),
     global_index_nid, block_cx.graph:node_sync_port(global_index_nid))
 
+  return global_index_nid, local_index_nid
+end
+
+local function rewrite_inner_fornum_loop_bounds(cx, loop_label, shard_part_indices_label)
+  local block_cx = cx:new_graph_scope(loop_label.block)
+  local global_index_nid, local_index_nid = compute_global_index(
+    block_cx, loop_label, loop_label.symbol, nil, shard_part_indices_label)
+
+  -- Swap in the new loop variable.
+  local local_index_symbol = block_cx.graph:node_label(local_index_nid).value.value
+  loop_label.symbol = local_index_symbol
+
   -- Find any index accesses to lists and rewire them to use the local index.
-  local index_access_nids = block_cx.graph:filter_nodes(
-    function(nid, label)
-      return label:is(flow.node.IndexAccess) and
-        #block_cx.graph:filter_immediate_predecessors_by_edges(
-          function(edge, label)
-            return edge.to_port == 1 and label:is(flow.node.data) and
-              std.is_list(std.as_read(label.value.expr_type))
-          end,
-          nid) > 0
-    end)
+  local index_access_nids = find_list_index_accesses(block_cx)
   for _, index_access_nid in ipairs(index_access_nids) do
     block_cx.graph:copy_outgoing_edges(
       function(edge)
@@ -2845,11 +2847,42 @@ local function rewrite_inner_fornum_loop_bounds(cx, loop_nid, part_indices)
     local_index_nid,
     true)
   end
-
-  -- TODO(zhangwen): list access with int1d instead of int?
 end
 
-local function rewrite_fornum_loop_in_shard(cx, shard_loop)
+-- Propagates shard-specific variables to parent contexts of leaf loops.
+--
+-- Since the leaf loops may read from them, so may any node containing them.
+-- This function updates `cached_nids` to contain nids for shard-specific
+-- variables in each graph.
+local function propagate_shard_vars(cx, shard_nparts_label,
+                                    shard_part_indices_label, cached_nids)
+  cx.graph:traverse_nodes_recursive(
+    function(graph, nid, label)
+      local inner_cx = cx:new_graph_scope(graph)
+      if is_inner(inner_cx, nid) then
+        if not cached_nids[graph] then
+          cached_nids[graph] = {
+            shard_nparts = inner_cx.graph:add_node(shard_nparts_label),
+            shard_part_indices = inner_cx.graph:add_node(shard_part_indices_label),
+          }
+        end
+
+        local shard_nparts_nid = cached_nids[graph].shard_nparts
+        inner_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          shard_nparts_nid, inner_cx.graph:node_result_port(shard_nparts_nid),
+          nid, inner_cx.graph:node_available_port(nid))
+
+        local shard_part_indices_nid = cached_nids[graph].shard_part_indices
+        inner_cx.graph:add_edge(
+          flow.edge.Read(flow.default_mode()),
+          shard_part_indices_nid, inner_cx.graph:node_result_port(shard_part_indices_nid),
+          nid, inner_cx.graph:node_available_port(nid))
+      end
+    end)
+end
+
+local function rewrite_fornum_loops_in_shard(cx, shard_loop)
   local shard_label = cx.graph:node_label(shard_loop)
 
   -- Find the current loop bounds.
@@ -2919,12 +2952,13 @@ local function rewrite_fornum_loop_in_shard(cx, shard_loop)
             inner_cx.graph:remove_node(value_nid)
           end
         end
-        -- At this point, the loop variable has a different meaning since it
-        -- loops over a different set of bounds--it is now the local index
-        -- rather than the global index.  Its usage within the loop will be
-        -- fixed in the next step.
+        -- At this point, the loop variable has a different meaning: it is now
+        -- the local index rather than the global index.  The original loop
+        -- variable is kept around, and its value will be computed from the
+        -- local index.
 
-        -- Loop may also read from `shard_part_indices`.
+        -- Loop may also read from `shard_part_indices` (when the loop body
+        -- uses the global index).
         local shard_part_indices_nid = cached_nids[graph].shard_part_indices
         inner_cx.graph:add_edge(
           flow.edge.Read(flow.default_mode()),
@@ -2938,40 +2972,18 @@ local function rewrite_fornum_loop_in_shard(cx, shard_loop)
     function(graph, nid, label)
       local inner_cx = cx:new_graph_scope(graph)
       if is_leaf(inner_cx, nid) then
-        rewrite_inner_fornum_loop_bounds(inner_cx, nid, shard_part_indices_label)
+        rewrite_inner_fornum_loop_bounds(inner_cx, label, shard_part_indices_label)
       end
     end)
 
-  -- Propagate shard-specific variables to parent contexts.
-  cx.graph:traverse_nodes_recursive(
-    function(graph, nid, label)
-      local inner_cx = cx:new_graph_scope(graph)
-      if is_inner(inner_cx, nid) then
-        if not cached_nids[graph] then
-          cached_nids[graph] = {
-            shard_nparts = inner_cx.graph:add_node(shard_nparts_label),
-            shard_part_indices = inner_cx.graph:add_node(shard_part_indices_label),
-          }
-        end
-
-        local shard_nparts_nid = cached_nids[graph].shard_nparts
-        inner_cx.graph:add_edge(
-          flow.edge.Read(flow.default_mode()),
-          shard_nparts_nid, inner_cx.graph:node_result_port(shard_nparts_nid),
-          nid, inner_cx.graph:node_available_port(nid))
-
-        local shard_part_indices_nid = cached_nids[graph].shard_part_indices
-        inner_cx.graph:add_edge(
-          flow.edge.Read(flow.default_mode()),
-          shard_part_indices_nid, inner_cx.graph:node_result_port(shard_part_indices_nid),
-          nid, inner_cx.graph:node_available_port(nid))
-      end
-    end)
+  propagate_shard_vars(cx, shard_nparts_label, shard_part_indices_label, cached_nids)
 
   local shard_vars = { nparts = shard_nparts_label, part_indices = shard_part_indices_label }
   return shard_vars, original_bounds_labels
 end
 
+-- Replaces a leaf ForList node with a ForNum.
+-- Note: this function does NOT rewrite the loop body.
 local function replace_forlist_node(cx, forlist_nid,
                                     shard_nparts_nid, shard_part_indices_nid)
 
@@ -3001,7 +3013,7 @@ local function replace_forlist_node(cx, forlist_nid,
 
   -- Move over edges from the old ForList node.
   -- We add 2 to each edge's port number (on the ForNum side) since the minimum
-  -- available port is 2 for ForList.
+  -- available port is 2 for ForList but is 4 for ForNum.
   cx.graph:traverse_incoming_edges(
     function(from_node, to_node, edge)
       if edge.to_port ~= 1 then  -- Omit the edge wiring the old loop bound.
@@ -3020,7 +3032,6 @@ local function replace_forlist_node(cx, forlist_nid,
     forlist_nid)
   -- The loop body might also read from `shard_part_indices` (when it uses the
   -- old ForList loop variable).
-  -- TODO(zhangwen): it also might not.
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
     shard_part_indices_nid, cx.graph:node_result_port(shard_part_indices_nid),
@@ -3035,26 +3046,20 @@ local function replace_forlist_node(cx, forlist_nid,
   return fornum_nid, fornum_label, global_index
 end
 
+-- Rewrites the body of an old ForList loop after it's put into a ForNum loop.
 local function rewrite_forlist_loop_body(cx, new_loop_label,
-                                         shard_part_indices_label, global_index)
+                                         shard_part_indices_label,
+                                         global_index_symbol)
 
   assert(new_loop_label:is(flow.node.ctrl.ForNum))
   local block_cx = cx:new_graph_scope(new_loop_label.block)
-  local local_index_label = make_variable_label(
-    block_cx, new_loop_label.symbol, int, new_loop_label.span)
-  local local_index_nid = block_cx.graph:add_node(local_index_label)
+
+  local _, local_index_nid = compute_global_index(
+    block_cx, new_loop_label, global_index_symbol, new_loop_label.symbol,
+    shard_part_indices_label)
 
   -- Find index accesses to lists and rewire them to use local index.
-  local index_access_nids = block_cx.graph:filter_nodes(
-    function(nid, label)
-      return label:is(flow.node.IndexAccess) and
-        #block_cx.graph:filter_immediate_predecessors_by_edges(
-          function(edge, label)
-            return edge.to_port == 1 and label:is(flow.node.data) and
-              std.is_list(std.as_read(label.value.expr_type))
-          end,
-          nid) > 0
-    end)
+  local index_access_nids = find_list_index_accesses(block_cx)
   for _, index_access_nid in ipairs(index_access_nids) do
     block_cx.graph:remove_incoming_edges(
       function(edge) return edge.to_port == 2 end,
@@ -3064,54 +3069,13 @@ local function rewrite_forlist_loop_body(cx, new_loop_label,
       local_index_nid, block_cx.graph:node_result_port(local_index_nid),
       index_access_nid, 2)
   end
-
-  -- Find the old loop variable, which we'll keep as the global index.
-  local global_index_nid = block_cx.graph:find_node(
-    function(_, label)
-      return label:is(flow.node.data.Scalar) and
-        label.value.value == global_index
-  end)
-  local global_index_label = block_cx.graph:node_label(global_index_nid)
-  local index_type = global_index_label.value.expr_type
-
-  -- Compute global index.
-  local shard_part_indices_nid = block_cx.graph:add_node(shard_part_indices_label)
-  local compute_global_index = flow.node.Opaque {
-    action = ast.typed.stat.Var {  -- var global_index = shard_part_indices[local_index]
-      symbols = terralib.newlist({global_index_label.value.value}),
-      types = terralib.newlist({index_type}),
-      values = terralib.newlist({
-        ast.typed.expr.IndexAccess {
-          value = shard_part_indices_label.value,
-          index = local_index_label.value,
-          expr_type = index_type,
-          annotations = ast.default_annotations(),
-          span = global_index_label.value.span
-        },
-      }),
-      annotations = ast.default_annotations(),
-      span = global_index_label.value.span,
-    }
-  }
-  local compute_global_index_nid = block_cx.graph:add_node(compute_global_index)
-
-  block_cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
-    shard_part_indices_nid, block_cx.graph:node_result_port(shard_part_indices_nid),
-    compute_global_index_nid, 1)
-  block_cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
-    local_index_nid, block_cx.graph:node_result_port(local_index_nid),
-    compute_global_index_nid, 2)
-  block_cx.graph:add_edge(
-    flow.edge.HappensBefore {},
-    compute_global_index_nid, block_cx.graph:node_sync_port(compute_global_index_nid),
-    global_index_nid, block_cx.graph:node_sync_port(global_index_nid))
 end
 
-local function rewrite_forlist_loop_in_shard(cx, shard_loop)
+local function rewrite_forlist_loops_in_shard(cx, shard_loop)
   local shard_label = cx.graph:node_label(shard_loop)
 
-  -- Find the current loop bounds, and collect all ForList loops in the process.
-  local original_bound_label--, index_type
+  -- Find the current loop bounds, and collect all ForList loops along the way.
+  local original_bound_label
   local forlist_loops = terralib.newlist()
   cx.graph:traverse_nodes_recursive(
     function(graph, nid, label)
@@ -3120,7 +3084,6 @@ local function rewrite_forlist_loop_in_shard(cx, shard_loop)
         assert(label:is(flow.node.ctrl.ForList))
         local inputs = inner_cx.graph:incoming_edges_by_port(nid)
         original_bound_label = inner_cx.graph:node_label(get_input(inputs, 1))
-        -- index_type = label.symbol.symbol_type
         forlist_loops:insert({ cx = inner_cx, nid = nid })
       end
     end)
@@ -3153,36 +3116,13 @@ local function rewrite_forlist_loop_in_shard(cx, shard_loop)
     rewrite_forlist_loop_body(cx, new_loop_label, shard_part_indices_label, global_index)
   end
 
-  -- Propagate shard-specific variables to parent contexts.
-  cx.graph:traverse_nodes_recursive(
-    function(graph, nid, label)
-      local inner_cx = cx:new_graph_scope(graph)
-      if is_inner(inner_cx, nid) then
-        if not cached_nids[graph] then
-          cached_nids[graph] = {
-            shard_nparts = inner_cx.graph:add_node(shard_nparts_label),
-            shard_part_indices = inner_cx.graph:add_node(shard_part_indices_label),
-          }
-        end
-
-        local shard_nparts_nid = cached_nids[graph].shard_nparts
-        inner_cx.graph:add_edge(
-          flow.edge.Read(flow.default_mode()),
-          shard_nparts_nid, inner_cx.graph:node_result_port(shard_nparts_nid),
-          nid, inner_cx.graph:node_available_port(nid))
-
-        local shard_part_indices_nid = cached_nids[graph].shard_part_indices
-        inner_cx.graph:add_edge(
-          flow.edge.Read(flow.default_mode()),
-          shard_part_indices_nid, inner_cx.graph:node_result_port(shard_part_indices_nid),
-          nid, inner_cx.graph:node_available_port(nid))
-      end
-    end)
+  propagate_shard_vars(cx, shard_nparts_label, shard_part_indices_label, cached_nids)
 
   local shard_vars = { nparts = shard_nparts_label, part_indices = shard_part_indices_label }
   return shard_vars, terralib.newlist({original_bound_label})
 end
 
+-- Makes labels for variables pertaining to the entire SPMD block.
 local function make_global_vars(cx, shard_vars, span)
   local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
   local nparts_label = make_variable_label(
@@ -3573,7 +3513,6 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
 
   -- Build the actual shard index.
   local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
-  -- TODO(zhangwen): the spans have mostly been arbitrarily picked.
   local index_label = make_variable_label(
     cx, std.newsymbol(bounds_type, "shard_index"),
     bounds_type, shard_vars.nparts.value.span)
@@ -3585,7 +3524,9 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   }
   local stride_nid = cx.graph:add_node(stride_label)
 
-  -- Make labels for shard bounds.
+  -- Make labels for shard bounds.  These don't get directly passed into the
+  -- shard task; they're temporaries used to compute the shard_vars, which get
+  -- passed into the shard task.
   local bound_labels = terralib.newlist()
   for i = 1, 2 do
     local bound_label = make_variable_label(
@@ -3647,8 +3588,8 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   -- Compute `shard_nparts = shard_bound2 - shard_bound1`.
   local shard_nparts_nid = find_matching_input(cx, shard_task_nid,
     shard_vars.nparts.region_type, shard_vars.nparts.field_path)
-  -- The `shard_nparts` node should have been added to this context when the
-  -- leaf loops are rewrited.
+  -- A node for `shard_nparts` should have been added to this context as a
+  -- predecessor to the shard task node because the task takes it as input.
   assert(shard_nparts_nid)
   local compute_shard_nparts_nid = cx.graph:add_node(flow.node.Opaque {
     action = ast.typed.stat.Var {
@@ -3680,11 +3621,14 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
     shard_nparts_nid, cx.graph:node_sync_port(shard_nparts_nid))
 
   -- Make a list of 1d indices (shard_bound1 .. shard_bound2) for shard.
+  -- It's used to slice the various lists (e.g. of barriers) to get the
+  -- portions for this shard we're launching.
   local shard_list_indices_type = std.list(bounds_type)
   local shard_list_indices_label = make_variable_label(
     cx, std.newsymbol(shard_list_indices_type, "shard_list_indices"),
     shard_list_indices_type, shard_vars.nparts.value.span)
   local shard_list_indices_nid = cx.graph:add_node(shard_list_indices_label)
+  -- `var shard_list_indices = list_range(shard_bound1, shard_bound2)`.
   local compute_shard_list_indices_nid = cx.graph:add_node(flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({shard_list_indices_label.value.value}),
@@ -3716,10 +3660,9 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   local shard_part_indices_label = shard_vars.part_indices
   local shard_part_indices_nid = find_matching_input(cx, shard_task_nid,
     shard_part_indices_label.region_type, shard_part_indices_label.field_path)
-  -- The `shard_part_indices` node should also have been added to this context when the
-  -- leaf loops are rewrited.
   assert(shard_part_indices_nid)
   local shard_part_indices_type = std.as_read(shard_part_indices_label.value.expr_type)
+  -- `var shard_part_indices = part_indices[shard_list_indices]`.
   local compute_shard_part_indices_nid = cx.graph:add_node(flow.node.Opaque {
     action = ast.typed.stat.Var {
       symbols = terralib.newlist({shard_part_indices_label.value.value}),
@@ -3762,7 +3705,6 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
     function(bound_label)
       slice_mapping[bound_label.region_type] = false
     end)
-  -- TODO(zhangwen): we might need to kill other things.
 
   -- Build list slices for original lists.
   for _, list_type in lists:keys() do
@@ -3908,24 +3850,23 @@ local function make_distribution_loop(cx, block, shard_index, shard_stride,
     span = span,
   }
   local nid = cx.graph:add_node(label)
-  -- TODO(zhangwen): watch out for extra nodes!
   flow_summarize_subgraph.entry(cx.graph, nid, slice_mapping)
 
   -- Add loop bounds.
-  local lower_bound_nid = cx.graph:add_node(flow.node.Constant {
+  local zero_nid = cx.graph:add_node(flow.node.Constant {
     value = make_constant(0, global_vars.nparts.value.expr_type, span)
   })
+  -- The node for global `nparts` should already been added as a predecessor
+  -- to the ForNum node because it's used in the loop body.
   local upper_bound_nid =
     find_matching_input(cx, nid, global_vars.nparts.region_type) or
     cx.graph:add_node(global_vars.nparts)
   cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
-    lower_bound_nid, cx.graph:node_result_port(lower_bound_nid),
+    zero_nid, cx.graph:node_result_port(zero_nid),
     nid, 1)
   cx.graph:add_edge(flow.edge.Read(flow.default_mode()),
     upper_bound_nid, cx.graph:node_result_port(upper_bound_nid),
     nid, 2)
-  -- TODO(zhangwen): if the input node already exists, it would now have two
-  -- nodes going into the loop.  ok?
 
   -- Add loop stride.
   if shard_stride:is(flow.node.Constant) then
@@ -4231,12 +4172,12 @@ local function issue_zipped_copy_interior(
   }
   local copy_loop_nid = cx.graph:add_node(copy_loop)
 
-  local lower_bound_nid = cx.graph:add_node(flow.node.Constant {
+  local zero_nid = cx.graph:add_node(flow.node.Constant {
     value = make_constant(0, int, span),
   })
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
-    lower_bound_nid, cx.graph:node_result_port(lower_bound_nid),
+    zero_nid, cx.graph:node_result_port(zero_nid),
     copy_loop_nid, 1)
   cx.graph:add_edge(
     flow.edge.Read(flow.default_mode()),
@@ -4246,7 +4187,7 @@ local function issue_zipped_copy_interior(
     flow.edge.Read(flow.default_mode()),
     part_indices_nid, cx.graph:node_result_port(part_indices_nid),
     copy_loop_nid, cx.graph:node_available_port(copy_loop_nid))
-    
+
   local copy_loop_src_port = cx.graph:node_available_port(copy_loop_nid)
   for field_path, src_nid in src_nids:items() do
     cx.graph:add_edge(
@@ -4265,7 +4206,10 @@ local function issue_zipped_copy_interior(
   end
 
   -- Interior of the loop:
-  -- TODO(zhangwen): document this function.
+
+  -- The regions we copy to/from come from either a list or a partition.  This
+  -- function returns the node that should be used to index into the
+  -- list/partition: `index` for list, `part_indices[index]` for partition.
   local function get_index_access_index_nid(cx, value_type, part_indices_label,
                                             index_nid)
     assert(cx.graph:has_node(index_nid))
@@ -4282,9 +4226,10 @@ local function issue_zipped_copy_interior(
           annotations = ast.default_annotations(),
           span = span,
         })
+      -- Make node for `part_indices` in loop body block.
       local part_indices_nid_block = cx.graph:add_node(part_indices_label)
       block_cx.graph:add_edge(
-        flow.edge.Read(flow.default_mode()), -- TODO(zhangwen): Read or None?
+        flow.edge.Read(flow.default_mode()),
         part_indices_nid_block, cx.graph:node_result_port(part_indices_nid_block),
         compute_part_index_nid, 1)
       block_cx.graph:add_edge(
@@ -4300,7 +4245,7 @@ local function issue_zipped_copy_interior(
         part_index_nid, 0)
       return part_index_nid
     else
-      assert(false) -- TODO(zhangwen): really?
+      assert(false)
     end
   end
 
@@ -4361,11 +4306,10 @@ local function issue_zipped_copy_interior(
     })
   for field_path, block_src_nid in block_src_nids:items() do
     block_cx.graph:add_edge(
-      flow.edge.None(flow.default_mode()), -- TODO(zhangwen): why None?
+      flow.edge.None(flow.default_mode()),
       block_src_nid, block_cx.graph:node_result_port(block_src_nid),
       block_index_src_nid, 1)
   end
-  -- TODO(zhangwen): cast from int to int1d for structured case?
   local src_index_nid = get_index_access_index_nid(block_cx, src_type,
     part_indices_label, index_nid)
   block_cx.graph:add_edge(
@@ -4392,7 +4336,6 @@ local function issue_zipped_copy_interior(
       block_dst_in_nid, block_cx.graph:node_result_port(block_dst_in_nid),
       block_index_dst_in_nid, 1)
   end
-  -- TODO(zhangwen): we might create two nodes for `part_indices` in block?
   local dst_index_nid = get_index_access_index_nid(block_cx, dst_type,
     part_indices_label, index_nid)
   block_cx.graph:add_edge(
@@ -4973,9 +4916,16 @@ local function issue_collective_creation(cx, loop_nid, collective_nid, op, npart
       symbols = terralib.newlist({collective.value.value}),
       types = terralib.newlist({collective_type}),
       values = terralib.newlist({
-          ast.typed.expr.DynamicCollective { -- TODO(zhangwen): what is this??
+          ast.typed.expr.DynamicCollective {
             arrivals = ast.typed.expr.Binary {
-              lhs = nparts_label.value,
+              lhs = ast.typed.expr.Binary {
+                lhs = nparts_label.value,
+                rhs = stride_minus_1,
+                op = "+",
+                expr_type = int,
+                annotations = ast.default_annotations(),
+                span = collective.value.span,
+              },
               rhs = stride,
               op = "/",
               expr_type = int,
@@ -5273,7 +5223,6 @@ local function rewrite_inputs(cx, old_loop, new_loop,
                               original_partitions, original_bounds,
                               elide_copy, shadowed_partitions, intersections, barriers, collectives,
                               start_barrier, global_vars, mapping)
-  -- TODO(zhangwen): update comments.
   --  1. Find mapping from old to new inputs (outputs).
   --  2. For each input (output), either:
   --      a. Replace new with old (if they are identical).
@@ -5468,8 +5417,6 @@ local function rewrite_inputs(cx, old_loop, new_loop,
   -- the dataflow code generator will complain if the copies are
   -- visibly racing. Therefore, merge the open and close operations to
   -- avoid the appearance of a race.
-
-  -- TODO(zhangwen): what is this?
   merge_open_nids(cx)
   merge_close_nids(cx)
 
@@ -5524,15 +5471,20 @@ local function spmdize(cx, loop)
   local intersections, intersection_mapping = rewrite_shard_intersections(
     shard_cx, shard_loop, original_intersections)
 
+  -- `shard_vars` contains labels for variables specific to a shard
+  -- (e.g. the range of global indices it is responsible for).
   local shard_vars, original_bounds
   if leaf_loop_type:is(flow.node.ctrl.ForNum) then
-    shard_vars, original_bounds = rewrite_fornum_loop_in_shard(shard_cx, shard_loop)
+    shard_vars, original_bounds = rewrite_fornum_loops_in_shard(shard_cx, shard_loop)
   elseif leaf_loop_type:is(flow.node.ctrl.ForList) then
-    shard_vars, original_bounds = rewrite_forlist_loop_in_shard(shard_cx, shard_loop)
+    shard_vars, original_bounds = rewrite_forlist_loops_in_shard(shard_cx, shard_loop)
   else
     assert(false)
   end
 
+  -- `global_vars` contains labels for variables pertaining to the entire SPMD block
+  -- (e.g. the list of all global indices).  Their creation is issued within
+  -- `rewrite_inputs`.
   local global_vars = make_global_vars(cx, shard_vars, span)
   local start_barrier = synchronize_shard_start(shard_cx, shard_loop)
 
