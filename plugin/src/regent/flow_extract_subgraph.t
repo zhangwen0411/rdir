@@ -28,7 +28,7 @@
 -- OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -- Extract Node into a Subgraph containing the Node itself, all adjacent
--- Nodes, and all edges connecting them.
+-- (data) Nodes, and all edges connecting them.
 
 local flow = require("regent/flow")
 
@@ -50,7 +50,7 @@ function context.new_global_scope()
 end
 
 -- Extracts node `nid` into a subgraph.
--- Returns the subgraph and the node's `nid` in the subgraph.
+-- Returns the subgraph and the node's new nid in the subgraph.
 local function extract_subgraph(cx, nid)
   local subgraph_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
 
