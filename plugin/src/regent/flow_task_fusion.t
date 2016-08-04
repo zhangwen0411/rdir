@@ -240,7 +240,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   for _, privilege_list in ipairs(node1.privileges) do
     for _, privilege in ipairs(privilege_list) do
       privileges:insert(
-        std.privilege(
+        std.privileges(
           privilege.privilege,
           terralib.newlist({
               {
@@ -253,7 +253,7 @@ local function fuse_tasks(params1_mapping, params2_mapping, mapping, fn1, fn2)
   for _, privilege_list in ipairs(node2.privileges) do
     for _, privilege in ipairs(privilege_list) do
       privileges:insert(
-        std.privilege(
+        std.privileges(
           privilege.privilege,
           terralib.newlist({
               {
