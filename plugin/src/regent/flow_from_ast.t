@@ -218,6 +218,16 @@ function _field_map:hash()
   return self:concat(",")
 end
 
+-- Privileges
+
+-- FIXME: We're going to use physical privileges here. TBD whether
+-- this could be cleaned up to use normal Regent privileges. For now
+-- just declare the necessary helpers.
+
+local function reduces(op)
+  return tostring(std.reduces(op))
+end
+
 -- Context
 
 local context = setmetatable({}, { __index = function(t, k) error("context has no field " .. tostring(k), 2) end})
@@ -1601,7 +1611,7 @@ end
 function analyze_privileges.expr_copy(cx, node, privilege_map)
   local dst_mode = reads_writes
   if node.op then
-    dst_mode = get_trivial_field_map(std.reduces(node.op))
+    dst_mode = get_trivial_field_map(reduces(node.op))
   end
   return privilege_meet(
     analyze_privileges.expr_region_root(cx, node.src, reads),
@@ -1985,7 +1995,7 @@ function analyze_privileges.stat_assignment(cx, node)
 end
 
 function analyze_privileges.stat_reduce(cx, node)
-  local op = get_trivial_field_map(std.reduces(node.op))
+  local op = get_trivial_field_map(reduces(node.op))
   return
     data.reduce(
       privilege_meet,
@@ -2772,7 +2782,7 @@ end
 function flow_from_ast.expr_copy(cx, node, privilege_map, init_only)
   local dst_mode = reads_writes
   if node.op then
-    dst_mode = get_trivial_field_map(std.reduces(node.op))
+    dst_mode = get_trivial_field_map(reduces(node.op))
   end
 
   local src = flow_from_ast.expr_region_root(cx, node.src, reads)
@@ -3236,7 +3246,7 @@ function flow_from_ast.stat_assignment(cx, node)
 end
 
 function flow_from_ast.stat_reduce(cx, node)
-  local op = get_trivial_field_map(std.reduces(node.op))
+  local op = get_trivial_field_map(reduces(node.op))
   local rhs = node.rhs:map(
     function(rh) return flow_from_ast.expr(cx, rh, reads) end)
   local lhs = node.lhs:map(

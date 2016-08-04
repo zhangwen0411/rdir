@@ -1073,7 +1073,7 @@ local function rewrite_shard_partitions(cx)
           -- Only record explicit disjointness when there is possible
           -- type-based aliasing.
           if std.type_maybe_eq(expr_type:fspace(), other_region:fspace()) then
-            std.add_constraint(cx.tree, expr_type, other_region, "*", true)
+            std.add_constraint(cx.tree, expr_type, other_region, std.disjointness, true)
           end
         end
         cx.tree:intern_region_expr(expr_type, ast.default_annotations(), span)
@@ -3172,7 +3172,7 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
       if not std.type_eq(other_region, list_type) and
         std.type_maybe_eq(parent_list_type:fspace(), other_region:fspace())
       then
-        std.add_constraint(cx.tree, parent_list_type, other_region, "*", true)
+        std.add_constraint(cx.tree, parent_list_type, other_region, std.disjointness, true)
       end
     end
     cx.tree:intern_region_expr(
@@ -3848,9 +3848,9 @@ local function issue_zipped_copy_interior(
   local block_src_i_type = src_type:subregion_dynamic()
   if std.is_partition(src_type) then
     std.add_constraint(
-      cx.tree, src_type, src_type:parent_region(), "<=", false)
+      cx.tree, src_type, src_type:parent_region(), std.subregion, false)
     std.add_constraint(
-      cx.tree, block_src_i_type, src_type, "<=", false)
+      cx.tree, block_src_i_type, src_type, std.subregion, false)
     cx.tree.region_universe[block_src_i_type] = true
   end
 
@@ -3871,9 +3871,9 @@ local function issue_zipped_copy_interior(
   local block_dst_i_type = dst_type:subregion_dynamic()
   if std.is_partition(dst_type) then
     std.add_constraint(
-      cx.tree, dst_type, dst_type:parent_region(), "<=", false)
+      cx.tree, dst_type, dst_type:parent_region(), std.subregion, false)
     std.add_constraint(
-      cx.tree, block_dst_i_type, dst_type, "<=", false)
+      cx.tree, block_dst_i_type, dst_type, std.subregion, false)
     cx.tree.region_universe[block_dst_i_type] = true
   end
 

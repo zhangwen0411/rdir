@@ -133,7 +133,7 @@ function region_tree:add_region(region_type, symbol, var_type, annotations, span
   if not is_point and std.is_region(value_type) then
     local partition = std.partition(std.disjoint, symbol)
     self.region_point_partitions[region_type] = partition
-    std.add_constraint(self, partition, region_type, "<=", false)
+    std.add_constraint(self, partition, region_type, std.subregion, false)
     self:intern_region_expr(partition, annotations, span)
   end
   if std.is_partition(value_type) or std.is_cross_product(value_type) then
@@ -155,7 +155,7 @@ function region_tree:intern_variable(expr_type, symbol, annotations, span)
 
     region_type = std.region(terralib.types.unit)
     for other, _ in pairs(self.region_universe) do
-      std.add_constraint(self, region_type, other, "*", true)
+      std.add_constraint(self, region_type, other, std.disjointness, true)
     end
     self.interned_scalars[symbol] = region_type
   end
@@ -201,7 +201,7 @@ function region_tree:intern_region_point_expr(parent, index, annotations, span)
 
   local symbol = std.newsymbol(subregion)
   self:add_region(subregion, symbol, subregion, annotations, span, true)
-  std.add_constraint(self, subregion, partition, "<=", false)
+  std.add_constraint(self, subregion, partition, std.subregion, false)
   self:attach_region_index(subregion, index)
   return subregion, symbol
 end
@@ -228,8 +228,8 @@ local function search_constraint_paths(constraints, region_type, path, visited,
   visited[region_type] = true
 
   path:insert(region_type)
-  if rawget(constraints, "<=") and rawget(constraints["<="], region_type) then
-    for parent, _ in pairs(constraints["<="][region_type]) do
+  if rawget(constraints, std.subregion) and rawget(constraints[std.subregion], region_type) then
+    for parent, _ in pairs(constraints[std.subregion][region_type]) do
       local result = search_constraint_paths(
         constraints, parent, path, visited, predicate)
       if result then
@@ -259,7 +259,7 @@ function region_tree:can_alias(region_type, other_region_type)
   assert(flow_region_tree.is_region(region_type))
   assert(flow_region_tree.is_region(other_region_type))
   return not std.check_constraint(
-    self, { lhs = region_type, rhs = other_region_type, op = "*" })
+    self, std.constraint(region_type, other_region_type, std.disjointness))
 end
 
 function region_tree:ancestors(region_type)
@@ -276,7 +276,7 @@ function region_tree:lowest_common_ancestor(region_type, other_region_type)
     self, region_type, {},
     function(cx, ancestor, x)
       if std.check_constraint(
-        self, { lhs = other_region_type, rhs = ancestor, op = "<="})
+        self, std.constraint(other_region_type, ancestor, std.subregion))
       then
         return ancestor
       end
@@ -285,10 +285,10 @@ end
 
 function region_tree:parent(region_type)
   assert(flow_region_tree.is_region(region_type))
-  if rawget(self.constraints, "<=") and
-    rawget(self.constraints["<="], region_type)
+  if rawget(self.constraints, std.subregion) and
+    rawget(self.constraints[std.subregion], region_type)
   then
-    for parent, _ in pairs(self.constraints["<="][region_type]) do
+    for parent, _ in pairs(self.constraints[std.subregion][region_type]) do
       return parent
     end
   end
@@ -298,8 +298,8 @@ function region_tree:children(region_type)
   assert(flow_region_tree.is_region(region_type))
 
   local result = terralib.newlist()
-  if rawget(self.constraints, "<=") then
-    for other, parents in pairs(self.constraints["<="]) do
+  if rawget(self.constraints, std.subregion) then
+    for other, parents in pairs(self.constraints[std.subregion]) do
       for parent, _ in pairs(parents) do
         if parent == region_type then
           result:insert(other)
@@ -317,11 +317,11 @@ function region_tree:siblings(region_type)
   local siblings = terralib.newlist()
   for other, _ in pairs(self.region_universe) do
     local is_subregion = std.check_constraint(
-      self, { lhs = region_type, rhs = other, op = "<=" })
+      self, std.constraint(region_type, other, std.subregion))
     local is_superregion = std.check_constraint(
-      self, { lhs = other, rhs = region_type, op = "<=" })
+      self, std.constraint(other, region_type, std.subregion))
     local is_disjoint = std.check_constraint(
-      self, { lhs = region_type, rhs = other, op = "*" })
+      self, std.constraint(region_type, other, std.disjointness))
     if other ~= region_type and not (is_subregion or is_superregion or is_disjoint) then
       siblings:insert(other)
     end
