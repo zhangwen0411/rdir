@@ -3347,6 +3347,6 @@ end
 
 flow_from_ast.pass_name = "flow_from_ast"
 
-if std.config["flow"] then passes_hooks.add_optimization(10, flow_from_ast) end
+if std.config["flow"] then passes_hooks.add_optimization(15, flow_from_ast) end
 
 return flow_from_ast

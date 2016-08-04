@@ -5027,7 +5027,7 @@ end
 
 flow_spmd.pass_name = "flow_spmd"
 
-if std.config["flow"] and std.config["flow-spmd"] then passes_hooks.add_optimization(11, flow_spmd) end
+if std.config["flow"] and std.config["flow-spmd"] then passes_hooks.add_optimization(16, flow_spmd) end
 
 return flow_spmd
 

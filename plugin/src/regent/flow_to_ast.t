@@ -1086,6 +1086,6 @@ end
 
 flow_to_ast.pass_name = "flow_to_ast"
 
-if std.config["flow"] then passes_hooks.add_optimization(19, flow_to_ast) end
+if std.config["flow"] then passes_hooks.add_optimization(24, flow_to_ast) end
 
 return flow_to_ast
