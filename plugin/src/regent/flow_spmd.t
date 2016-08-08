@@ -57,6 +57,45 @@ local vectorize_loops = require("regent/vectorize_loops")
 -- to the number of tasks per node.
 local shard_size = std.config["flow-spmd-shardsize"]
 
+-- MAPPINGS
+local spmd_mapping = false
+do
+  local mappings = {}
+  mappings[1] = terra(p : std.int2d, i : int, lo : std.int2d, hi : std.int2d)
+    var tile_rows = 3
+
+    var size = (std.rect2d { lo = lo, hi = hi }):size()
+    var delta = p - lo
+
+    var curr_tile_start = (delta.__ptr.x / tile_rows) * tile_rows
+    var curr_tile_rows = tile_rows
+    if curr_tile_start + curr_tile_rows > size.__ptr.x then
+      curr_tile_rows = size.__ptr.x % tile_rows
+    end
+    var offset = curr_tile_start * size.__ptr.y
+      + delta.__ptr.y * curr_tile_rows + delta.__ptr.x % tile_rows % curr_tile_rows
+    return offset
+  end
+
+  do
+    mappings[2] = terra(p : std.int2d, i : int, lo : std.int2d, hi : std.int2d) : int
+      var size = (std.rect2d { lo = lo, hi = hi }):size()
+      var size_x = size.__ptr.x
+      var size_y = size.__ptr.y
+
+      std.assert(size_x == size_y, "not a square")
+
+      return i
+    end
+  end
+
+  local mapping_name = std.config["flow-spmd-mapping"]
+  if mappings[mapping_name] then
+    spmd_mapping = mappings[mapping_name]
+  end
+end
+-- MAPPINGS
+
 local context = {}
 context.__index = context
 
@@ -5049,6 +5088,7 @@ local function issue_global_vars_creation_forlist(cx, loop_nid, nparts_nid,
       values = terralib.newlist({
         ast.typed.expr.ListIspace {
           ispace = bound_label.value,
+          mapping = spmd_mapping,
           expr_type = part_indices_type,
           annotations = ast.default_annotations(),
           span = span,
