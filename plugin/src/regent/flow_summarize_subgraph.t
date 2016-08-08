@@ -58,7 +58,7 @@ local function privilege_kind(label)
   elseif label:is(flow.edge.Write) then
     return "reads_writes"
   elseif label:is(flow.edge.Reduce) then
-    return std.reduces(label.op)
+    return tostring(std.reduces(label.op))
   end
 end
 
