@@ -61,37 +61,102 @@ local shard_size = std.config["flow-spmd-shardsize"]
 local spmd_mapping = false
 do
   local mappings = {}
-  mappings[1] = terra(p : std.int2d, i : int, lo : std.int2d, hi : std.int2d)
-    var tile_rows = 3
-
-    var size = (std.rect2d { lo = lo, hi = hi }):size()
-    var delta = p - lo
-
-    var curr_tile_start = (delta.__ptr.x / tile_rows) * tile_rows
-    var curr_tile_rows = tile_rows
-    if curr_tile_start + curr_tile_rows > size.__ptr.x then
-      curr_tile_rows = size.__ptr.x % tile_rows
-    end
-    var offset = curr_tile_start * size.__ptr.y
-      + delta.__ptr.y * curr_tile_rows + delta.__ptr.x % tile_rows % curr_tile_rows
-    return offset
+  mappings[1] = terra(p : std.int2d, s : std.rect2d) : int
+    -- Column major.
+    return p.__ptr.x + p.__ptr.y * s:size().__ptr.x
   end
 
-  do
-    mappings[2] = terra(p : std.int2d, i : int, lo : std.int2d, hi : std.int2d) : int
-      var size = (std.rect2d { lo = lo, hi = hi }):size()
-      var size_x = size.__ptr.x
-      var size_y = size.__ptr.y
+  do -- Hilbert.
+    local H = 1
+    local A = 2
+    local B = 3
+    local C = 4
 
-      std.assert(size_x == size_y, "not a square")
+    local terra make_int2d(x : int, y : int) : std.int2d
+      return std.int2d { __ptr = [std.int2d.impl_type] { x = x, y = y } }
+    end
 
-      return i
+    local terra h(p : std.int2d, size : int, pattern : int) : int
+      std.assert(p.__ptr.x < size, "x out of range")
+      std.assert(p.__ptr.y < size, "y out of range")
+
+      if size == 1 then
+        return 0
+      end
+
+      var half = size / 2
+      var block = half * half
+
+      if pattern == H then
+        if (p.__ptr.x<half) and (p.__ptr.y<half) then
+          return h(p, size / 2, A)
+        elseif (p.__ptr.x<half) and (p.__ptr.y>=half) then
+          return block + h(p - make_int2d(0, half), size / 2, H)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y>=half) then
+          return block * 2 + h(p - make_int2d(half, half), size / 2, H)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y<half) then
+          return block * 3 + h(p - make_int2d(half, 0), size / 2, B)
+        else
+          std.assert(false, "boo")
+        end
+      elseif pattern == A then
+        if (p.__ptr.x<half) and (p.__ptr.y<half) then
+          return h(p, size / 2, H)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y<half) then
+          return block + h(p - make_int2d(half, 0), size / 2, A)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y>=half) then
+          return block * 2 + h(p - make_int2d(half, half), size / 2, A)
+        elseif (p.__ptr.x<half) and (p.__ptr.y>=half) then
+          return block * 3 + h(p - make_int2d(0, half), size / 2, C)
+        else
+          std.assert(false, "boo")
+        end
+      elseif pattern == B then
+        if (p.__ptr.x>=half) and (p.__ptr.y>=half) then
+          return h(p - make_int2d(half, half), size / 2, C)
+        elseif (p.__ptr.x<half) and (p.__ptr.y>=half) then
+          return block + h(p - make_int2d(0, half), size / 2, B)
+        elseif (p.__ptr.x<half) and (p.__ptr.y<half) then
+          return block * 2 + h(p, size / 2, B)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y<half) then
+          return block * 3 + h(p - make_int2d(half, 0), size / 2, H)
+        else
+          std.assert(false, "boo")
+        end
+      elseif pattern == C then
+        if (p.__ptr.x>=half) and (p.__ptr.y>=half) then
+          return h(p - make_int2d(half, half), size / 2, B)
+        elseif (p.__ptr.x>=half) and (p.__ptr.y<half) then
+          return block + h(p - make_int2d(half, 0), size / 2, C)
+        elseif (p.__ptr.x<half) and (p.__ptr.y<half) then
+          return block * 2 + h(p, size / 2, C)
+        elseif (p.__ptr.x<half) and (p.__ptr.y>=half) then
+          return block * 3 + h(p - make_int2d(0, half), size / 2, A)
+        else
+          std.assert(false, "boo")
+        end
+      else
+        std.assert(false, "unknown pattern")
+      end
+    end
+
+    mappings[2] = terra(p : std.int2d, s : std.rect2d) : int
+      var size = s:size()
+      std.assert(size.__ptr.x == size.__ptr.y, "should be square")
+      std.assert((size.__ptr.x and (size.__ptr.x - 1)) == 0, "should be power of two")
+      return h(p - s.lo, size.__ptr.x, H)
     end
   end
 
   local mapping_name = std.config["flow-spmd-mapping"]
   if mappings[mapping_name] then
-    spmd_mapping = mappings[mapping_name]
+    local mapping_fn = mappings[mapping_name]
+    spmd_mapping = ast.typed.expr.Function {
+      value = mapping_fn,
+      expr_type = mapping_fn.type,
+      annotations = ast.default_annotations(),
+      span = ast.trivial_span(),
+    }
   end
 end
 -- MAPPINGS
