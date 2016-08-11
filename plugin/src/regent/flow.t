@@ -32,7 +32,7 @@
 -- Dataflow IR
 
 local ast = require("regent/ast")
-local data = require("regent/data")
+local data = require("common/data")
 
 local flow = ast.make_factory("flow")
 

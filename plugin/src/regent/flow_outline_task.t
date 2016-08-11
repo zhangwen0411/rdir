@@ -35,7 +35,7 @@
 
 local ast = require("regent/ast")
 local codegen = require("regent/codegen")
-local data = require("regent/data")
+local data = require("common/data")
 local flow = require("regent/flow")
 local flow_extract_subgraph = require("regent/flow_extract_subgraph")
 local flow_to_ast = require("regent/flow_to_ast")

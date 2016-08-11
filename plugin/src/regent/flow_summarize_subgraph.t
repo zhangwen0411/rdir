@@ -29,7 +29,7 @@
 
 -- Summarize Privileges used in Subgraph of Node
 
-local data = require("regent/data")
+local data = require("common/data")
 local flow = require("regent/flow")
 local std = require("regent/std")
 

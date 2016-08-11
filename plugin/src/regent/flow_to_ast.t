@@ -32,7 +32,7 @@
 -- Conversion from Dataflow IR to AST
 
 local ast = require("regent/ast")
-local data = require("regent/data")
+local data = require("common/data")
 local flow = require("regent/flow")
 local flow_region_tree = require("regent/flow_region_tree")
 local passes_hooks = require("regent/passes_hooks")

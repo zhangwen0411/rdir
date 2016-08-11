@@ -30,7 +30,7 @@
 -- Dataflow-based SPMD Optimization
 
 local ast = require("regent/ast")
-local data = require("regent/data")
+local data = require("common/data")
 local codegen = require("regent/codegen")
 local flow = require("regent/flow")
 local flow_extract_subgraph = require("regent/flow_extract_subgraph")
