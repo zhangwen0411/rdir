@@ -76,21 +76,6 @@ end
 
 local flow_spmd = {}
 
--- Override std.newsymbol to append a unique id to the symbol name
-local newsymbol
-do
-  local next_id = 1
-  function newsymbol(symbol_type, symbol_name)
-    if type(symbol_name) == "string" then
-      symbol_name = symbol_name .. tostring(next_id)
-    elseif type(symbol_type) == "string" then
-      symbol_type = symbol_type .. tostring(next_id)
-    end
-    next_id = next_id + 1
-    return std.newsymbol(symbol_type, symbol_name)
-  end
-end
-
 local function is_leaf(cx, nid)
   local label = cx.graph:node_label(nid)
   if not label:is(flow.node.ctrl.ForNum) and
@@ -1130,7 +1115,7 @@ local function rewrite_shard_partitions(cx)
         local region_type = value_type:parent_region()
         local expr_type = std.list(
           std.region(
-            newsymbol(std.ispace(region_type:ispace().index_type)),
+            std.newsymbol(std.ispace(region_type:ispace().index_type)),
             region_type:fspace()),
           value_type)
         for other_region, _ in pairs(cx.tree.region_universe) do
@@ -1168,7 +1153,7 @@ local function rewrite_shard_partitions(cx)
         if not mapping[region_type] then
           new_region_type = make_fresh_type(graph_cx, region_type, label.value.span)
           mapping[region_type] = new_region_type
-          symbols[region_type] = newsymbol(
+          symbols[region_type] = std.newsymbol(
             mapping[region_type], "shard_" .. tostring(label.value.value))
         else
           new_region_type = mapping[region_type]
@@ -1234,7 +1219,7 @@ local function rewrite_interior_regions(cx, old_type, new_type, new_symbol, make
       local old_indexed_type = old_indexed_label.region_type
 
       local new_indexed_type = make_fresh_type(cx, old_indexed_type, old_indexed_label.value.span)
-      local new_indexed_symbol = newsymbol(new_indexed_type, "scratch_" .. tostring(old_indexed_label.value.value))
+      local new_indexed_symbol = std.newsymbol(new_indexed_type, "scratch_" .. tostring(old_indexed_label.value.value))
       rewrite_interior_regions(cx, old_indexed_type, new_indexed_type, new_indexed_symbol, make_fresh_type)
     end
   end
@@ -1246,7 +1231,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
   local make_fresh_type = function(cx, value_type, span)
     if std.is_region(value_type) then
       local expr_type = std.region(
-        newsymbol(std.ispace(value_type:ispace().index_type)),
+        std.newsymbol(std.ispace(value_type:ispace().index_type)),
         value_type:fspace())
       cx.tree:intern_region_expr(expr_type, ast.default_annotations(), span)
       return expr_type
@@ -1274,7 +1259,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
       fid_label, fid_nid = unpack(scratch_fields[old_type][field_path])
     else
       local fid_type = std.c.legion_field_id_t[1]
-      local fid_symbol = newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
+      local fid_symbol = std.newsymbol(fid_type, "fid_" .. tostring(old_label.value.value) .. tostring(field_path))
       fid_label = make_variable_label(cx, fid_symbol, fid_type, old_label.value.span)
       fid_nid = cx.graph:add_node(fid_label)
       scratch_fields[old_type][field_path] = data.newtuple(fid_label, fid_nid)
@@ -1299,7 +1284,7 @@ local function issue_with_scratch_fields(cx, op, reduction_nids, other_nids,
 
   -- Name the (with scratch fields) type.
   local new_type = name_type
-  local new_symbol = newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
+  local new_symbol = std.newsymbol(new_type, "scratch_" .. tostring(old_label.value.value))
   mapping[old_type] = new_type
 
   name_label = flow.node.Opaque {
@@ -1619,7 +1604,7 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid, op,
     if not intersection_label then
       local intersection_type = std.list(
         std.list(dst_type:subregion_dynamic(), nil, 1), nil, 1)
-      local intersection_symbol = newsymbol(
+      local intersection_symbol = std.newsymbol(
         intersection_type,
         "intersection_" .. tostring(src_label.value.value) .. "_" ..
           tostring(dst_label.value.value))
@@ -1730,7 +1715,7 @@ local function index_phase_barriers(cx, loop_label, bar_list_label)
   local bar_type = bar_list_type.element_type
   local block_bar_list_nid = cx.graph:add_node(bar_list_label)
 
-  local bar_symbol = newsymbol(bar_type, "bar_" .. tostring(bar_list_label.value.value))
+  local bar_symbol = std.newsymbol(bar_type, "bar_" .. tostring(bar_list_label.value.value))
   local bar_label = make_variable_label(
     cx, bar_symbol, bar_type, bar_list_label.value.span) { fresh = true }
   local block_bar_nid = cx.graph:add_node(bar_label)
@@ -1844,7 +1829,7 @@ do
     local constraints = false
     local return_type = int
 
-    local name = data.newtuple("empty_task_" .. tostring(newsymbol(return_type)))
+    local name = data.newtuple("empty_task_" .. tostring(std.newsymbol(return_type)))
     local prototype = std.newtask(name)
     local task_type = {} -> return_type
     prototype:settype(task_type)
@@ -1923,7 +1908,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
     var_nid = inner_sync_points[use_nid]
   else
     local var_type = int
-    local var_symbol = newsymbol(var_type, "inner_sync_point")
+    local var_symbol = std.newsymbol(var_type, "inner_sync_point")
     local var_label = make_variable_label(cx, var_symbol, var_type, use_label.span)
     var_nid = cx.graph:add_node(var_label)
     inner_sync_points[use_nid] = var_nid
@@ -1999,7 +1984,7 @@ local function issue_barrier_await_blocking(cx, bar_nid, use_nid, after_nid, inn
   local task_nid = cx.graph:add_node(task_label)
 
   local scratch_type = int
-  local scratch_symbol = newsymbol(scratch_type)
+  local scratch_symbol = std.newsymbol(scratch_type)
   local scratch_label = make_variable_label(cx, scratch_symbol, scratch_type, use_label.span){ fresh = true }
   local scratch_nid = cx.graph:add_node(scratch_label)
 
@@ -2073,22 +2058,22 @@ local function issue_intersection_copy_synchronization_forwards(
   else
     local bar_type = std.list(std.list(std.phase_barrier))
 
-    local empty_in_symbol = newsymbol(
+    local empty_in_symbol = std.newsymbol(
       bar_type, "empty_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     empty_in = make_variable_label(
       cx, empty_in_symbol, bar_type, dst_label.value.span)
 
-    local empty_out_symbol = newsymbol(
+    local empty_out_symbol = std.newsymbol(
       bar_type, "empty_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     empty_out = make_variable_label(
       cx, empty_out_symbol, bar_type, dst_label.value.span)
 
-    local full_in_symbol = newsymbol(
+    local full_in_symbol = std.newsymbol(
       bar_type, "full_in_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     full_in = make_variable_label(
       cx, full_in_symbol, bar_type, dst_label.value.span)
 
-    local full_out_symbol = newsymbol(
+    local full_out_symbol = std.newsymbol(
       bar_type, "full_out_" .. tostring(dst_label.value.value) .. "_" .. tostring(field_path))
     full_out = make_variable_label(
       cx, full_out_symbol, bar_type, dst_label.value.span)
@@ -2509,7 +2494,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
 
     -- 1. Replicate the target.
     local local_label = make_variable_label(
-      cx, newsymbol(target_type, "local_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(target_type, "local_" .. tostring(target_label.value.value)),
       target_type, target_label.value.span)
     local local_nid = cx.graph:add_node(local_label)
 
@@ -2550,7 +2535,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
     -- 4. Create the collective.
     local collective_type = std.dynamic_collective(target_type)
     local collective_label = make_variable_label(
-      cx, newsymbol(collective_type, "collective_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(collective_type, "collective_" .. tostring(target_label.value.value)),
       collective_type, target_label.value.span)
     local collective_v0_nid = cx.graph:add_node(collective_label)
     local collective_v1_nid = cx.graph:add_node(collective_label)
@@ -2605,7 +2590,7 @@ local function rewrite_scalar_communication_subgraph(cx, loop_nid)
 
     -- 7. Retrieve the collective value and assign to the original target.
     local global_label = make_variable_label(
-      cx, newsymbol(target_type, "global_" .. tostring(target_label.value.value)),
+      cx, std.newsymbol(target_type, "global_" .. tostring(target_label.value.value)),
       target_type, target_label.value.span) { fresh = true }
     local global_nid = cx.graph:add_node(global_label)
 
@@ -2708,7 +2693,7 @@ local function rewrite_shard_intersections(cx, shard_loop, intersections)
       local shallow_type = std.list(
         std.list(intersection_type:subregion_dynamic(), nil, nil, nil, true),
       nil, nil, nil, true)
-      local shallow_symbol = newsymbol(
+      local shallow_symbol = std.newsymbol(
         shallow_type, "shallow_" .. tostring(intersection_label.value.value))
 
       mapping[intersection_type] = shallow_type
@@ -2786,7 +2771,7 @@ end
 local function compute_global_index(block_cx, loop_label, global_index_symbol,
                                     local_index_symbol, shard_part_indices_label)
   if not local_index_symbol then
-    local_index_symbol = newsymbol(loop_label.symbol.symbol_type, "local_index")
+    local_index_symbol = std.newsymbol(loop_label.symbol.symbol_type, "local_index")
   end
   local local_index_label = make_variable_label(
     block_cx, local_index_symbol, local_index_symbol.symbol_type, loop_label.span)
@@ -2928,9 +2913,9 @@ local function rewrite_fornum_loops_in_shard(cx, shard_loop)
 
   -- Make labels for shard-specific variables.
   local shard_nparts_label = make_variable_label(
-    cx, newsymbol(bounds_type, "shard_nparts"), bounds_type, shard_label.span)
+    cx, std.newsymbol(bounds_type, "shard_nparts"), bounds_type, shard_label.span)
   local shard_part_indices_label = make_variable_label(
-    cx, newsymbol(std.list(bounds_type), "shard_part_indices"),
+    cx, std.newsymbol(std.list(bounds_type), "shard_part_indices"),
     std.list(bounds_type), shard_label.span)
 
   -- Replace old bounds with new.
@@ -3005,7 +2990,7 @@ local function replace_forlist_node(cx, forlist_nid,
   local forlist_label = cx.graph:node_label(forlist_nid)
   local global_index = forlist_label.symbol
 
-  local local_index = newsymbol(int, "local_index")
+  local local_index = std.newsymbol(int, "local_index")
   local fornum_label = flow.node.ctrl.ForNum {
     symbol = local_index,
     -- The loop body will need to be rewritten with `local_index` as loop variable.
@@ -3109,9 +3094,9 @@ local function rewrite_forlist_loops_in_shard(cx, shard_loop)
 
   -- Make labels for shard-specific variables.
   local shard_nparts_label = make_variable_label(
-    cx, newsymbol(int, "shard_nparts"), int, shard_label.span)
+    cx, std.newsymbol(int, "shard_nparts"), int, shard_label.span)
   local shard_part_indices_label = make_variable_label(
-    cx, newsymbol(std.list(index_type), "shard_part_indices"),
+    cx, std.newsymbol(std.list(index_type), "shard_part_indices"),
     std.list(index_type), shard_label.span)
 
   -- Replace each ForList loop with a ForNum loop from 0 to `shard_nparts`.
@@ -3141,11 +3126,11 @@ end
 local function make_global_vars(cx, shard_vars, span)
   local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
   local nparts_label = make_variable_label(
-    cx, newsymbol(bounds_type, "nparts"), bounds_type, span)
+    cx, std.newsymbol(bounds_type, "nparts"), bounds_type, span)
 
   local part_indices_type = std.as_read(shard_vars.part_indices.value.expr_type)
   local part_indices_label = make_variable_label(
-    cx, newsymbol(part_indices_type, "part_indices"), part_indices_type, span)
+    cx, std.newsymbol(part_indices_type, "part_indices"), part_indices_type, span)
 
   return { nparts = nparts_label, part_indices = part_indices_label }
 end
@@ -3157,7 +3142,7 @@ local function synchronize_shard_start(cx, shard_loop)
     function(_, label) return label:is(flow.node.Opaque) end)
 
   local barrier_type = std.phase_barrier
-  local barrier_symbol = newsymbol(barrier_type, "start_barrier")
+  local barrier_symbol = std.newsymbol(barrier_type, "start_barrier")
   local barrier_label = make_variable_label(cx, barrier_symbol, barrier_type, shard_label.span)
   local barrier_nid = cx.graph:add_node(barrier_label)
 
@@ -3304,7 +3289,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
         function(_, label) return label:is(flow.node.data) and label.region_type == list_type end)
 
       local new_type = std.list(list_type.element_type, list_type.partition_type, nil, original_type:parent_region())
-      local new_symbol = newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
+      local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(list_label.value.value))
       cx.tree:intern_region_expr(
         new_type, ast.default_annotations(), list_label.value.span)
 
@@ -3361,7 +3346,7 @@ local function rewrite_elided_lists(cx, lists, intersections, barriers,
           old_type.partition_type,
           new_rhs_type.privilege_depth, new_rhs_type.region_root,
           old_type.shallow)
-        local new_symbol = newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
+        local new_symbol = std.newsymbol(new_type, "elided_" .. tostring(old_label.value.value))
         cx.tree:intern_region_expr(
           new_type, ast.default_annotations(), old_label.value.span)
 
@@ -3444,13 +3429,13 @@ local function get_slice_type_and_symbol(cx, region_type, list_type, label)
     cx.tree:intern_region_expr(
       parent_list_type, ast.default_annotations(), label.value.span)
 
-    local parent_list_symbol = newsymbol(
+    local parent_list_symbol = std.newsymbol(
       parent_list_type,
       "parent_" .. tostring(label.value.value))
     return parent_list_type, parent_list_type, parent_list_symbol
   else
     local parent_list_type = std.rawref(&list_type)
-    local parent_list_symbol = newsymbol(
+    local parent_list_symbol = std.newsymbol(
       list_type,
       "parent_" .. tostring(label.value.value))
     local parent_list_region = cx.tree:intern_variable(
@@ -3529,7 +3514,7 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   -- Build the actual shard index.
   local bounds_type = std.as_read(shard_vars.nparts.value.expr_type)
   local index_label = make_variable_label(
-    cx, newsymbol(bounds_type, "shard_index"),
+    cx, std.newsymbol(bounds_type, "shard_index"),
     bounds_type, shard_vars.nparts.value.span)
   local index_nid = cx.graph:add_node(index_label)
 
@@ -3545,7 +3530,7 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   local bound_labels = terralib.newlist()
   for i = 1, 2 do
     local bound_label = make_variable_label(
-      cx, newsymbol(bounds_type, "shard_bound" .. i),
+      cx, std.newsymbol(bounds_type, "shard_bound" .. i),
       bounds_type, index_label.value.span)
     bound_labels:insert(bound_label)
   end
@@ -3640,7 +3625,7 @@ local function rewrite_shard_slices(cx, shard_vars, global_vars, lists,
   -- portions for this shard we're launching.
   local shard_list_indices_type = std.list(bounds_type)
   local shard_list_indices_label = make_variable_label(
-    cx, newsymbol(shard_list_indices_type, "shard_list_indices"),
+    cx, std.newsymbol(shard_list_indices_type, "shard_list_indices"),
     shard_list_indices_type, shard_vars.nparts.value.span)
   local shard_list_indices_nid = cx.graph:add_node(shard_list_indices_label)
   -- `var shard_list_indices = list_range(shard_bound1, shard_bound2)`.
@@ -4173,7 +4158,7 @@ local function issue_zipped_copy_interior(
   local block_cx = cx:new_graph_scope(flow.empty_graph(cx.tree))
 
   local index_type = std.rawref(&int)
-  local index_symbol = newsymbol(int, "index")
+  local index_symbol = std.newsymbol(int, "index")
   local index_label = make_variable_label(
     block_cx, index_symbol, int, span)
   local index_nid = block_cx.graph:add_node(index_label)
@@ -4252,7 +4237,7 @@ local function issue_zipped_copy_interior(
         index_nid, cx.graph:node_result_port(index_nid),
         compute_part_index_nid, 2)
       local part_index_nid = block_cx.graph:add_node(
-        make_variable_label(block_cx, newsymbol(part_index_type),
+        make_variable_label(block_cx, std.newsymbol(part_index_type),
           part_index_type, span) { fresh = true })
       block_cx.graph:add_edge(
         flow.edge.Write(flow.default_mode()),
@@ -4281,7 +4266,7 @@ local function issue_zipped_copy_interior(
     block_src_i_nids[field_path] = block_cx.graph:add_node(
       src_label {
         value = src_label.value {
-          value = newsymbol(block_src_i_type),
+          value = std.newsymbol(block_src_i_type),
           expr_type = block_src_i_type,
         },
       })
@@ -4305,7 +4290,7 @@ local function issue_zipped_copy_interior(
 
     local block_dst_i = flow.node.data.Region(dst_in_label) {
       value = dst_in_label.value {
-        value = newsymbol(block_dst_i_type),
+        value = std.newsymbol(block_dst_i_type),
         expr_type = block_dst_i_type,
       },
     }
@@ -4422,7 +4407,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
 
     -- Check the conditional.
     local cond_type = std.rawref(&int)
-    local cond_symbol = newsymbol(int, "complete_cond")
+    local cond_symbol = std.newsymbol(int, "complete_cond")
     local cond_label = make_variable_label(
       block_cx, cond_symbol, int, span)
     local cond_nid = cx.graph:add_node(cond_label)
@@ -4490,7 +4475,7 @@ local function issue_zipped_copy(cx, src_nids, dst_in_nids, dst_out_nids,
       cond_nid, cx.graph:node_sync_port(cond_nid))
 
     local index_type = std.rawref(&int)
-    local index_symbol = newsymbol(int, "complete_index")
+    local index_symbol = std.newsymbol(int, "complete_index")
     local index_label = make_variable_label(
       block_cx, index_symbol, int, span)
     local index_nid = block_cx.graph:add_node(index_label)
