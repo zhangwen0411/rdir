@@ -46,7 +46,7 @@ local optimize_mapping = require("regent/optimize_mapping")
 local optimize_traces = require("regent/optimize_traces")
 local passes_hooks = require("regent/passes_hooks")
 local pretty = require("regent/pretty")
-local log = require("regent/log")
+local log = require("common/log")
 local std = require("regent/std")
 local vectorize_loops = require("regent/vectorize_loops")
 
