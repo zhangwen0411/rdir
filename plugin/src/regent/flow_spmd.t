@@ -140,7 +140,7 @@ do
       end
     end
 
-    local terra hilbert(p : std.int2d, s : std.rect2d) : int
+    mappings[2] = terra(p : std.int2d, s : std.rect2d) : int
       var size = s:size()
       if size.__ptr.x == 2 * size.__ptr.y then
         var half = size.__ptr.y
@@ -155,7 +155,10 @@ do
       std.assert((size.__ptr.x and (size.__ptr.x - 1)) == 0, "should be power of two")
       return h(p - s.lo, size.__ptr.x, H)
     end
-    mappings[2] = hilbert
+  end
+
+  mappings[3] = terra(p : std.int2d, s : std.rect2d) : int -- Random shuffle.
+    return [std.c.rand]()
   end
 
   local mapping_name = std.config["flow-spmd-mapping"]
