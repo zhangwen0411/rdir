@@ -547,6 +547,19 @@ function flow_to_ast.node_task(cx, nid)
       -- enabling this feature only on loops marked as index launches,
       -- because the optimizer will blow up anyway if any other side
       -- effects occur in the loop body.
+
+      -- What we should probably do instead is change the code
+      -- generation algorithm to explicitly reason about sets of nodes
+      -- at a time. Perhaps something like the following:
+      --
+      --  1. Every node is assigned to a distinct subgraph.
+      --  2. Merge two subgraphs as long as:
+      --      a. the values of consumed nodes are used at most once, and
+      --      b. there are no intervening nodes.
+      --     (Repeat until convergence.)
+      --  3. Iterate subgraphs in topological order. For each subgraph,
+      --     collapse the contained nodes into a single expression.
+
       if cx.block_label and cx.block_label.annotations.parallel:is(ast.annotation.Demand) then
         cx.ast[nid] = action
         return terralib.newlist()
