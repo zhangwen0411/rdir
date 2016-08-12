@@ -41,10 +41,22 @@ local std = require("regent/std")
 local context = {}
 context.__index = context
 
+function context:new_block_scope(label)
+  local cx = {
+    tree = false,
+    graph = false,
+    block_label = label,
+    ast = false,
+    region_ast = false,
+  }
+  return setmetatable(cx, context)
+end
+
 function context:new_graph_scope(graph)
   local cx = {
     tree = graph.region_tree,
     graph = graph,
+    block_label = self.block_label,
     ast = setmetatable({}, {__index = function(t, k) error("no ast for nid " .. tostring(k), 2) end}),
     region_ast = {},
   }
@@ -52,7 +64,9 @@ function context:new_graph_scope(graph)
 end
 
 function context.new_global_scope()
-  local cx = {}
+  local cx = {
+    block_label = false,
+  }
   return setmetatable(cx, context)
 end
 
@@ -514,14 +528,26 @@ function flow_to_ast.node_task(cx, nid)
     local read_nids = cx.graph:outgoing_use_set(result_nid)
     if #read_nids > 0 then
       assert(result.fresh)
-      -- FIXME: This causes unintended reordering of task calls in
-      -- some cases (because the stored AST may be looked up at a
-      -- later point, violating the constraints in the graph).
+      -- FIXME: The most natural way to generate code from a dataflow
+      -- graph is to generate a variable per sub-expression. However,
+      -- since we're generating ASTs (rather than CFGs), this can
+      -- result in output that looks very unlike the original
+      -- input.
 
-      -- And it breaks index launch optimization to do this, so we'll
-      -- turn it off for the moment (and hope it doesn't break
-      -- anything).
-      if true then -- false then
+      -- In particular, the index launch optimization tends to blow up
+      -- if everything doesn't look exactly like it expects. For
+      -- example, if the result of a task call is to be used in a
+      -- reduction, the result of said task should not be assigned to
+      -- an intermediate variable.
+
+      -- To resolve issues like these, this code generator uses a
+      -- trick to collapse sets of dataflow nodes into proper
+      -- expression trees. However, this trick is not safe against
+      -- side effects. For now, we just work around the brokenness by
+      -- enabling this feature only on loops marked as index launches,
+      -- because the optimizer will blow up anyway if any other side
+      -- effects occur in the loop body.
+      if cx.block_label and cx.block_label.annotations.parallel:is(ast.annotation.Demand) then
         cx.ast[nid] = action
         return terralib.newlist()
       else
@@ -776,7 +802,8 @@ end
 
 function flow_to_ast.node_block(cx, nid)
   local label = cx.graph:node_label(nid)
-  local block = flow_to_ast.graph(cx, label.block)
+  local block_cx = cx:new_block_scope(label)
+  local block = flow_to_ast.graph(block_cx, label.block)
 
   return terralib.newlist({
       ast.typed.stat.Block {
@@ -789,7 +816,8 @@ end
 
 function flow_to_ast.node_while_loop(cx, nid)
   local label = cx.graph:node_label(nid)
-  local stats = flow_to_ast.graph(cx, label.block).stats
+  local block_cx = cx:new_block_scope(label)
+  local stats = flow_to_ast.graph(block_cx, label.block).stats
   if #stats == 1 then
     return stats
   elseif #stats == 2 then
@@ -841,7 +869,8 @@ function flow_to_ast.node_for_num(cx, nid)
     values:insert(cx.ast[inputs[i][1].from_node])
   end
 
-  local block = flow_to_ast.graph(cx, label.block)
+  local block_cx = cx:new_block_scope(label)
+  local block = flow_to_ast.graph(block_cx, label.block)
 
   return terralib.newlist({
       ast.typed.stat.ForNum {
@@ -861,7 +890,8 @@ function flow_to_ast.node_for_list(cx, nid)
   assert(rawget(inputs, 1) and #inputs[1] == 1)
   local value = cx.ast[inputs[1][1].from_node]
 
-  local block = flow_to_ast.graph(cx, label.block)
+  local block_cx = cx:new_block_scope(label)
+  local block = flow_to_ast.graph(block_cx, label.block)
 
   return terralib.newlist({
       ast.typed.stat.ForList {
@@ -876,7 +906,8 @@ end
 
 function flow_to_ast.node_must_epoch(cx, nid)
   local label = cx.graph:node_label(nid)
-  local block = flow_to_ast.graph(cx, label.block)
+  local block_cx = cx:new_block_scope(label)
+  local block = flow_to_ast.graph(block_cx, label.block)
 
   return terralib.newlist({
       ast.typed.stat.MustEpoch {
