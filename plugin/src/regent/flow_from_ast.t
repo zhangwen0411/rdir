@@ -1359,31 +1359,13 @@ function analyze_privileges.expr_field_access(cx, node, privilege_map)
     end
   end
 
-  local field_privilege_map = privilege_map:prepend(node.field_name)
-  if std.is_bounded_type(value_type) and value_type:is_ptr() and
-    std.get_field(value_type.points_to_type, node.field_name)
+  if node.field_name == "ispace" or
+    node.field_name == "bounds" or
+    node.field_name == "colors"
   then
-    local bounds = value_type:bounds()
-    for _, parent in ipairs(bounds) do
-      local index
-      -- FIXME: This causes issues with some tests.
-      -- if node.value:is(ast.typed.expr.ID) and
-      --   not std.is_rawref(node.value.expr_type)
-      -- then
-      --   index = node.value
-      -- end
-      local subregion = cx.tree:intern_region_point_expr(
-        parent, index, node.annotations, node.span)
-      usage = privilege_meet(usage, uses(cx, subregion, field_privilege_map))
-    end
-    return privilege_meet(
-      analyze_privileges.expr(cx, node.value, reads),
-      usage)
-  elseif node.field_name == "ispace" or
-         node.field_name == "bounds" or
-         node.field_name == "colors" then
     return privilege_meet(analyze_privileges.expr(cx, node.value, none), usage)
   else
+    local field_privilege_map = privilege_map:prepend(node.field_name)
     return privilege_meet(analyze_privileges.expr(cx, node.value, field_privilege_map), usage)
   end
 end
@@ -2389,34 +2371,12 @@ end
 function flow_from_ast.expr_field_access(cx, node, privilege_map, init_only)
   local value_type = std.as_read(node.value.expr_type)
   local value
+
   local field_privilege_map = privilege_map:prepend(node.field_name)
-  -- FIXME: This code is very messed up, see expr_deref for an
-  -- explanation.
-
-  if -- std.is_bounded_type(value_type) and value_type:is_ptr() then
-  --   local bounds = value_type:bounds()
-  --   if #bounds == 1 and std.is_region(bounds[1]) then
-  --     local parent = bounds[1]
-  --     local index
-  --     -- FIXME: This causes issues with some tests.
-  --     -- if node.value:is(ast.typed.expr.ID) and
-  --     --   not std.is_rawref(node.value.expr_type)
-  --     -- then
-  --     --   index = node.value
-  --     -- end
-  --     local subregion, symbol = cx.tree:intern_region_point_expr(
-  --       parent, index, node.annotations, node.span)
-  --     if not cx:has_region_symbol(subregion) then
-  --       cx:intern_region_point_expr(node, symbol, subregion)
-  --     end
-
-  --     open_region_tree(cx, subregion, nil, field_privilege_map)
-  --   end
-  --   value = flow_from_ast.expr(cx, node.value, reads)
-  -- elseif
-  node.field_name == "ispace" or
-  node.field_name == "bounds" or
-  node.field_name == "colors" then
+  if node.field_name == "ispace" or
+    node.field_name == "bounds" or
+    node.field_name == "colors"
+  then
     value = flow_from_ast.expr(cx, node.value, none)
   else
     value = flow_from_ast.expr(cx, node.value, field_privilege_map)
