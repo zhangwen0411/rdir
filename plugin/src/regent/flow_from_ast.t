@@ -1381,6 +1381,20 @@ function analyze_privileges.expr_index_access(cx, node, privilege_map)
       local symbol = std.newsymbol(expr_type)
       cx:intern_region(node, symbol, node.expr_type)
     end
+  elseif std.is_ref(node.expr_type) then
+    local bounds = node.expr_type:bounds()
+    for _, parent in ipairs(bounds) do
+      local index
+      -- FIXME: This causes issues with some tests.
+      -- if node.value:is(ast.typed.expr.ID) and
+      --   not std.is_rawref(node.value.expr_type)
+      -- then
+      --   index = node.value
+      -- end
+      local subregion = cx.tree:intern_region_point_expr(
+        parent, index, node.annotations, node.span)
+      usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
+    end
   end
   return privilege_meet(
     analyze_privileges.expr(cx, node.value, name(node.value.expr_type)),
@@ -1658,10 +1672,9 @@ function analyze_privileges.expr_binary(cx, node, privilege_map)
 end
 
 function analyze_privileges.expr_deref(cx, node, privilege_map)
-  local value_type = std.as_read(node.value.expr_type)
   local usage
-  if std.is_bounded_type(value_type) then
-    local bounds = value_type:bounds()
+  if std.is_ref(node.expr_type) then
+    local bounds = node.expr_type:bounds()
     for _, parent in ipairs(bounds) do
       local index
       -- FIXME: This causes issues with some tests.
@@ -2390,11 +2403,7 @@ end
 
 function flow_from_ast.expr_index_access(cx, node, privilege_map, init_only)
   local expr_type = std.as_read(node.expr_type)
-  local value_privilege = reads
-  if flow_region_tree.is_region(expr_type) then
-    value_privilege = none
-  end
-  local value = flow_from_ast.expr(cx, node.value, value_privilege)
+  local value = flow_from_ast.expr(cx, node.value, name(node.value.expr_type))
   local index = flow_from_ast.expr(cx, node.index, reads)
 
   if flow_region_tree.is_region(expr_type) then
