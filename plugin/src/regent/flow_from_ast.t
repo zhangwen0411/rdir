@@ -1391,9 +1391,11 @@ function analyze_privileges.expr_index_access(cx, node, privilege_map)
       -- then
       --   index = node.value
       -- end
-      local subregion = cx.tree:intern_region_point_expr(
-        parent, index, node.annotations, node.span)
-      usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
+
+      -- FIXME: See flow_from_ast.expr_deref
+      -- local subregion = cx.tree:intern_region_point_expr(
+      --   parent, index, node.annotations, node.span)
+      usage = privilege_meet(usage, uses(cx, parent, privilege_map))
     end
   end
   return privilege_meet(
@@ -1683,6 +1685,10 @@ function analyze_privileges.expr_deref(cx, node, privilege_map)
       -- then
       --   index = node.value
       -- end
+
+      -- FIXME: This probably *shouldn't* need to do this, but
+      -- something else breaks when this is disabled.
+      -- See flow_from_ast.expr_deref
       local subregion = cx.tree:intern_region_point_expr(
         parent, index, node.annotations, node.span)
       usage = privilege_meet(usage, uses(cx, subregion, privilege_map))
