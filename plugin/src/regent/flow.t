@@ -108,6 +108,7 @@ function graph:node_minimum_port(node)
   if label:is(flow.node.Opaque) or
     label:is(flow.node.Task) or
     label:is(flow.node.Copy) or
+    label:is(flow.node.DuplicatedCopy) or
     label:is(flow.node.Fill) or
     label:is(flow.node.Acquire) or
     label:is(flow.node.Release) or
@@ -962,6 +963,8 @@ flow.node:leaf("Reduce", {"op", "annotations", "span"})
 flow.node:leaf("Task", {"opaque", "expr_type", "annotations", "span"})
 flow.node:leaf("Copy", {"src_field_paths", "dst_field_paths",
                         "op", "annotations", "span"})
+flow.node:leaf("DuplicatedCopy", {"src_field_paths", "dst_field_paths",
+                        "op", "duplicates", "annotations", "span"})
 flow.node:leaf("Fill", {"dst_field_paths", "annotations", "span"})
 flow.node:leaf("Acquire", {"field_paths", "annotations", "span"})
 flow.node:leaf("Release", {"field_paths", "annotations", "span"})

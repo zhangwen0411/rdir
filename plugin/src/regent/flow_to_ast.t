@@ -565,11 +565,13 @@ function flow_to_ast.node_copy(cx, nid)
   local inputs = cx.graph:incoming_edges_by_port(nid)
   local outputs = cx.graph:outgoing_edges_by_port(nid)
   local maxport = get_maxport(inputs)
+  local duplicates = label:is(flow.node.DuplicatedCopy) and label.duplicates or 1
 
   local src = cx.ast[get_arg_node(inputs, 1, true)]
   local dst = cx.ast[get_arg_node(inputs, 2, true)]
 
-  local conditions = terralib.newlist()
+  local await_conditions = terralib.newlist()
+  local arrive_conditions = terralib.newlist()
   for i = 3, maxport do
     local edge = get_arg_edge(inputs, i, false)
     local value = cx.ast[edge.from_node]
@@ -594,26 +596,44 @@ function flow_to_ast.node_copy(cx, nid)
         assert(false)
       end
     end
-    conditions:insert(value)
+    assert(#value.conditions == 1) -- TODO(zhangwen): I don't understand this.
+    if value.conditions[1] == std.awaits then
+      await_conditions:insert(value)
+    elseif value.conditions[1] == std.arrives then
+      arrive_conditions:insert(value)
+    else
+      assert(false)
+    end
   end
 
-  local action = ast.typed.expr.Copy {
-    src = as_expr_region_root(src, label.src_field_paths),
-    dst = as_expr_region_root(dst, label.dst_field_paths),
-    op = label.op,
-    conditions = conditions,
-    expr_type = terralib.types.unit,
-    annotations = label.annotations,
-    span = label.span,
-  }
+  local actions = terralib.newlist({})
+  for i = 1, duplicates do
+    local curr_conditions = terralib.newlist()
+    if i == 1 then
+      curr_conditions:insertall(await_conditions)
+    end
+    if i == duplicates then
+      curr_conditions:insertall(arrive_conditions)
+    end
 
-  return terralib.newlist({
+    local action = ast.typed.expr.Copy {
+      src = as_expr_region_root(src, label.src_field_paths),
+      dst = as_expr_region_root(dst, label.dst_field_paths),
+      op = label.op,
+      conditions = curr_conditions,
+      expr_type = terralib.types.unit,
+      annotations = label.annotations,
+      span = label.span,
+    }
+    actions:insert(
       ast.typed.stat.Expr {
         expr = action,
         annotations = action.annotations,
         span = action.span,
-      },
-  })
+      })
+  end
+
+  return actions
 end
 
 function flow_to_ast.node_fill(cx, nid)
@@ -995,7 +1015,7 @@ function flow_to_ast.node(cx, nid)
   elseif label:is(flow.node.Task) then
     return flow_to_ast.node_task(cx, nid)
 
-  elseif label:is(flow.node.Copy) then
+  elseif label:is(flow.node.Copy) or label:is(flow.node.DuplicatedCopy) then
     return flow_to_ast.node_copy(cx, nid)
 
   elseif label:is(flow.node.Fill) then

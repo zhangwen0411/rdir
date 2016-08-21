@@ -57,6 +57,9 @@ local vectorize_loops = require("regent/vectorize_loops")
 -- to the number of tasks per node.
 local shard_size = std.config["flow-spmd-shardsize"]
 
+local copy_duplicates = std.config["flow-spmd-copy-dups"]
+assert(copy_duplicates >= 1)
+
 -- MAPPINGS
 local spmd_mapping = false
 do
@@ -1752,10 +1755,11 @@ local function issue_intersection_copy(cx, src_nid, dst_in_nid, dst_out_nid, op,
 
   -- Add the copy.
   local field_paths = terralib.newlist({field_path})
-  local copy = flow.node.Copy {
+  local copy = flow.node.DuplicatedCopy {
     src_field_paths = field_paths,
     dst_field_paths = field_paths,
     op = op,
+    duplicates = copy_duplicates,
     annotations = ast.default_annotations(),
     span = src_label.value.span,
   }
@@ -1870,7 +1874,7 @@ local function issue_barrier_arrive(cx, bar_nid, use_nid)
   if use_label:is(flow.node.ctrl.ForNum) or use_label:is(flow.node.ctrl.ForList) then
     issue_barrier_arrive_loop(cx, bar_nid, use_nid)
   elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
-                use_label:is(flow.node.Close))
+                use_label:is(flow.node.DuplicatedCopy) or use_label:is(flow.node.Close))
   then
     print("FIXME: Issued arrive on " .. tostring(use_label:type()))
   end
@@ -1906,7 +1910,7 @@ local function issue_barrier_await(cx, bar_nid, use_nid)
   if use_label:is(flow.node.ctrl.ForNum) or use_label:is(flow.node.ctrl.ForList) then
     issue_barrier_await_loop(cx, bar_nid, use_nid)
   elseif not (use_label:is(flow.node.Task) or use_label:is(flow.node.Copy) or
-                use_label:is(flow.node.Close))
+                use_label:is(flow.node.DuplicatedCopy) or use_label:is(flow.node.Close))
   then
     print("FIXME: Issued arrive on " .. tostring(use_label:type()))
   end
